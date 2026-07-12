@@ -22,8 +22,8 @@ async function hmacSha256Hex(secret: string, msg: string): Promise<string> {
 }
 
 function creds() {
-  const apiKey = process.env.BINANCE_TESTNET_API_KEY;
-  const apiSecret = process.env.BINANCE_TESTNET_SECRET;
+  const apiKey = process.env.BINANCE_TESTNET_API_KEY?.trim();
+  const apiSecret = process.env.BINANCE_TESTNET_SECRET?.trim();
   if (!apiKey || !apiSecret) {
     throw new Error("Binance testnet credentials are not configured.");
   }
