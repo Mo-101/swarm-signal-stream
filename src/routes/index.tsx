@@ -905,8 +905,7 @@ function LivePanel({
           <p className="text-xs text-muted-foreground">Loading account…</p>
         ) : status.error || status.message ? (
           <LiveErrorPanel status={status} />
-        ) : status.message ? (
-          <p className="text-xs text-bear">⚠ {status.message}</p>
+
 
         ) : (
           <div className="flex flex-wrap gap-2">
