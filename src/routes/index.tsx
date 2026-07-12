@@ -507,6 +507,7 @@ function SwarmDashboard() {
           {tab === "live" && (
             <LivePanel
               enabled={liveMode}
+              provider={liveProvider}
               status={liveStatus}
               positions={livePositions}
               log={liveLog}
