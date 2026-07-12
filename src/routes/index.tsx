@@ -6,6 +6,12 @@ import {
   type SymbolState,
   type TradeProposal,
 } from "@/lib/swarm";
+import {
+  PaperBroker,
+  DEFAULT_PAPER_CONFIG,
+  type Position,
+  type ClosedTrade,
+} from "@/lib/paper-broker";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -14,13 +20,13 @@ export const Route = createFileRoute("/")({
       {
         name: "description",
         content:
-          "Real-time AI trading swarm streaming every Binance USDT-M perpetual future. Trend, mean-reversion, breakout, and meme-sentiment agents vote on live signals.",
+          "Real-time AI trading swarm streaming every Binance USDT-M perpetual future with paper-trading execution, SL/TP, and PnL tracking.",
       },
       { property: "og:title", content: "Swarm Terminal — Live USDT-M Perp Signals" },
       {
         property: "og:description",
         content:
-          "Live consensus signals from a swarm of AI trading agents across every Binance USDT-M perpetual future. Paper mode.",
+          "Live consensus signals with paper execution across every Binance USDT-M perpetual future.",
       },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
@@ -35,11 +41,16 @@ function formatPrice(p: number): string {
   if (p >= 0.01) return p.toFixed(5);
   return p.toPrecision(4);
 }
-
-function formatTime(ms: number): string {
-  const d = new Date(ms);
-  return d.toLocaleTimeString([], { hour12: false });
+function formatUsd(v: number): string {
+  const sign = v < 0 ? "-" : "";
+  const abs = Math.abs(v);
+  return `${sign}$${abs.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
+function formatTime(ms: number): string {
+  return new Date(ms).toLocaleTimeString([], { hour12: false });
+}
+
+type Tab = "signals" | "positions" | "history" | "board";
 
 function SwarmDashboard() {
   const [symbols, setSymbols] = useState<string[]>([]);
@@ -51,71 +62,92 @@ function SwarmDashboard() {
   const [proposals, setProposals] = useState<TradeProposal[]>([]);
   const [ticks, setTicks] = useState(0);
   const [board, setBoard] = useState<SymbolState[]>([]);
+  const [positions, setPositions] = useState<Position[]>([]);
+  const [closed, setClosed] = useState<ClosedTrade[]>([]);
+  const [realized, setRealized] = useState(0);
+  const [unrealized, setUnrealized] = useState(0);
+  const [halted, setHalted] = useState<string | null>(null);
+  const [tab, setTab] = useState<Tab>("signals");
   const [query, setQuery] = useState("");
-  const [sortBy, setSortBy] = useState<"change" | "updates">("change");
 
   const engineRef = useRef<SwarmEngine | null>(null);
+  const brokerRef = useRef<PaperBroker | null>(null);
+  const marksRef = useRef<Map<string, number>>(new Map());
   const tickCounter = useRef(0);
 
   useEffect(() => {
-    let cancelled = false;
     const ac = new AbortController();
-    (async () => {
-      try {
-        const syms = await fetchPerpetualSymbols(ac.signal);
-        if (cancelled) return;
-        setSymbols(syms);
-      } catch (e) {
-        if (cancelled) return;
-        setError(
-          e instanceof Error ? e.message : "Failed to load symbols from Binance.",
-        );
-      }
-    })();
-    return () => {
-      cancelled = true;
-      ac.abort();
-    };
+    fetchPerpetualSymbols(ac.signal)
+      .then(setSymbols)
+      .catch((e) =>
+        setError(e instanceof Error ? e.message : "Failed to load symbols."),
+      );
+    return () => ac.abort();
   }, []);
 
   useEffect(() => {
     if (symbols.length === 0) return;
+
+    const broker = new PaperBroker(DEFAULT_PAPER_CONFIG, {
+      onHalt: (msg) => setHalted(msg),
+    });
+    brokerRef.current = broker;
+
     const engine = new SwarmEngine(symbols, {
-      onTick: () => {
+      onTick: (t) => {
         tickCounter.current += 1;
+        marksRef.current.set(t.symbol, t.price);
+        broker.markPrice(t.symbol, t.price, t.time);
       },
       onProposal: (p) => {
-        setProposals((prev) => [p, ...prev].slice(0, 60));
+        setProposals((prev) => [p, ...prev].slice(0, 80));
+        broker.onProposal(p);
       },
       onStatus: (s) => setStatus(s),
     });
     engineRef.current = engine;
     engine.start();
 
-    const boardInterval = setInterval(() => {
+    const iv = setInterval(() => {
       setTicks(tickCounter.current);
       setBoard(engine.getState());
+      setPositions(broker.getPositions());
+      setClosed(broker.getClosed());
+      setRealized(broker.getRealizedPnl());
+      setUnrealized(broker.getUnrealizedPnl(marksRef.current));
     }, 500);
 
     return () => {
-      clearInterval(boardInterval);
+      clearInterval(iv);
       engine.stop();
       engineRef.current = null;
+      brokerRef.current = null;
     };
   }, [symbols]);
 
-  const filtered = useMemo(() => {
+  const equity = DEFAULT_PAPER_CONFIG.startingBalance + realized + unrealized;
+  const equityPct = ((equity - DEFAULT_PAPER_CONFIG.startingBalance) /
+    DEFAULT_PAPER_CONFIG.startingBalance) *
+    100;
+
+  const wins = closed.filter((t) => t.pnl > 0).length;
+  const winRate = closed.length ? (wins / closed.length) * 100 : 0;
+
+  const filteredBoard = useMemo(() => {
     const q = query.trim().toUpperCase();
     const rows = q ? board.filter((r) => r.symbol.includes(q)) : board;
-    const sorted = [...rows].sort((a, b) => {
-      if (sortBy === "change") return Math.abs(b.change1m) - Math.abs(a.change1m);
-      return b.updates - a.updates;
-    });
-    return sorted.slice(0, 60);
-  }, [board, query, sortBy]);
+    return [...rows]
+      .sort((a, b) => Math.abs(b.change1m) - Math.abs(a.change1m))
+      .slice(0, 60);
+  }, [board, query]);
 
-  const buyCount = proposals.filter((p) => p.direction === "BUY").length;
-  const sellCount = proposals.length - buyCount;
+  const closeAll = () => {
+    brokerRef.current?.closeAll(marksRef.current, Date.now());
+  };
+  const resetBroker = () => {
+    brokerRef.current?.reset();
+    setHalted(null);
+  };
 
   return (
     <main className="min-h-screen bg-background text-foreground">
@@ -128,119 +160,130 @@ function SwarmDashboard() {
                 Swarm Terminal
               </h1>
               <p className="text-xs text-muted-foreground">
-                Live consensus across every Binance USDT-M perpetual future ·
-                paper mode
+                Live consensus + paper execution across every Binance USDT-M
+                perpetual · SL {(DEFAULT_PAPER_CONFIG.slPct * 100).toFixed(1)}% /
+                TP {(DEFAULT_PAPER_CONFIG.tpPct * 100).toFixed(1)}%
               </p>
             </div>
           </div>
           <div className="flex flex-wrap gap-2">
-            <Stat label="Symbols" value={symbols.length.toString()} />
+            <Stat
+              label="Equity"
+              value={formatUsd(equity)}
+              sub={`${equityPct >= 0 ? "+" : ""}${equityPct.toFixed(2)}%`}
+              tone={equity >= DEFAULT_PAPER_CONFIG.startingBalance ? "bull" : "bear"}
+            />
+            <Stat
+              label="Realized"
+              value={formatUsd(realized)}
+              tone={realized >= 0 ? "bull" : "bear"}
+            />
+            <Stat
+              label="Unrealized"
+              value={formatUsd(unrealized)}
+              tone={unrealized >= 0 ? "bull" : "bear"}
+            />
+            <Stat label="Open" value={`${positions.length}/${DEFAULT_PAPER_CONFIG.maxPositions}`} />
+            <Stat label="Trades" value={closed.length.toString()} />
+            <Stat
+              label="Win%"
+              value={closed.length ? `${winRate.toFixed(0)}%` : "—"}
+              tone={winRate >= 50 ? "bull" : "bear"}
+            />
             <Stat
               label="WS"
               value={`${status.connected}/${status.total}`}
-              tone={status.connected === status.total && status.total > 0 ? "bull" : "neutral"}
+              tone={
+                status.connected === status.total && status.total > 0
+                  ? "bull"
+                  : "neutral"
+              }
             />
             <Stat label="Ticks" value={ticks.toLocaleString()} />
-            <Stat label="Signals" value={proposals.length.toString()} />
-            <Stat label="Buy" value={buyCount.toString()} tone="bull" />
-            <Stat label="Sell" value={sellCount.toString()} tone="bear" />
           </div>
         </div>
       </header>
 
-      {error && (
-        <div className="mx-auto max-w-[1600px] px-6 pt-4">
-          <div className="rounded-md border border-bear/40 bg-bear/10 px-4 py-2 text-sm text-bear">
-            {error}
-          </div>
+      {(error || halted) && (
+        <div className="mx-auto max-w-[1600px] space-y-2 px-6 pt-4">
+          {error && (
+            <div className="rounded-md border border-bear/40 bg-bear/10 px-4 py-2 text-sm text-bear">
+              {error}
+            </div>
+          )}
+          {halted && (
+            <div className="flex items-center justify-between rounded-md border border-accent/40 bg-accent/10 px-4 py-2 text-sm text-accent">
+              <span>⚠ {halted}</span>
+              <button
+                onClick={resetBroker}
+                className="rounded border border-accent/40 px-2 py-0.5 text-xs hover:bg-accent/20"
+              >
+                Reset
+              </button>
+            </div>
+          )}
         </div>
       )}
 
-      <div className="mx-auto grid max-w-[1600px] gap-4 px-6 py-6 lg:grid-cols-[1fr_1fr]">
-        {/* Signals feed */}
-        <section className="rounded-lg border border-border bg-card">
-          <div className="flex items-center justify-between border-b border-border px-4 py-3">
-            <div>
-              <h2 className="text-sm font-semibold">Trade Signals</h2>
-              <p className="text-xs text-muted-foreground">
-                Weighted consensus of Trend, MeanRev, Breakout, Meme agents
-              </p>
-            </div>
-            <span className="rounded-md bg-muted px-2 py-1 font-mono text-[10px] text-muted-foreground">
-              threshold 0.60
-            </span>
-          </div>
-          <div className="max-h-[70vh] overflow-y-auto">
-            {proposals.length === 0 ? (
-              <EmptyState label="Waiting for consensus signals…" />
-            ) : (
-              <ul className="divide-y divide-border">
-                {proposals.map((p) => (
-                  <SignalRow key={p.id} proposal={p} />
-                ))}
-              </ul>
-            )}
-          </div>
-        </section>
-
-        {/* Market board */}
-        <section className="rounded-lg border border-border bg-card">
-          <div className="flex items-center justify-between gap-3 border-b border-border px-4 py-3">
-            <div>
-              <h2 className="text-sm font-semibold">Market Board</h2>
-              <p className="text-xs text-muted-foreground">
-                Streaming ticks · sorted by {sortBy === "change" ? "|1m change|" : "activity"}
-              </p>
-            </div>
-            <div className="flex gap-2">
-              <input
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder="Filter…"
-                className="w-28 rounded-md border border-border bg-background px-2 py-1 font-mono text-xs outline-none focus:border-primary"
-              />
-              <select
-                value={sortBy}
-                onChange={(e) => setSortBy(e.target.value as "change" | "updates")}
-                className="rounded-md border border-border bg-background px-2 py-1 font-mono text-xs outline-none focus:border-primary"
+      <div className="mx-auto max-w-[1600px] px-6 py-6">
+        <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
+          <div className="flex gap-1 rounded-lg border border-border bg-card p-1">
+            {(["signals", "positions", "history", "board"] as Tab[]).map((t) => (
+              <button
+                key={t}
+                onClick={() => setTab(t)}
+                className={`rounded-md px-3 py-1.5 text-xs font-medium capitalize transition-colors ${
+                  tab === t
+                    ? "bg-primary text-primary-foreground"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
               >
-                <option value="change">Movers</option>
-                <option value="updates">Activity</option>
-              </select>
-            </div>
+                {t}
+                {t === "signals" && ` (${proposals.length})`}
+                {t === "positions" && ` (${positions.length})`}
+                {t === "history" && ` (${closed.length})`}
+              </button>
+            ))}
           </div>
-          <div className="max-h-[70vh] overflow-y-auto">
-            {filtered.length === 0 ? (
-              <EmptyState label="Connecting streams…" />
-            ) : (
-              <table className="w-full text-sm">
-                <thead className="sticky top-0 bg-card text-xs text-muted-foreground">
-                  <tr className="border-b border-border">
-                    <th className="px-4 py-2 text-left font-medium">Symbol</th>
-                    <th className="px-4 py-2 text-right font-medium">Price</th>
-                    <th className="px-4 py-2 text-right font-medium">1m Δ</th>
-                    <th className="px-4 py-2 text-right font-medium">Ticks</th>
-                    <th className="px-4 py-2 text-right font-medium">Last</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {filtered.map((row) => (
-                    <BoardRow key={row.symbol} row={row} />
-                  ))}
-                </tbody>
-              </table>
+          <div className="flex gap-2">
+            {positions.length > 0 && (
+              <button
+                onClick={closeAll}
+                className="rounded-md border border-bear/40 bg-bear/10 px-3 py-1.5 text-xs font-medium text-bear hover:bg-bear/20"
+              >
+                Close all ({positions.length})
+              </button>
             )}
+            <button
+              onClick={resetBroker}
+              className="rounded-md border border-border bg-card px-3 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground"
+            >
+              Reset paper account
+            </button>
           </div>
+        </div>
+
+        <section className="rounded-lg border border-border bg-card">
+          {tab === "signals" && <SignalsPanel proposals={proposals} />}
+          {tab === "positions" && (
+            <PositionsPanel positions={positions} marks={marksRef.current} />
+          )}
+          {tab === "history" && <HistoryPanel closed={closed} />}
+          {tab === "board" && (
+            <BoardPanel rows={filteredBoard} query={query} setQuery={setQuery} />
+          )}
         </section>
       </div>
 
       <footer className="mx-auto max-w-[1600px] px-6 pb-8">
         <p className="text-[11px] leading-relaxed text-muted-foreground">
-          Data: Binance USDT-M Futures public WebSocket (aggTrade). This is a
-          research and monitoring surface — no orders are placed. Consensus is
-          computed browser-side across a weighted ensemble; agents are stateless
-          skill evaluators that ingest short rolling price and notional-volume
-          windows per symbol and vote each cycle.
+          Paper trading against live Binance USDT-M aggTrade streams. Position
+          sizing = (equity × {(DEFAULT_PAPER_CONFIG.riskPerTrade * 100).toFixed(1)}%
+          × confidence) / stop distance. SL/TP simulated against the live mark;
+          fills assumed at signal price. New entries pause automatically if
+          realized PnL drops by{" "}
+          {(DEFAULT_PAPER_CONFIG.maxDailyDrawdown * 100).toFixed(0)}%. No real
+          orders are placed.
         </p>
       </footer>
     </main>
@@ -250,10 +293,12 @@ function SwarmDashboard() {
 function Stat({
   label,
   value,
+  sub,
   tone = "default",
 }: {
   label: string;
   value: string;
+  sub?: string;
   tone?: "default" | "bull" | "bear" | "neutral";
 }) {
   const toneClass =
@@ -269,7 +314,12 @@ function Stat({
       <div className="text-[10px] uppercase tracking-wide text-muted-foreground">
         {label}
       </div>
-      <div className={`font-mono text-sm tabular ${toneClass}`}>{value}</div>
+      <div className={`font-mono text-sm tabular ${toneClass}`}>
+        {value}
+        {sub && (
+          <span className="ml-1.5 text-[10px] text-muted-foreground">{sub}</span>
+        )}
+      </div>
     </div>
   );
 }
@@ -278,6 +328,294 @@ function EmptyState({ label }: { label: string }) {
   return (
     <div className="flex items-center justify-center px-4 py-16 text-sm text-muted-foreground">
       {label}
+    </div>
+  );
+}
+
+function SignalsPanel({ proposals }: { proposals: TradeProposal[] }) {
+  return (
+    <>
+      <PanelHeader
+        title="Trade Signals"
+        subtitle="Weighted consensus of Trend, MeanRev, Breakout, Meme agents"
+        badge="threshold 0.60"
+      />
+      <div className="max-h-[70vh] overflow-y-auto">
+        {proposals.length === 0 ? (
+          <EmptyState label="Waiting for consensus signals…" />
+        ) : (
+          <ul className="divide-y divide-border">
+            {proposals.map((p) => (
+              <SignalRow key={p.id} proposal={p} />
+            ))}
+          </ul>
+        )}
+      </div>
+    </>
+  );
+}
+
+function PositionsPanel({
+  positions,
+  marks,
+}: {
+  positions: Position[];
+  marks: Map<string, number>;
+}) {
+  return (
+    <>
+      <PanelHeader
+        title="Open Positions"
+        subtitle="Live mark-to-market with SL/TP simulation"
+      />
+      <div className="max-h-[70vh] overflow-y-auto">
+        {positions.length === 0 ? (
+          <EmptyState label="No open positions. Waiting for high-confidence signals…" />
+        ) : (
+          <table className="w-full text-sm">
+            <thead className="sticky top-0 bg-card text-xs text-muted-foreground">
+              <tr className="border-b border-border">
+                <th className="px-4 py-2 text-left font-medium">Symbol</th>
+                <th className="px-4 py-2 text-left font-medium">Side</th>
+                <th className="px-4 py-2 text-right font-medium">Entry</th>
+                <th className="px-4 py-2 text-right font-medium">Mark</th>
+                <th className="px-4 py-2 text-right font-medium">Size</th>
+                <th className="px-4 py-2 text-right font-medium">SL</th>
+                <th className="px-4 py-2 text-right font-medium">TP</th>
+                <th className="px-4 py-2 text-right font-medium">uPnL</th>
+              </tr>
+            </thead>
+            <tbody>
+              {positions.map((p) => {
+                const mark = marks.get(p.symbol) ?? p.entryPrice;
+                const pnl =
+                  p.side === "BUY"
+                    ? (mark - p.entryPrice) * p.size
+                    : (p.entryPrice - mark) * p.size;
+                const pnlPct = (pnl / (p.entryPrice * p.size)) * 100;
+                const tone = pnl >= 0 ? "text-bull" : "text-bear";
+                return (
+                  <tr key={p.id} className="border-b border-border/50">
+                    <td className="px-4 py-1.5 font-mono text-xs">{p.symbol}</td>
+                    <td className="px-4 py-1.5">
+                      <span
+                        className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold ${
+                          p.side === "BUY"
+                            ? "bg-bull/15 text-bull"
+                            : "bg-bear/15 text-bear"
+                        }`}
+                      >
+                        {p.side}
+                      </span>
+                    </td>
+                    <td className="px-4 py-1.5 text-right font-mono text-xs tabular">
+                      {formatPrice(p.entryPrice)}
+                    </td>
+                    <td className="px-4 py-1.5 text-right font-mono text-xs tabular">
+                      {formatPrice(mark)}
+                    </td>
+                    <td className="px-4 py-1.5 text-right font-mono text-xs tabular text-muted-foreground">
+                      {p.size.toFixed(4)}
+                    </td>
+                    <td className="px-4 py-1.5 text-right font-mono text-xs tabular text-bear">
+                      {formatPrice(p.stopLoss)}
+                    </td>
+                    <td className="px-4 py-1.5 text-right font-mono text-xs tabular text-bull">
+                      {formatPrice(p.takeProfit)}
+                    </td>
+                    <td className={`px-4 py-1.5 text-right font-mono text-xs tabular ${tone}`}>
+                      {formatUsd(pnl)}{" "}
+                      <span className="text-[10px] text-muted-foreground">
+                        ({pnlPct >= 0 ? "+" : ""}
+                        {pnlPct.toFixed(2)}%)
+                      </span>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </>
+  );
+}
+
+function HistoryPanel({ closed }: { closed: ClosedTrade[] }) {
+  return (
+    <>
+      <PanelHeader title="Closed Trades" subtitle="Realized PnL history" />
+      <div className="max-h-[70vh] overflow-y-auto">
+        {closed.length === 0 ? (
+          <EmptyState label="No closed trades yet." />
+        ) : (
+          <table className="w-full text-sm">
+            <thead className="sticky top-0 bg-card text-xs text-muted-foreground">
+              <tr className="border-b border-border">
+                <th className="px-4 py-2 text-left font-medium">Time</th>
+                <th className="px-4 py-2 text-left font-medium">Symbol</th>
+                <th className="px-4 py-2 text-left font-medium">Side</th>
+                <th className="px-4 py-2 text-right font-medium">Entry → Exit</th>
+                <th className="px-4 py-2 text-left font-medium">Reason</th>
+                <th className="px-4 py-2 text-right font-medium">PnL</th>
+              </tr>
+            </thead>
+            <tbody>
+              {closed.map((t) => {
+                const tone = t.pnl >= 0 ? "text-bull" : "text-bear";
+                const reasonTone =
+                  t.reason === "TP"
+                    ? "bg-bull/15 text-bull"
+                    : t.reason === "SL"
+                      ? "bg-bear/15 text-bear"
+                      : "bg-muted text-muted-foreground";
+                return (
+                  <tr key={t.id + t.closedAt} className="border-b border-border/50">
+                    <td className="px-4 py-1.5 font-mono text-[11px] text-muted-foreground">
+                      {formatTime(t.closedAt)}
+                    </td>
+                    <td className="px-4 py-1.5 font-mono text-xs">{t.symbol}</td>
+                    <td className="px-4 py-1.5">
+                      <span
+                        className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold ${
+                          t.side === "BUY"
+                            ? "bg-bull/15 text-bull"
+                            : "bg-bear/15 text-bear"
+                        }`}
+                      >
+                        {t.side}
+                      </span>
+                    </td>
+                    <td className="px-4 py-1.5 text-right font-mono text-xs tabular">
+                      {formatPrice(t.entryPrice)} →{" "}
+                      <span className="text-foreground">{formatPrice(t.exitPrice)}</span>
+                    </td>
+                    <td className="px-4 py-1.5">
+                      <span
+                        className={`rounded px-1.5 py-0.5 font-mono text-[10px] ${reasonTone}`}
+                      >
+                        {t.reason}
+                      </span>
+                    </td>
+                    <td className={`px-4 py-1.5 text-right font-mono text-xs tabular ${tone}`}>
+                      {formatUsd(t.pnl)}{" "}
+                      <span className="text-[10px] text-muted-foreground">
+                        ({t.pnlPct >= 0 ? "+" : ""}
+                        {t.pnlPct.toFixed(2)}%)
+                      </span>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </>
+  );
+}
+
+function BoardPanel({
+  rows,
+  query,
+  setQuery,
+}: {
+  rows: SymbolState[];
+  query: string;
+  setQuery: (v: string) => void;
+}) {
+  return (
+    <>
+      <div className="flex items-center justify-between gap-3 border-b border-border px-4 py-3">
+        <div>
+          <h2 className="text-sm font-semibold">Market Board</h2>
+          <p className="text-xs text-muted-foreground">
+            Top movers by |1m change|
+          </p>
+        </div>
+        <input
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          placeholder="Filter…"
+          className="w-32 rounded-md border border-border bg-background px-2 py-1 font-mono text-xs outline-none focus:border-primary"
+        />
+      </div>
+      <div className="max-h-[70vh] overflow-y-auto">
+        {rows.length === 0 ? (
+          <EmptyState label="Connecting streams…" />
+        ) : (
+          <table className="w-full text-sm">
+            <thead className="sticky top-0 bg-card text-xs text-muted-foreground">
+              <tr className="border-b border-border">
+                <th className="px-4 py-2 text-left font-medium">Symbol</th>
+                <th className="px-4 py-2 text-right font-medium">Price</th>
+                <th className="px-4 py-2 text-right font-medium">1m Δ</th>
+                <th className="px-4 py-2 text-right font-medium">Ticks</th>
+                <th className="px-4 py-2 text-right font-medium">Last</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.map((row) => {
+                const up = row.lastPrice > row.prevPrice;
+                const down = row.lastPrice < row.prevPrice;
+                const changeClass =
+                  row.change1m > 0
+                    ? "text-bull"
+                    : row.change1m < 0
+                      ? "text-bear"
+                      : "text-muted-foreground";
+                return (
+                  <tr
+                    key={row.symbol}
+                    className={`border-b border-border/50 ${up ? "flash-bull" : down ? "flash-bear" : ""}`}
+                  >
+                    <td className="px-4 py-1.5 font-mono text-xs">{row.symbol}</td>
+                    <td className="px-4 py-1.5 text-right font-mono text-xs tabular">
+                      {formatPrice(row.lastPrice)}
+                    </td>
+                    <td className={`px-4 py-1.5 text-right font-mono text-xs tabular ${changeClass}`}>
+                      {row.change1m >= 0 ? "+" : ""}
+                      {row.change1m.toFixed(2)}%
+                    </td>
+                    <td className="px-4 py-1.5 text-right font-mono text-xs tabular text-muted-foreground">
+                      {row.updates}
+                    </td>
+                    <td className="px-4 py-1.5 text-right font-mono text-xs tabular text-muted-foreground">
+                      {formatTime(row.lastTime)}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </div>
+    </>
+  );
+}
+
+function PanelHeader({
+  title,
+  subtitle,
+  badge,
+}: {
+  title: string;
+  subtitle?: string;
+  badge?: string;
+}) {
+  return (
+    <div className="flex items-center justify-between border-b border-border px-4 py-3">
+      <div>
+        <h2 className="text-sm font-semibold">{title}</h2>
+        {subtitle && (
+          <p className="text-xs text-muted-foreground">{subtitle}</p>
+        )}
+      </div>
+      {badge && (
+        <span className="rounded-md bg-muted px-2 py-1 font-mono text-[10px] text-muted-foreground">
+          {badge}
+        </span>
+      )}
     </div>
   );
 }
@@ -306,14 +644,10 @@ function SignalRow({ proposal }: { proposal: TradeProposal }) {
           </div>
         </div>
         <div className="mt-0.5 flex items-baseline gap-3 text-xs text-muted-foreground">
-          <span className="font-mono tabular">
-            @ {formatPrice(proposal.price)}
-          </span>
+          <span className="font-mono tabular">@ {formatPrice(proposal.price)}</span>
           <span>
             conf{" "}
-            <span
-              className={`font-mono ${isBuy ? "text-bull" : "text-bear"}`}
-            >
+            <span className={`font-mono ${isBuy ? "text-bull" : "text-bear"}`}>
               {proposal.confidence.toFixed(2)}
             </span>
           </span>
@@ -336,33 +670,5 @@ function SignalRow({ proposal }: { proposal: TradeProposal }) {
         )}
       </div>
     </li>
-  );
-}
-
-function BoardRow({ row }: { row: SymbolState }) {
-  const up = row.lastPrice > row.prevPrice;
-  const down = row.lastPrice < row.prevPrice;
-  const changeClass =
-    row.change1m > 0 ? "text-bull" : row.change1m < 0 ? "text-bear" : "text-muted-foreground";
-  return (
-    <tr
-      key={`${row.symbol}-${row.lastTime}`}
-      className={`border-b border-border/50 ${up ? "flash-bull" : down ? "flash-bear" : ""}`}
-    >
-      <td className="px-4 py-1.5 font-mono text-xs">{row.symbol}</td>
-      <td className="px-4 py-1.5 text-right font-mono text-xs tabular">
-        {formatPrice(row.lastPrice)}
-      </td>
-      <td className={`px-4 py-1.5 text-right font-mono text-xs tabular ${changeClass}`}>
-        {row.change1m >= 0 ? "+" : ""}
-        {row.change1m.toFixed(2)}%
-      </td>
-      <td className="px-4 py-1.5 text-right font-mono text-xs tabular text-muted-foreground">
-        {row.updates}
-      </td>
-      <td className="px-4 py-1.5 text-right font-mono text-xs tabular text-muted-foreground">
-        {formatTime(row.lastTime)}
-      </td>
-    </tr>
   );
 }
