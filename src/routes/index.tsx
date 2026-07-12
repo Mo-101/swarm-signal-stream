@@ -310,19 +310,33 @@ function SwarmDashboard() {
       <header className="border-b border-border">
         <div className="mx-auto flex max-w-[1600px] flex-wrap items-center justify-between gap-4 px-6 py-4">
           <div className="flex items-center gap-3">
-            <div className="live-dot h-2.5 w-2.5 rounded-full bg-bull" />
+            <div className={`live-dot h-2.5 w-2.5 rounded-full ${liveMode ? "bg-accent" : "bg-bull"}`} />
             <div>
               <h1 className="text-lg font-semibold tracking-tight">
                 Swarm Terminal
               </h1>
               <p className="text-xs text-muted-foreground">
-                Live consensus + paper execution across every Binance USDT-M
-                perpetual · SL {(DEFAULT_PAPER_CONFIG.slPct * 100).toFixed(1)}% /
-                TP {(DEFAULT_PAPER_CONFIG.tpPct * 100).toFixed(1)}%
+                {liveMode
+                  ? `LIVE TESTNET · orders placed at conf ≥ ${LIVE_CONFIDENCE_THRESHOLD} · $${LIVE_NOTIONAL_USD} @ ${LIVE_LEVERAGE}× · SL ${(LIVE_SL_PCT * 100).toFixed(1)}% / TP ${(LIVE_TP_PCT * 100).toFixed(1)}%`
+                  : `Paper execution · SL ${(DEFAULT_PAPER_CONFIG.slPct * 100).toFixed(1)}% / TP ${(DEFAULT_PAPER_CONFIG.tpPct * 100).toFixed(1)}%`}
               </p>
             </div>
           </div>
-          <div className="flex flex-wrap gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              onClick={() => {
+                setLiveMode((v) => !v);
+                if (!liveMode) setTab("live");
+              }}
+              className={`rounded-md border px-3 py-1.5 text-xs font-semibold transition-colors ${
+                liveMode
+                  ? "border-accent bg-accent/20 text-accent"
+                  : "border-border bg-card text-muted-foreground hover:text-foreground"
+              }`}
+              title="Toggle Binance testnet live trading"
+            >
+              {liveMode ? "● LIVE TESTNET" : "○ Paper mode"}
+            </button>
             <Stat
               label="Equity"
               value={formatUsd(equity)}
