@@ -1,0 +1,443 @@
+// Server-side Bybit V5 USDT-perpetual TESTNET trading.
+// Signs requests with HMAC-SHA256 via Web Crypto. Uses api-testnet.bybit.com.
+
+import { createServerFn } from "@tanstack/react-start";
+
+const BASE = "https://api-testnet.bybit.com";
+const RECV_WINDOW = "5000";
+
+const KEY_HELP =
+  "Use a Bybit Testnet key from testnet.bybit.com (Account > API) and save only the raw key text, not a .env line or quotes.";
+
+async function hmacSha256Hex(secret: string, msg: string): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const sig = await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(msg));
+  return Array.from(new Uint8Array(sig))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+function normalizeSecret(raw: string | undefined, envName: string): string | undefined {
+  if (!raw) return undefined;
+  let value = raw.trim().replace(/[\u200B-\u200D\uFEFF]/g, "");
+  if (value.startsWith(`${envName}=`)) value = value.slice(envName.length + 1).trim();
+  if (
+    (value.startsWith('"') && value.endsWith('"')) ||
+    (value.startsWith("'") && value.endsWith("'")) ||
+    (value.startsWith("`") && value.endsWith("`"))
+  ) {
+    value = value.slice(1, -1).trim();
+  }
+  return value.replace(/\s+/g, "");
+}
+
+function creds() {
+  const apiKey = normalizeSecret(
+    process.env.BYBIT_TESTNET_API_KEY,
+    "BYBIT_TESTNET_API_KEY",
+  );
+  const apiSecret = normalizeSecret(
+    process.env.BYBIT_TESTNET_SECRET,
+    "BYBIT_TESTNET_SECRET",
+  );
+  if (!apiKey || !apiSecret) throw new Error("Bybit testnet credentials are not configured.");
+  return { apiKey, apiSecret };
+}
+
+interface BybitErrorInfo {
+  message: string;
+  status: number;
+  code?: number;
+  reason: "key-invalid" | "signature-invalid" | "timestamp" | "permissions" | "ip" | "other";
+  hint?: string;
+}
+
+function classifyBybit(retCode: number, retMsg: string): BybitErrorInfo {
+  // Ref: https://bybit-exchange.github.io/docs/v5/error
+  let reason: BybitErrorInfo["reason"] = "other";
+  let hint: string | undefined;
+  if (retCode === 10003 || retCode === 10004 || /API key.*invalid|invalid api/i.test(retMsg)) {
+    reason = "key-invalid";
+    hint = `Stored BYBIT_TESTNET_API_KEY is not a valid Bybit key. ${KEY_HELP}`;
+    if (retCode === 10004) {
+      reason = "signature-invalid";
+      hint =
+        "Signature mismatch — stored BYBIT_TESTNET_SECRET does not match the stored API key. Regenerate the pair at testnet.bybit.com and save BOTH values exactly as shown.";
+    }
+  } else if (retCode === 10002 || /timestamp/i.test(retMsg)) {
+    reason = "timestamp";
+    hint = "Server clock drift — retry in a moment.";
+  } else if (retCode === 10005 || retCode === 10007 || /permission/i.test(retMsg)) {
+    reason = "permissions";
+    hint =
+      "API key lacks Derivatives (Contract) trading permission. Enable Unified Trading + Contract permissions on the testnet key.";
+  } else if (retCode === 10010 || /ip/i.test(retMsg)) {
+    reason = "ip";
+    hint = "IP is not whitelisted for this API key.";
+  }
+  return { message: `Bybit ${retCode}: ${retMsg}`, status: 200, code: retCode, reason, hint };
+}
+
+class BybitError extends Error {
+  info: BybitErrorInfo;
+  constructor(info: BybitErrorInfo) {
+    super(info.message);
+    this.info = info;
+  }
+}
+
+interface BybitResp<T> {
+  retCode: number;
+  retMsg: string;
+  result: T;
+}
+
+async function signedRequest<T = unknown>(
+  method: "GET" | "POST",
+  path: string,
+  params: Record<string, string | number | boolean> = {},
+): Promise<T> {
+  const { apiKey, apiSecret } = creds();
+  const timestamp = Date.now().toString();
+  let url = `${BASE}${path}`;
+  let body = "";
+  let payload = "";
+  if (method === "GET") {
+    const qs = new URLSearchParams();
+    for (const [k, v] of Object.entries(params)) qs.set(k, String(v));
+    const query = qs.toString();
+    if (query) url += `?${query}`;
+    payload = query;
+  } else {
+    body = JSON.stringify(params);
+    payload = body;
+  }
+  const preSign = `${timestamp}${apiKey}${RECV_WINDOW}${payload}`;
+  const signature = await hmacSha256Hex(apiSecret, preSign);
+  const res = await fetch(url, {
+    method,
+    headers: {
+      "X-BAPI-API-KEY": apiKey,
+      "X-BAPI-TIMESTAMP": timestamp,
+      "X-BAPI-RECV-WINDOW": RECV_WINDOW,
+      "X-BAPI-SIGN": signature,
+      "X-BAPI-SIGN-TYPE": "2",
+      "Content-Type": "application/json",
+    },
+    body: method === "POST" ? body : undefined,
+  });
+  const text = await res.text();
+  if (!res.ok) {
+    throw new BybitError({
+      message: `Bybit HTTP ${res.status}: ${text}`,
+      status: res.status,
+      reason: "other",
+    });
+  }
+  const parsed = JSON.parse(text) as BybitResp<T>;
+  if (parsed.retCode !== 0) {
+    throw new BybitError(classifyBybit(parsed.retCode, parsed.retMsg));
+  }
+  return parsed.result;
+}
+
+// ─── Instrument filters ──────────────────────────────────────────────────
+interface SymbolFilter {
+  symbol: string;
+  tickSize: number;
+  qtyStep: number;
+  minOrderQty: number;
+  minNotional: number;
+  pricePrecision: number;
+  quantityPrecision: number;
+}
+const filterCache = new Map<string, SymbolFilter>();
+
+function precisionOf(step: number): number {
+  if (step >= 1) return 0;
+  const s = step.toString();
+  const dot = s.indexOf(".");
+  return dot === -1 ? 0 : s.length - dot - 1;
+}
+
+async function getFilter(symbol: string): Promise<SymbolFilter> {
+  const cached = filterCache.get(symbol);
+  if (cached) return cached;
+  interface InstrumentsResp {
+    list: Array<{
+      symbol: string;
+      priceFilter: { tickSize: string };
+      lotSizeFilter: {
+        qtyStep: string;
+        minOrderQty: string;
+        minNotionalValue?: string;
+      };
+    }>;
+  }
+  const r = await signedRequest<InstrumentsResp>("GET", "/v5/market/instruments-info", {
+    category: "linear",
+    symbol,
+  });
+  const info = r.list?.[0];
+  if (!info) throw new Error(`${symbol} not tradable on Bybit testnet.`);
+  const tickSize = parseFloat(info.priceFilter.tickSize);
+  const qtyStep = parseFloat(info.lotSizeFilter.qtyStep);
+  const filter: SymbolFilter = {
+    symbol,
+    tickSize,
+    qtyStep,
+    minOrderQty: parseFloat(info.lotSizeFilter.minOrderQty),
+    minNotional: parseFloat(info.lotSizeFilter.minNotionalValue ?? "5"),
+    pricePrecision: precisionOf(tickSize),
+    quantityPrecision: precisionOf(qtyStep),
+  };
+  filterCache.set(symbol, filter);
+  return filter;
+}
+
+function roundStep(value: number, step: number, precision: number): string {
+  const rounded = Math.floor(value / step) * step;
+  return rounded.toFixed(precision);
+}
+
+// ─── Server functions ────────────────────────────────────────────────────
+export const getBybitStatus = createServerFn({ method: "GET" }).handler(async () => {
+  const apiKey = normalizeSecret(
+    process.env.BYBIT_TESTNET_API_KEY,
+    "BYBIT_TESTNET_API_KEY",
+  );
+  const apiSecret = normalizeSecret(
+    process.env.BYBIT_TESTNET_SECRET,
+    "BYBIT_TESTNET_SECRET",
+  );
+  const diagnostics = {
+    keyPresent: !!apiKey,
+    secretPresent: !!apiSecret,
+    keyLength: apiKey?.length ?? 0,
+    secretLength: apiSecret?.length ?? 0,
+    keyFormatOk: !!apiKey && /^[A-Za-z0-9_-]{12,64}$/.test(apiKey),
+    secretFormatOk: !!apiSecret && /^[A-Za-z0-9_-]{20,128}$/.test(apiSecret),
+  };
+  if (!apiKey || !apiSecret) {
+    return {
+      configured: false as const,
+      message: !apiKey && !apiSecret
+        ? "Neither BYBIT_TESTNET_API_KEY nor BYBIT_TESTNET_SECRET is saved."
+        : !apiKey
+          ? "BYBIT_TESTNET_API_KEY is missing — only the secret is saved."
+          : "BYBIT_TESTNET_SECRET is missing — only the key is saved.",
+      diagnostics,
+    };
+  }
+  try {
+    interface WalletResp {
+      list: Array<{
+        totalWalletBalance: string;
+        totalAvailableBalance: string;
+        totalPerpUPL?: string;
+      }>;
+    }
+    const w = await signedRequest<WalletResp>("GET", "/v5/account/wallet-balance", {
+      accountType: "UNIFIED",
+    });
+    const row = w.list?.[0];
+    return {
+      configured: true as const,
+      wallet: parseFloat(row?.totalWalletBalance ?? "0"),
+      unrealized: parseFloat(row?.totalPerpUPL ?? "0"),
+      available: parseFloat(row?.totalAvailableBalance ?? "0"),
+      diagnostics,
+    };
+  } catch (e) {
+    if (e instanceof BybitError) {
+      return {
+        configured: true as const,
+        error: e.info.message,
+        errorCode: e.info.code,
+        errorReason: e.info.reason,
+        hint: e.info.hint,
+        diagnostics,
+      };
+    }
+    return {
+      configured: true as const,
+      error: e instanceof Error ? e.message : "Failed to reach testnet.",
+      diagnostics,
+    };
+  }
+});
+
+interface LiveOrderInput {
+  symbol: string;
+  side: "BUY" | "SELL";
+  notionalUsd: number;
+  slPct: number;
+  tpPct: number;
+  refPrice: number;
+  leverage?: number;
+}
+
+export const placeBybitTrade = createServerFn({ method: "POST" })
+  .inputValidator((raw: LiveOrderInput) => {
+    if (!raw || typeof raw !== "object") throw new Error("Invalid payload");
+    const { symbol, side, notionalUsd, slPct, tpPct, refPrice } = raw;
+    if (!symbol || (side !== "BUY" && side !== "SELL"))
+      throw new Error("Invalid symbol/side");
+    if (!(notionalUsd > 0) || !(refPrice > 0)) throw new Error("Invalid size");
+    if (!(slPct > 0 && slPct < 0.2)) throw new Error("Invalid slPct");
+    if (!(tpPct > 0 && tpPct < 0.5)) throw new Error("Invalid tpPct");
+    return {
+      symbol: symbol.toUpperCase(),
+      side,
+      notionalUsd,
+      slPct,
+      tpPct,
+      refPrice,
+      leverage: Math.max(1, Math.min(Math.floor(raw.leverage ?? 5), 20)),
+    } as LiveOrderInput;
+  })
+  .handler(async ({ data }) => {
+    const filter = await getFilter(data.symbol);
+    const qtyRaw = data.notionalUsd / data.refPrice;
+    const quantity = roundStep(qtyRaw, filter.qtyStep, filter.quantityPrecision);
+    if (parseFloat(quantity) < filter.minOrderQty)
+      throw new Error(
+        `Quantity ${quantity} below min ${filter.minOrderQty} for ${data.symbol}.`,
+      );
+    if (parseFloat(quantity) * data.refPrice < filter.minNotional)
+      throw new Error(
+        `Notional ${data.notionalUsd} below min ${filter.minNotional} for ${data.symbol}.`,
+      );
+
+    const slPrice =
+      data.side === "BUY"
+        ? data.refPrice * (1 - data.slPct)
+        : data.refPrice * (1 + data.slPct);
+    const tpPrice =
+      data.side === "BUY"
+        ? data.refPrice * (1 + data.tpPct)
+        : data.refPrice * (1 - data.tpPct);
+    const slStr = roundStep(slPrice, filter.tickSize, filter.pricePrecision);
+    const tpStr = roundStep(tpPrice, filter.tickSize, filter.pricePrecision);
+    const lev = String(data.leverage ?? 5);
+
+    // Best-effort leverage set.
+    try {
+      await signedRequest("POST", "/v5/position/set-leverage", {
+        category: "linear",
+        symbol: data.symbol,
+        buyLeverage: lev,
+        sellLeverage: lev,
+      });
+    } catch {
+      /* leverage may already be set */
+    }
+
+    interface OrderResp {
+      orderId: string;
+      orderLinkId: string;
+    }
+    const entry = await signedRequest<OrderResp>("POST", "/v5/order/create", {
+      category: "linear",
+      symbol: data.symbol,
+      side: data.side === "BUY" ? "Buy" : "Sell",
+      orderType: "Market",
+      qty: quantity,
+      takeProfit: tpStr,
+      stopLoss: slStr,
+      tpTriggerBy: "MarkPrice",
+      slTriggerBy: "MarkPrice",
+      tpslMode: "Full",
+      positionIdx: 0,
+    });
+
+    return {
+      ok: true as const,
+      symbol: data.symbol,
+      side: data.side,
+      quantity,
+      entryOrderId: entry.orderId,
+      entryPrice: data.refPrice,
+      slOrderId: entry.orderId,
+      tpOrderId: entry.orderId,
+      slPrice: slStr,
+      tpPrice: tpStr,
+      placedAt: Date.now(),
+    };
+  });
+
+export const getBybitPositions = createServerFn({ method: "GET" }).handler(async () => {
+  interface PositionsResp {
+    list: Array<{
+      symbol: string;
+      side: "Buy" | "Sell" | "";
+      size: string;
+      avgPrice: string;
+      markPrice: string;
+      unrealisedPnl: string;
+      liqPrice: string;
+      leverage: string;
+    }>;
+  }
+  try {
+    const r = await signedRequest<PositionsResp>("GET", "/v5/position/list", {
+      category: "linear",
+      settleCoin: "USDT",
+    });
+    return r.list
+      .filter((p) => parseFloat(p.size) > 0)
+      .map((p) => ({
+        symbol: p.symbol,
+        side: p.side === "Buy" ? ("BUY" as const) : ("SELL" as const),
+        size: parseFloat(p.size),
+        entryPrice: parseFloat(p.avgPrice),
+        markPrice: parseFloat(p.markPrice),
+        unrealized: parseFloat(p.unrealisedPnl),
+        liquidation: parseFloat(p.liqPrice || "0"),
+        leverage: parseFloat(p.leverage),
+      }));
+  } catch (e) {
+    console.warn(
+      "Unable to fetch Bybit testnet positions:",
+      e instanceof Error ? e.message : "Failed to fetch positions.",
+    );
+    return [];
+  }
+});
+
+export const closeBybitPosition = createServerFn({ method: "POST" })
+  .inputValidator((raw: { symbol: string }) => {
+    if (!raw?.symbol) throw new Error("symbol required");
+    return { symbol: raw.symbol.toUpperCase() };
+  })
+  .handler(async ({ data }) => {
+    interface PositionsResp {
+      list: Array<{ symbol: string; side: "Buy" | "Sell" | ""; size: string }>;
+    }
+    const r = await signedRequest<PositionsResp>("GET", "/v5/position/list", {
+      category: "linear",
+      symbol: data.symbol,
+    });
+    const row = r.list?.find((p) => p.symbol === data.symbol);
+    if (!row) throw new Error("Position not found.");
+    const size = parseFloat(row.size);
+    if (size === 0) return { ok: true as const, closed: false, note: "No open position." };
+    const filter = await getFilter(data.symbol);
+    const quantity = roundStep(size, filter.qtyStep, filter.quantityPrecision);
+    await signedRequest("POST", "/v5/order/create", {
+      category: "linear",
+      symbol: data.symbol,
+      side: row.side === "Buy" ? "Sell" : "Buy",
+      orderType: "Market",
+      qty: quantity,
+      reduceOnly: true,
+      positionIdx: 0,
+    });
+    return { ok: true as const, closed: true, symbol: data.symbol };
+  });
