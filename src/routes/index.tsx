@@ -91,42 +91,6 @@ function formatTime(ms: number): string {
   return new Date(ms).toLocaleTimeString([], { hour12: false });
 }
 
-type Tab = "signals" | "positions" | "history" | "board";
-
-function SwarmDashboard() {
-  const [symbols, setSymbols] = useState<string[]>([]);
-  const [error, setError] = useState<string | null>(null);
-  const [status, setStatus] = useState<{ connected: number; total: number }>({
-    connected: 0,
-    total: 0,
-  });
-  const [proposals, setProposals] = useState<TradeProposal[]>([]);
-  const [ticks, setTicks] = useState(0);
-  const [board, setBoard] = useState<SymbolState[]>([]);
-  const [positions, setPositions] = useState<Position[]>([]);
-  const [closed, setClosed] = useState<ClosedTrade[]>([]);
-  const [realized, setRealized] = useState(0);
-  const [unrealized, setUnrealized] = useState(0);
-  const [halted, setHalted] = useState<string | null>(null);
-  const [tab, setTab] = useState<Tab>("signals");
-  const [query, setQuery] = useState("");
-
-  const engineRef = useRef<SwarmEngine | null>(null);
-  const brokerRef = useRef<PaperBroker | null>(null);
-  const marksRef = useRef<Map<string, number>>(new Map());
-  const tickCounter = useRef(0);
-
-  useEffect(() => {
-    const ac = new AbortController();
-    fetchPerpetualSymbols(ac.signal)
-      .then(setSymbols)
-      .catch((e) =>
-        setError(e instanceof Error ? e.message : "Failed to load symbols."),
-      );
-    return () => ac.abort();
-  }, []);
-
-  useEffect(() => {
 type Tab = "signals" | "positions" | "history" | "board" | "live";
 
 function SwarmDashboard() {
