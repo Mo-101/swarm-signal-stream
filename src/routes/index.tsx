@@ -19,6 +19,14 @@ import {
   placeLiveTrade,
   closeLivePosition,
 } from "@/lib/live-trader.functions";
+import {
+  getBybitStatus,
+  getBybitPositions,
+  placeBybitTrade,
+  closeBybitPosition,
+} from "@/lib/bybit-trader.functions";
+
+type LiveProvider = "binance" | "bybit";
 
 interface LiveStatus {
   configured: boolean;
@@ -128,6 +136,7 @@ function SwarmDashboard() {
   const [tab, setTab] = useState<Tab>("signals");
   const [query, setQuery] = useState("");
   const [liveMode, setLiveMode] = useState(false);
+  const [liveProvider, setLiveProvider] = useState<LiveProvider>("bybit");
   const [liveStatus, setLiveStatus] = useState<LiveStatus | null>(null);
   const [livePositions, setLivePositions] = useState<LivePosition[]>([]);
   const [liveLog, setLiveLog] = useState<LiveLogEntry[]>([]);
@@ -137,13 +146,31 @@ function SwarmDashboard() {
   const marksRef = useRef<Map<string, number>>(new Map());
   const tickCounter = useRef(0);
   const liveModeRef = useRef(liveMode);
+  const liveProviderRef = useRef(liveProvider);
   const liveCooldownRef = useRef<Map<string, number>>(new Map());
   const liveInFlightRef = useRef<Set<string>>(new Set());
 
-  const placeLive = useServerFn(placeLiveTrade);
-  const fetchLiveStatus = useServerFn(getLiveStatus);
-  const fetchLivePositions = useServerFn(getLivePositions);
-  const closeLive = useServerFn(closeLivePosition);
+  const placeBinance = useServerFn(placeLiveTrade);
+  const fetchBinanceStatus = useServerFn(getLiveStatus);
+  const fetchBinancePositions = useServerFn(getLivePositions);
+  const closeBinance = useServerFn(closeLivePosition);
+  const placeBybit = useServerFn(placeBybitTrade);
+  const fetchBybitStatus = useServerFn(getBybitStatus);
+  const fetchBybitPositions = useServerFn(getBybitPositions);
+  const closeBybit = useServerFn(closeBybitPosition);
+
+  const placeLive = liveProvider === "bybit" ? placeBybit : placeBinance;
+  const fetchLiveStatus = liveProvider === "bybit" ? fetchBybitStatus : fetchBinanceStatus;
+  const fetchLivePositions =
+    liveProvider === "bybit" ? fetchBybitPositions : fetchBinancePositions;
+  const closeLive = liveProvider === "bybit" ? closeBybit : closeBinance;
+
+  useEffect(() => {
+    liveProviderRef.current = liveProvider;
+    // Reset status/positions when switching providers.
+    setLiveStatus(null);
+    setLivePositions([]);
+  }, [liveProvider]);
 
   useEffect(() => {
     liveModeRef.current = liveMode;
@@ -340,6 +367,23 @@ function SwarmDashboard() {
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            <div className="flex overflow-hidden rounded-md border border-border text-[11px] font-semibold">
+              {(["bybit", "binance"] as LiveProvider[]).map((p) => (
+                <button
+                  key={p}
+                  onClick={() => setLiveProvider(p)}
+                  disabled={liveMode}
+                  className={`px-2 py-1.5 transition-colors ${
+                    liveProvider === p
+                      ? "bg-accent/20 text-accent"
+                      : "bg-card text-muted-foreground hover:text-foreground"
+                  } ${liveMode ? "cursor-not-allowed opacity-60" : ""}`}
+                  title={liveMode ? "Turn off live mode to switch provider" : `Use ${p} testnet`}
+                >
+                  {p === "bybit" ? "Bybit" : "Binance"}
+                </button>
+              ))}
+            </div>
             <button
               onClick={() => {
                 setLiveMode((v) => !v);
@@ -350,7 +394,7 @@ function SwarmDashboard() {
                   ? "border-accent bg-accent/20 text-accent"
                   : "border-border bg-card text-muted-foreground hover:text-foreground"
               }`}
-              title="Toggle Binance testnet live trading"
+              title={`Toggle ${liveProvider} testnet live trading`}
             >
               {liveMode ? "● LIVE TESTNET" : "○ Paper mode"}
             </button>
@@ -463,6 +507,7 @@ function SwarmDashboard() {
           {tab === "live" && (
             <LivePanel
               enabled={liveMode}
+              provider={liveProvider}
               status={liveStatus}
               positions={livePositions}
               log={liveLog}
@@ -949,24 +994,27 @@ function LiveErrorPanel({ status }: { status: LiveStatus }) {
 
 function LivePanel({
   enabled,
+  provider,
   status,
   positions,
   log,
   onClose,
 }: {
   enabled: boolean;
+  provider: LiveProvider;
   status: LiveStatus | null;
   positions: LivePosition[];
   log: LiveLogEntry[];
   onClose: (symbol: string) => void;
 }) {
+  const providerLabel = provider === "bybit" ? "Bybit" : "Binance";
   return (
     <>
       <PanelHeader
-        title="Binance Testnet — Live Orders"
+        title={`${providerLabel} Testnet — Live Orders`}
         subtitle={
           enabled
-            ? "High-confidence signals are executed on the futures testnet with attached SL/TP."
+            ? `High-confidence signals are executed on the ${providerLabel} futures testnet with attached SL/TP.`
             : "Enable LIVE TESTNET in the header to route high-confidence signals to real orders."
         }
         badge={enabled ? "LIVE" : "OFF"}
@@ -975,7 +1023,7 @@ function LivePanel({
         {!enabled ? (
           <p className="text-xs text-muted-foreground">
             Live mode is off. Toggle the LIVE TESTNET button in the header to
-            start placing orders on Binance USDT-M futures testnet.
+            start placing orders on {providerLabel} USDT perpetual futures testnet.
           </p>
         ) : !status ? (
           <p className="text-xs text-muted-foreground">Loading account…</p>
