@@ -871,6 +871,82 @@ function SignalRow({ proposal }: { proposal: TradeProposal }) {
   );
 }
 
+function LiveErrorPanel({ status }: { status: LiveStatus }) {
+  const d = status.diagnostics;
+  const reason = status.errorReason;
+  const title =
+    status.message ??
+    (reason === "key-invalid"
+      ? "API key is invalid"
+      : reason === "signature-invalid"
+        ? "Signature mismatch — key and secret do not match"
+        : reason === "timestamp"
+          ? "Clock drift"
+          : reason === "permissions"
+            ? "API key missing futures permission"
+            : reason === "ip"
+              ? "IP not whitelisted"
+              : "Testnet request failed");
+
+  const keyState = !d
+    ? "unknown"
+    : !d.keyPresent
+      ? "missing"
+      : !d.keyFormatOk
+        ? `malformed (${d.keyLength} chars)`
+        : `saved (${d.keyLength} chars)`;
+  const secretState = !d
+    ? "unknown"
+    : !d.secretPresent
+      ? "missing"
+      : !d.secretFormatOk
+        ? `malformed (${d.secretLength} chars)`
+        : `saved (${d.secretLength} chars)`;
+
+  const pairVerdict =
+    !d || !d.keyPresent || !d.secretPresent
+      ? "incomplete"
+      : reason === "signature-invalid"
+        ? "mismatched"
+        : reason === "key-invalid"
+          ? "invalid key"
+          : "saved";
+
+  return (
+    <div className="space-y-2">
+      <p className="text-xs font-semibold text-bear">⚠ {title}</p>
+      {status.error && (
+        <p className="break-all font-mono text-[11px] text-bear/80">
+          {status.error}
+          {status.errorCode !== undefined ? ` (code ${status.errorCode})` : ""}
+        </p>
+      )}
+      <div className="flex flex-wrap gap-2 text-[11px]">
+        <span className="rounded border border-border px-2 py-1">
+          API key: <span className="font-mono">{keyState}</span>
+        </span>
+        <span className="rounded border border-border px-2 py-1">
+          API secret: <span className="font-mono">{secretState}</span>
+        </span>
+        <span
+          className={`rounded border px-2 py-1 ${
+            pairVerdict === "saved"
+              ? "border-bull/40 text-bull"
+              : "border-bear/40 text-bear"
+          }`}
+        >
+          Pair: <span className="font-mono">{pairVerdict}</span>
+        </span>
+      </div>
+      {status.hint && (
+        <p className="text-[11px] text-muted-foreground">{status.hint}</p>
+      )}
+    </div>
+  );
+}
+
+
+
 function LivePanel({
   enabled,
   status,
