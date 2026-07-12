@@ -130,7 +130,7 @@ async function signedRequest<T = unknown>(
   });
   const text = await res.text();
   if (!res.ok) {
-    throw new Error(formatBinanceError(res.status, text));
+    throw new BinanceError(formatBinanceError(res.status, text));
   }
   return text ? (JSON.parse(text) as T) : ({} as T);
 }
