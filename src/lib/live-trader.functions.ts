@@ -56,15 +56,58 @@ function creds() {
   return { apiKey, apiSecret };
 }
 
-function formatBinanceError(status: number, body: string): string {
+interface BinanceErrorInfo {
+  message: string;
+  status: number;
+  code?: number;
+  reason: "key-invalid" | "signature-invalid" | "timestamp" | "permissions" | "ip" | "other";
+  hint?: string;
+}
+
+function formatBinanceError(status: number, body: string): BinanceErrorInfo {
+  let code: number | undefined;
+  let msg = body;
   try {
     const parsed = JSON.parse(body) as { code?: number; msg?: string };
-    if (parsed.code === -2014) {
-      return `Binance rejected the stored API key. ${TESTNET_KEY_HELP}`;
-    }
-    return `Binance ${status}: ${parsed.msg ?? body}`;
+    code = parsed.code;
+    if (parsed.msg) msg = parsed.msg;
   } catch {
-    return `Binance ${status}: ${body}`;
+    /* keep raw body */
+  }
+  let reason: BinanceErrorInfo["reason"] = "other";
+  let hint: string | undefined;
+  if (code === -2014 || /API-key format invalid/i.test(msg)) {
+    reason = "key-invalid";
+    hint = `The stored BINANCE_TESTNET_API_KEY is not a valid Binance key string. ${TESTNET_KEY_HELP}`;
+  } else if (code === -1022 || /[Ss]ignature.*not valid/.test(msg)) {
+    reason = "signature-invalid";
+    hint =
+      "Signature mismatch — the stored BINANCE_TESTNET_SECRET does not match the stored API key. Regenerate the pair at testnet.binancefuture.com and save BOTH values (key + secret) exactly as shown, with no quotes or prefixes.";
+  } else if (code === -1021 || /Timestamp/i.test(msg)) {
+    reason = "timestamp";
+    hint = "Server clock drift — retry in a moment.";
+  } else if (code === -2015 || /permission|Invalid API-key/i.test(msg)) {
+    reason = "permissions";
+    hint =
+      "API key lacks futures trading permission or IP is not whitelisted. Enable Futures on the testnet key and remove IP restrictions.";
+  } else if (/IP|whitelist/i.test(msg)) {
+    reason = "ip";
+    hint = "IP is not whitelisted for this API key.";
+  }
+  return {
+    message: `Binance ${status}: ${msg}`,
+    status,
+    code,
+    reason,
+    hint,
+  };
+}
+
+class BinanceError extends Error {
+  info: BinanceErrorInfo;
+  constructor(info: BinanceErrorInfo) {
+    super(info.message);
+    this.info = info;
   }
 }
 
