@@ -205,8 +205,24 @@ export const getLiveStatus = createServerFn({ method: "GET" }).handler(async () 
     process.env.BINANCE_TESTNET_SECRET,
     "BINANCE_TESTNET_SECRET",
   );
+  const diagnostics = {
+    keyPresent: !!apiKey,
+    secretPresent: !!apiSecret,
+    keyLength: apiKey?.length ?? 0,
+    secretLength: apiSecret?.length ?? 0,
+    keyFormatOk: !!apiKey && /^[A-Za-z0-9]{40,128}$/.test(apiKey),
+    secretFormatOk: !!apiSecret && /^[A-Za-z0-9]{40,128}$/.test(apiSecret),
+  };
   if (!apiKey || !apiSecret) {
-    return { configured: false as const, message: "Testnet keys not set." };
+    return {
+      configured: false as const,
+      message: !apiKey && !apiSecret
+        ? "Neither BINANCE_TESTNET_API_KEY nor BINANCE_TESTNET_SECRET is saved."
+        : !apiKey
+          ? "BINANCE_TESTNET_API_KEY is missing — only the secret is saved."
+          : "BINANCE_TESTNET_SECRET is missing — only the key is saved.",
+      diagnostics,
+    };
   }
   try {
     interface Account {
@@ -220,11 +236,23 @@ export const getLiveStatus = createServerFn({ method: "GET" }).handler(async () 
       wallet: parseFloat(acct.totalWalletBalance),
       unrealized: parseFloat(acct.totalUnrealizedProfit),
       available: parseFloat(acct.availableBalance),
+      diagnostics,
     };
   } catch (e) {
+    if (e instanceof BinanceError) {
+      return {
+        configured: true as const,
+        error: e.info.message,
+        errorCode: e.info.code,
+        errorReason: e.info.reason,
+        hint: e.info.hint,
+        diagnostics,
+      };
+    }
     return {
       configured: true as const,
       error: e instanceof Error ? e.message : "Failed to reach testnet.",
+      diagnostics,
     };
   }
 });
