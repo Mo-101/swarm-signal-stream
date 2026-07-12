@@ -994,24 +994,27 @@ function LiveErrorPanel({ status }: { status: LiveStatus }) {
 
 function LivePanel({
   enabled,
+  provider,
   status,
   positions,
   log,
   onClose,
 }: {
   enabled: boolean;
+  provider: LiveProvider;
   status: LiveStatus | null;
   positions: LivePosition[];
   log: LiveLogEntry[];
   onClose: (symbol: string) => void;
 }) {
+  const providerLabel = provider === "bybit" ? "Bybit" : "Binance";
   return (
     <>
       <PanelHeader
-        title="Binance Testnet — Live Orders"
+        title={`${providerLabel} Testnet — Live Orders`}
         subtitle={
           enabled
-            ? "High-confidence signals are executed on the futures testnet with attached SL/TP."
+            ? `High-confidence signals are executed on the ${providerLabel} futures testnet with attached SL/TP.`
             : "Enable LIVE TESTNET in the header to route high-confidence signals to real orders."
         }
         badge={enabled ? "LIVE" : "OFF"}
@@ -1020,7 +1023,7 @@ function LivePanel({
         {!enabled ? (
           <p className="text-xs text-muted-foreground">
             Live mode is off. Toggle the LIVE TESTNET button in the header to
-            start placing orders on Binance USDT-M futures testnet.
+            start placing orders on {providerLabel} USDT perpetual futures testnet.
           </p>
         ) : !status ? (
           <p className="text-xs text-muted-foreground">Loading account…</p>
