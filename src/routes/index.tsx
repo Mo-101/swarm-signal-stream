@@ -127,6 +127,136 @@ function SwarmDashboard() {
   }, []);
 
   useEffect(() => {
+type Tab = "signals" | "positions" | "history" | "board" | "live";
+
+function SwarmDashboard() {
+  const [symbols, setSymbols] = useState<string[]>([]);
+  const [error, setError] = useState<string | null>(null);
+  const [status, setStatus] = useState<{ connected: number; total: number }>({
+    connected: 0,
+    total: 0,
+  });
+  const [proposals, setProposals] = useState<TradeProposal[]>([]);
+  const [ticks, setTicks] = useState(0);
+  const [board, setBoard] = useState<SymbolState[]>([]);
+  const [positions, setPositions] = useState<Position[]>([]);
+  const [closed, setClosed] = useState<ClosedTrade[]>([]);
+  const [realized, setRealized] = useState(0);
+  const [unrealized, setUnrealized] = useState(0);
+  const [halted, setHalted] = useState<string | null>(null);
+  const [tab, setTab] = useState<Tab>("signals");
+  const [query, setQuery] = useState("");
+  const [liveMode, setLiveMode] = useState(false);
+  const [liveStatus, setLiveStatus] = useState<LiveStatus | null>(null);
+  const [livePositions, setLivePositions] = useState<LivePosition[]>([]);
+  const [liveLog, setLiveLog] = useState<LiveLogEntry[]>([]);
+
+  const engineRef = useRef<SwarmEngine | null>(null);
+  const brokerRef = useRef<PaperBroker | null>(null);
+  const marksRef = useRef<Map<string, number>>(new Map());
+  const tickCounter = useRef(0);
+  const liveModeRef = useRef(liveMode);
+  const liveCooldownRef = useRef<Map<string, number>>(new Map());
+  const liveInFlightRef = useRef<Set<string>>(new Set());
+
+  const placeLive = useServerFn(placeLiveTrade);
+  const fetchLiveStatus = useServerFn(getLiveStatus);
+  const fetchLivePositions = useServerFn(getLivePositions);
+  const closeLive = useServerFn(closeLivePosition);
+
+  useEffect(() => {
+    liveModeRef.current = liveMode;
+  }, [liveMode]);
+
+  const pushLog = useCallback((entry: Omit<LiveLogEntry, "id" | "time">) => {
+    setLiveLog((prev) =>
+      [
+        { ...entry, id: crypto.randomUUID(), time: Date.now() },
+        ...prev,
+      ].slice(0, 40),
+    );
+  }, []);
+
+  const submitLiveTrade = useCallback(
+    async (p: TradeProposal) => {
+      const now = Date.now();
+      const cd = liveCooldownRef.current.get(p.symbol) ?? 0;
+      if (now < cd) return;
+      if (liveInFlightRef.current.has(p.symbol)) return;
+      liveInFlightRef.current.add(p.symbol);
+      liveCooldownRef.current.set(p.symbol, now + LIVE_COOLDOWN_MS);
+      try {
+        const res = await placeLive({
+          data: {
+            symbol: p.symbol,
+            side: p.direction,
+            notionalUsd: LIVE_NOTIONAL_USD,
+            slPct: LIVE_SL_PCT,
+            tpPct: LIVE_TP_PCT,
+            refPrice: p.price,
+            leverage: LIVE_LEVERAGE,
+          },
+        });
+        pushLog({
+          ok: true,
+          symbol: p.symbol,
+          side: p.direction,
+          message: `Filled ${res.quantity} @ ${formatPrice(res.entryPrice)} · SL ${res.slPrice} / TP ${res.tpPrice}`,
+        });
+      } catch (e) {
+        pushLog({
+          ok: false,
+          symbol: p.symbol,
+          side: p.direction,
+          message: e instanceof Error ? e.message : "Order failed",
+        });
+      } finally {
+        liveInFlightRef.current.delete(p.symbol);
+      }
+    },
+    [placeLive, pushLog],
+  );
+
+  useEffect(() => {
+    const ac = new AbortController();
+    fetchPerpetualSymbols(ac.signal)
+      .then(setSymbols)
+      .catch((e) =>
+        setError(e instanceof Error ? e.message : "Failed to load symbols."),
+      );
+    return () => ac.abort();
+  }, []);
+
+  // Poll live status/positions when live mode is on.
+  useEffect(() => {
+    if (!liveMode) return;
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const [st, ps] = await Promise.all([
+          fetchLiveStatus(),
+          fetchLivePositions().catch(() => [] as LivePosition[]),
+        ]);
+        if (cancelled) return;
+        setLiveStatus(st as LiveStatus);
+        setLivePositions(ps as LivePosition[]);
+      } catch (e) {
+        if (!cancelled)
+          setLiveStatus({
+            configured: true,
+            error: e instanceof Error ? e.message : "Live fetch failed",
+          });
+      }
+    };
+    load();
+    const iv = setInterval(load, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(iv);
+    };
+  }, [liveMode, fetchLiveStatus, fetchLivePositions]);
+
+  useEffect(() => {
     if (symbols.length === 0) return;
 
     const broker = new PaperBroker(DEFAULT_PAPER_CONFIG, {
@@ -143,6 +273,9 @@ function SwarmDashboard() {
       onProposal: (p) => {
         setProposals((prev) => [p, ...prev].slice(0, 80));
         broker.onProposal(p);
+        if (liveModeRef.current && p.confidence >= LIVE_CONFIDENCE_THRESHOLD) {
+          void submitLiveTrade(p);
+        }
       },
       onStatus: (s) => setStatus(s),
     });
