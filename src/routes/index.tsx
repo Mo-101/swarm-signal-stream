@@ -27,6 +27,23 @@ interface LiveStatus {
   available?: number;
   error?: string;
   message?: string;
+  errorCode?: number;
+  errorReason?:
+    | "key-invalid"
+    | "signature-invalid"
+    | "timestamp"
+    | "permissions"
+    | "ip"
+    | "other";
+  hint?: string;
+  diagnostics?: {
+    keyPresent: boolean;
+    secretPresent: boolean;
+    keyLength: number;
+    secretLength: number;
+    keyFormatOk: boolean;
+    secretFormatOk: boolean;
+  };
 }
 interface LivePosition {
   symbol: string;
