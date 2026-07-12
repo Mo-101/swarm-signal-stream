@@ -367,6 +367,23 @@ function SwarmDashboard() {
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            <div className="flex overflow-hidden rounded-md border border-border text-[11px] font-semibold">
+              {(["bybit", "binance"] as LiveProvider[]).map((p) => (
+                <button
+                  key={p}
+                  onClick={() => setLiveProvider(p)}
+                  disabled={liveMode}
+                  className={`px-2 py-1.5 transition-colors ${
+                    liveProvider === p
+                      ? "bg-accent/20 text-accent"
+                      : "bg-card text-muted-foreground hover:text-foreground"
+                  } ${liveMode ? "cursor-not-allowed opacity-60" : ""}`}
+                  title={liveMode ? "Turn off live mode to switch provider" : `Use ${p} testnet`}
+                >
+                  {p === "bybit" ? "Bybit" : "Binance"}
+                </button>
+              ))}
+            </div>
             <button
               onClick={() => {
                 setLiveMode((v) => !v);
@@ -377,7 +394,7 @@ function SwarmDashboard() {
                   ? "border-accent bg-accent/20 text-accent"
                   : "border-border bg-card text-muted-foreground hover:text-foreground"
               }`}
-              title="Toggle Binance testnet live trading"
+              title={`Toggle ${liveProvider} testnet live trading`}
             >
               {liveMode ? "● LIVE TESTNET" : "○ Paper mode"}
             </button>
