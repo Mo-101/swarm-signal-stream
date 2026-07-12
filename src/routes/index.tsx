@@ -287,6 +287,24 @@ function SwarmDashboard() {
     setHalted(null);
   };
 
+  const handleCloseLive = useCallback(
+    async (symbol: string) => {
+      try {
+        await closeLive({ data: { symbol } });
+        pushLog({ ok: true, symbol, message: "Position closed via market order." });
+        const ps = (await fetchLivePositions().catch(() => [])) as LivePosition[];
+        setLivePositions(ps);
+      } catch (e) {
+        pushLog({
+          ok: false,
+          symbol,
+          message: e instanceof Error ? e.message : "Close failed",
+        });
+      }
+    },
+    [closeLive, fetchLivePositions, pushLog],
+  );
+
   return (
     <main className="min-h-screen bg-background text-foreground">
       <header className="border-b border-border">
