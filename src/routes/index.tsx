@@ -903,10 +903,11 @@ function LivePanel({
           </p>
         ) : !status ? (
           <p className="text-xs text-muted-foreground">Loading account…</p>
-        ) : status.error ? (
-          <p className="text-xs text-bear">⚠ {status.error}</p>
+        ) : status.error || status.message ? (
+          <LiveErrorPanel status={status} />
         ) : status.message ? (
           <p className="text-xs text-bear">⚠ {status.message}</p>
+
         ) : (
           <div className="flex flex-wrap gap-2">
             <Stat label="Wallet" value={formatUsd(status.wallet ?? 0)} />
