@@ -1,5 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useServerFn } from "@tanstack/react-start";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   SwarmEngine,
   fetchPerpetualSymbols,
@@ -12,6 +13,46 @@ import {
   type Position,
   type ClosedTrade,
 } from "@/lib/paper-broker";
+import {
+  getLiveStatus,
+  getLivePositions,
+  placeLiveTrade,
+  closeLivePosition,
+} from "@/lib/live-trader.functions";
+
+interface LiveStatus {
+  configured: boolean;
+  wallet?: number;
+  unrealized?: number;
+  available?: number;
+  error?: string;
+  message?: string;
+}
+interface LivePosition {
+  symbol: string;
+  side: "BUY" | "SELL";
+  size: number;
+  entryPrice: number;
+  markPrice: number;
+  unrealized: number;
+  liquidation: number;
+  leverage: number;
+}
+interface LiveLogEntry {
+  id: string;
+  time: number;
+  ok: boolean;
+  symbol: string;
+  side?: "BUY" | "SELL";
+  message: string;
+}
+
+const LIVE_CONFIDENCE_THRESHOLD = 0.75;
+const LIVE_NOTIONAL_USD = 100;
+const LIVE_SL_PCT = 0.008;
+const LIVE_TP_PCT = 0.016;
+const LIVE_LEVERAGE = 5;
+const LIVE_COOLDOWN_MS = 60_000;
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -50,7 +91,7 @@ function formatTime(ms: number): string {
   return new Date(ms).toLocaleTimeString([], { hour12: false });
 }
 
-type Tab = "signals" | "positions" | "history" | "board";
+type Tab = "signals" | "positions" | "history" | "board" | "live";
 
 function SwarmDashboard() {
   const [symbols, setSymbols] = useState<string[]>([]);
@@ -69,11 +110,76 @@ function SwarmDashboard() {
   const [halted, setHalted] = useState<string | null>(null);
   const [tab, setTab] = useState<Tab>("signals");
   const [query, setQuery] = useState("");
+  const [liveMode, setLiveMode] = useState(false);
+  const [liveStatus, setLiveStatus] = useState<LiveStatus | null>(null);
+  const [livePositions, setLivePositions] = useState<LivePosition[]>([]);
+  const [liveLog, setLiveLog] = useState<LiveLogEntry[]>([]);
 
   const engineRef = useRef<SwarmEngine | null>(null);
   const brokerRef = useRef<PaperBroker | null>(null);
   const marksRef = useRef<Map<string, number>>(new Map());
   const tickCounter = useRef(0);
+  const liveModeRef = useRef(liveMode);
+  const liveCooldownRef = useRef<Map<string, number>>(new Map());
+  const liveInFlightRef = useRef<Set<string>>(new Set());
+
+  const placeLive = useServerFn(placeLiveTrade);
+  const fetchLiveStatus = useServerFn(getLiveStatus);
+  const fetchLivePositions = useServerFn(getLivePositions);
+  const closeLive = useServerFn(closeLivePosition);
+
+  useEffect(() => {
+    liveModeRef.current = liveMode;
+  }, [liveMode]);
+
+  const pushLog = useCallback((entry: Omit<LiveLogEntry, "id" | "time">) => {
+    setLiveLog((prev) =>
+      [
+        { ...entry, id: crypto.randomUUID(), time: Date.now() },
+        ...prev,
+      ].slice(0, 40),
+    );
+  }, []);
+
+  const submitLiveTrade = useCallback(
+    async (p: TradeProposal) => {
+      const now = Date.now();
+      const cd = liveCooldownRef.current.get(p.symbol) ?? 0;
+      if (now < cd) return;
+      if (liveInFlightRef.current.has(p.symbol)) return;
+      liveInFlightRef.current.add(p.symbol);
+      liveCooldownRef.current.set(p.symbol, now + LIVE_COOLDOWN_MS);
+      try {
+        const res = await placeLive({
+          data: {
+            symbol: p.symbol,
+            side: p.direction,
+            notionalUsd: LIVE_NOTIONAL_USD,
+            slPct: LIVE_SL_PCT,
+            tpPct: LIVE_TP_PCT,
+            refPrice: p.price,
+            leverage: LIVE_LEVERAGE,
+          },
+        });
+        pushLog({
+          ok: true,
+          symbol: p.symbol,
+          side: p.direction,
+          message: `Filled ${res.quantity} @ ${formatPrice(res.entryPrice)} · SL ${res.slPrice} / TP ${res.tpPrice}`,
+        });
+      } catch (e) {
+        pushLog({
+          ok: false,
+          symbol: p.symbol,
+          side: p.direction,
+          message: e instanceof Error ? e.message : "Order failed",
+        });
+      } finally {
+        liveInFlightRef.current.delete(p.symbol);
+      }
+    },
+    [placeLive, pushLog],
+  );
 
   useEffect(() => {
     const ac = new AbortController();
@@ -84,6 +190,35 @@ function SwarmDashboard() {
       );
     return () => ac.abort();
   }, []);
+
+  // Poll live status/positions when live mode is on.
+  useEffect(() => {
+    if (!liveMode) return;
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const [st, ps] = await Promise.all([
+          fetchLiveStatus(),
+          fetchLivePositions().catch(() => [] as LivePosition[]),
+        ]);
+        if (cancelled) return;
+        setLiveStatus(st as LiveStatus);
+        setLivePositions(ps as LivePosition[]);
+      } catch (e) {
+        if (!cancelled)
+          setLiveStatus({
+            configured: true,
+            error: e instanceof Error ? e.message : "Live fetch failed",
+          });
+      }
+    };
+    load();
+    const iv = setInterval(load, 5000);
+    return () => {
+      cancelled = true;
+      clearInterval(iv);
+    };
+  }, [liveMode, fetchLiveStatus, fetchLivePositions]);
 
   useEffect(() => {
     if (symbols.length === 0) return;
@@ -102,6 +237,9 @@ function SwarmDashboard() {
       onProposal: (p) => {
         setProposals((prev) => [p, ...prev].slice(0, 80));
         broker.onProposal(p);
+        if (liveModeRef.current && p.confidence >= LIVE_CONFIDENCE_THRESHOLD) {
+          void submitLiveTrade(p);
+        }
       },
       onStatus: (s) => setStatus(s),
     });
@@ -149,24 +287,56 @@ function SwarmDashboard() {
     setHalted(null);
   };
 
+  const handleCloseLive = useCallback(
+    async (symbol: string) => {
+      try {
+        await closeLive({ data: { symbol } });
+        pushLog({ ok: true, symbol, message: "Position closed via market order." });
+        const ps = (await fetchLivePositions().catch(() => [])) as LivePosition[];
+        setLivePositions(ps);
+      } catch (e) {
+        pushLog({
+          ok: false,
+          symbol,
+          message: e instanceof Error ? e.message : "Close failed",
+        });
+      }
+    },
+    [closeLive, fetchLivePositions, pushLog],
+  );
+
   return (
     <main className="min-h-screen bg-background text-foreground">
       <header className="border-b border-border">
         <div className="mx-auto flex max-w-[1600px] flex-wrap items-center justify-between gap-4 px-6 py-4">
           <div className="flex items-center gap-3">
-            <div className="live-dot h-2.5 w-2.5 rounded-full bg-bull" />
+            <div className={`live-dot h-2.5 w-2.5 rounded-full ${liveMode ? "bg-accent" : "bg-bull"}`} />
             <div>
               <h1 className="text-lg font-semibold tracking-tight">
                 Swarm Terminal
               </h1>
               <p className="text-xs text-muted-foreground">
-                Live consensus + paper execution across every Binance USDT-M
-                perpetual · SL {(DEFAULT_PAPER_CONFIG.slPct * 100).toFixed(1)}% /
-                TP {(DEFAULT_PAPER_CONFIG.tpPct * 100).toFixed(1)}%
+                {liveMode
+                  ? `LIVE TESTNET · orders placed at conf ≥ ${LIVE_CONFIDENCE_THRESHOLD} · $${LIVE_NOTIONAL_USD} @ ${LIVE_LEVERAGE}× · SL ${(LIVE_SL_PCT * 100).toFixed(1)}% / TP ${(LIVE_TP_PCT * 100).toFixed(1)}%`
+                  : `Paper execution · SL ${(DEFAULT_PAPER_CONFIG.slPct * 100).toFixed(1)}% / TP ${(DEFAULT_PAPER_CONFIG.tpPct * 100).toFixed(1)}%`}
               </p>
             </div>
           </div>
-          <div className="flex flex-wrap gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <button
+              onClick={() => {
+                setLiveMode((v) => !v);
+                if (!liveMode) setTab("live");
+              }}
+              className={`rounded-md border px-3 py-1.5 text-xs font-semibold transition-colors ${
+                liveMode
+                  ? "border-accent bg-accent/20 text-accent"
+                  : "border-border bg-card text-muted-foreground hover:text-foreground"
+              }`}
+              title="Toggle Binance testnet live trading"
+            >
+              {liveMode ? "● LIVE TESTNET" : "○ Paper mode"}
+            </button>
             <Stat
               label="Equity"
               value={formatUsd(equity)}
@@ -228,7 +398,7 @@ function SwarmDashboard() {
       <div className="mx-auto max-w-[1600px] px-6 py-6">
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
           <div className="flex gap-1 rounded-lg border border-border bg-card p-1">
-            {(["signals", "positions", "history", "board"] as Tab[]).map((t) => (
+            {(["signals", "positions", "history", "board", "live"] as Tab[]).map((t) => (
               <button
                 key={t}
                 onClick={() => setTab(t)}
@@ -242,6 +412,7 @@ function SwarmDashboard() {
                 {t === "signals" && ` (${proposals.length})`}
                 {t === "positions" && ` (${positions.length})`}
                 {t === "history" && ` (${closed.length})`}
+                {t === "live" && ` (${livePositions.length})`}
               </button>
             ))}
           </div>
@@ -272,8 +443,18 @@ function SwarmDashboard() {
           {tab === "board" && (
             <BoardPanel rows={filteredBoard} query={query} setQuery={setQuery} />
           )}
+          {tab === "live" && (
+            <LivePanel
+              enabled={liveMode}
+              status={liveStatus}
+              positions={livePositions}
+              log={liveLog}
+              onClose={handleCloseLive}
+            />
+          )}
         </section>
       </div>
+
 
       <footer className="mx-auto max-w-[1600px] px-6 pb-8">
         <p className="text-[11px] leading-relaxed text-muted-foreground">
@@ -672,3 +853,172 @@ function SignalRow({ proposal }: { proposal: TradeProposal }) {
     </li>
   );
 }
+
+function LivePanel({
+  enabled,
+  status,
+  positions,
+  log,
+  onClose,
+}: {
+  enabled: boolean;
+  status: LiveStatus | null;
+  positions: LivePosition[];
+  log: LiveLogEntry[];
+  onClose: (symbol: string) => void;
+}) {
+  return (
+    <>
+      <PanelHeader
+        title="Binance Testnet — Live Orders"
+        subtitle={
+          enabled
+            ? "High-confidence signals are executed on the futures testnet with attached SL/TP."
+            : "Enable LIVE TESTNET in the header to route high-confidence signals to real orders."
+        }
+        badge={enabled ? "LIVE" : "OFF"}
+      />
+      <div className="border-b border-border px-4 py-3">
+        {!enabled ? (
+          <p className="text-xs text-muted-foreground">
+            Live mode is off. Toggle the LIVE TESTNET button in the header to
+            start placing orders on Binance USDT-M futures testnet.
+          </p>
+        ) : !status ? (
+          <p className="text-xs text-muted-foreground">Loading account…</p>
+        ) : status.error ? (
+          <p className="text-xs text-bear">⚠ {status.error}</p>
+        ) : status.message ? (
+          <p className="text-xs text-bear">⚠ {status.message}</p>
+        ) : (
+          <div className="flex flex-wrap gap-2">
+            <Stat label="Wallet" value={formatUsd(status.wallet ?? 0)} />
+            <Stat label="Available" value={formatUsd(status.available ?? 0)} />
+            <Stat
+              label="uPnL"
+              value={formatUsd(status.unrealized ?? 0)}
+              tone={(status.unrealized ?? 0) >= 0 ? "bull" : "bear"}
+            />
+            <Stat label="Open" value={positions.length.toString()} />
+          </div>
+        )}
+      </div>
+
+      <div className="border-b border-border">
+        <div className="px-4 py-2 text-xs font-semibold text-muted-foreground">
+          Open testnet positions
+        </div>
+        {positions.length === 0 ? (
+          <EmptyState label="No open testnet positions." />
+        ) : (
+          <table className="w-full text-sm">
+            <thead className="text-xs text-muted-foreground">
+              <tr className="border-b border-border">
+                <th className="px-4 py-2 text-left font-medium">Symbol</th>
+                <th className="px-4 py-2 text-left font-medium">Side</th>
+                <th className="px-4 py-2 text-right font-medium">Size</th>
+                <th className="px-4 py-2 text-right font-medium">Entry</th>
+                <th className="px-4 py-2 text-right font-medium">Mark</th>
+                <th className="px-4 py-2 text-right font-medium">Liq</th>
+                <th className="px-4 py-2 text-right font-medium">uPnL</th>
+                <th className="px-4 py-2 text-right font-medium">Lev</th>
+                <th className="px-4 py-2 text-right font-medium"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {positions.map((p) => {
+                const tone = p.unrealized >= 0 ? "text-bull" : "text-bear";
+                return (
+                  <tr key={p.symbol} className="border-b border-border/50">
+                    <td className="px-4 py-1.5 font-mono text-xs">{p.symbol}</td>
+                    <td className="px-4 py-1.5">
+                      <span
+                        className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold ${
+                          p.side === "BUY"
+                            ? "bg-bull/15 text-bull"
+                            : "bg-bear/15 text-bear"
+                        }`}
+                      >
+                        {p.side}
+                      </span>
+                    </td>
+                    <td className="px-4 py-1.5 text-right font-mono text-xs tabular">
+                      {p.size}
+                    </td>
+                    <td className="px-4 py-1.5 text-right font-mono text-xs tabular">
+                      {formatPrice(p.entryPrice)}
+                    </td>
+                    <td className="px-4 py-1.5 text-right font-mono text-xs tabular">
+                      {formatPrice(p.markPrice)}
+                    </td>
+                    <td className="px-4 py-1.5 text-right font-mono text-xs tabular text-muted-foreground">
+                      {p.liquidation > 0 ? formatPrice(p.liquidation) : "—"}
+                    </td>
+                    <td className={`px-4 py-1.5 text-right font-mono text-xs tabular ${tone}`}>
+                      {formatUsd(p.unrealized)}
+                    </td>
+                    <td className="px-4 py-1.5 text-right font-mono text-xs tabular text-muted-foreground">
+                      {p.leverage}×
+                    </td>
+                    <td className="px-4 py-1.5 text-right">
+                      <button
+                        onClick={() => onClose(p.symbol)}
+                        className="rounded border border-bear/40 px-2 py-0.5 text-[10px] font-medium text-bear hover:bg-bear/10"
+                      >
+                        Close
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      <div>
+        <div className="px-4 py-2 text-xs font-semibold text-muted-foreground">
+          Order activity
+        </div>
+        {log.length === 0 ? (
+          <EmptyState label="No live orders yet." />
+        ) : (
+          <ul className="max-h-[40vh] divide-y divide-border overflow-y-auto">
+            {log.map((e) => (
+              <li key={e.id} className="flex items-start gap-3 px-4 py-2">
+                <span className="font-mono text-[11px] text-muted-foreground">
+                  {formatTime(e.time)}
+                </span>
+                <span
+                  className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold ${
+                    e.ok
+                      ? "bg-bull/15 text-bull"
+                      : "bg-bear/15 text-bear"
+                  }`}
+                >
+                  {e.ok ? "OK" : "ERR"}
+                </span>
+                <span className="font-mono text-xs">{e.symbol}</span>
+                {e.side && (
+                  <span
+                    className={`rounded px-1.5 py-0.5 font-mono text-[10px] ${
+                      e.side === "BUY"
+                        ? "bg-bull/15 text-bull"
+                        : "bg-bear/15 text-bear"
+                    }`}
+                  >
+                    {e.side}
+                  </span>
+                )}
+                <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
+                  {e.message}
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </>
+  );
+}
+
