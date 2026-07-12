@@ -853,3 +853,172 @@ function SignalRow({ proposal }: { proposal: TradeProposal }) {
     </li>
   );
 }
+
+function LivePanel({
+  enabled,
+  status,
+  positions,
+  log,
+  onClose,
+}: {
+  enabled: boolean;
+  status: LiveStatus | null;
+  positions: LivePosition[];
+  log: LiveLogEntry[];
+  onClose: (symbol: string) => void;
+}) {
+  return (
+    <>
+      <PanelHeader
+        title="Binance Testnet — Live Orders"
+        subtitle={
+          enabled
+            ? "High-confidence signals are executed on the futures testnet with attached SL/TP."
+            : "Enable LIVE TESTNET in the header to route high-confidence signals to real orders."
+        }
+        badge={enabled ? "LIVE" : "OFF"}
+      />
+      <div className="border-b border-border px-4 py-3">
+        {!enabled ? (
+          <p className="text-xs text-muted-foreground">
+            Live mode is off. Toggle the LIVE TESTNET button in the header to
+            start placing orders on Binance USDT-M futures testnet.
+          </p>
+        ) : !status ? (
+          <p className="text-xs text-muted-foreground">Loading account…</p>
+        ) : status.error ? (
+          <p className="text-xs text-bear">⚠ {status.error}</p>
+        ) : status.message ? (
+          <p className="text-xs text-bear">⚠ {status.message}</p>
+        ) : (
+          <div className="flex flex-wrap gap-2">
+            <Stat label="Wallet" value={formatUsd(status.wallet ?? 0)} />
+            <Stat label="Available" value={formatUsd(status.available ?? 0)} />
+            <Stat
+              label="uPnL"
+              value={formatUsd(status.unrealized ?? 0)}
+              tone={(status.unrealized ?? 0) >= 0 ? "bull" : "bear"}
+            />
+            <Stat label="Open" value={positions.length.toString()} />
+          </div>
+        )}
+      </div>
+
+      <div className="border-b border-border">
+        <div className="px-4 py-2 text-xs font-semibold text-muted-foreground">
+          Open testnet positions
+        </div>
+        {positions.length === 0 ? (
+          <EmptyState label="No open testnet positions." />
+        ) : (
+          <table className="w-full text-sm">
+            <thead className="text-xs text-muted-foreground">
+              <tr className="border-b border-border">
+                <th className="px-4 py-2 text-left font-medium">Symbol</th>
+                <th className="px-4 py-2 text-left font-medium">Side</th>
+                <th className="px-4 py-2 text-right font-medium">Size</th>
+                <th className="px-4 py-2 text-right font-medium">Entry</th>
+                <th className="px-4 py-2 text-right font-medium">Mark</th>
+                <th className="px-4 py-2 text-right font-medium">Liq</th>
+                <th className="px-4 py-2 text-right font-medium">uPnL</th>
+                <th className="px-4 py-2 text-right font-medium">Lev</th>
+                <th className="px-4 py-2 text-right font-medium"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {positions.map((p) => {
+                const tone = p.unrealized >= 0 ? "text-bull" : "text-bear";
+                return (
+                  <tr key={p.symbol} className="border-b border-border/50">
+                    <td className="px-4 py-1.5 font-mono text-xs">{p.symbol}</td>
+                    <td className="px-4 py-1.5">
+                      <span
+                        className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold ${
+                          p.side === "BUY"
+                            ? "bg-bull/15 text-bull"
+                            : "bg-bear/15 text-bear"
+                        }`}
+                      >
+                        {p.side}
+                      </span>
+                    </td>
+                    <td className="px-4 py-1.5 text-right font-mono text-xs tabular">
+                      {p.size}
+                    </td>
+                    <td className="px-4 py-1.5 text-right font-mono text-xs tabular">
+                      {formatPrice(p.entryPrice)}
+                    </td>
+                    <td className="px-4 py-1.5 text-right font-mono text-xs tabular">
+                      {formatPrice(p.markPrice)}
+                    </td>
+                    <td className="px-4 py-1.5 text-right font-mono text-xs tabular text-muted-foreground">
+                      {p.liquidation > 0 ? formatPrice(p.liquidation) : "—"}
+                    </td>
+                    <td className={`px-4 py-1.5 text-right font-mono text-xs tabular ${tone}`}>
+                      {formatUsd(p.unrealized)}
+                    </td>
+                    <td className="px-4 py-1.5 text-right font-mono text-xs tabular text-muted-foreground">
+                      {p.leverage}×
+                    </td>
+                    <td className="px-4 py-1.5 text-right">
+                      <button
+                        onClick={() => onClose(p.symbol)}
+                        className="rounded border border-bear/40 px-2 py-0.5 text-[10px] font-medium text-bear hover:bg-bear/10"
+                      >
+                        Close
+                      </button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      <div>
+        <div className="px-4 py-2 text-xs font-semibold text-muted-foreground">
+          Order activity
+        </div>
+        {log.length === 0 ? (
+          <EmptyState label="No live orders yet." />
+        ) : (
+          <ul className="max-h-[40vh] divide-y divide-border overflow-y-auto">
+            {log.map((e) => (
+              <li key={e.id} className="flex items-start gap-3 px-4 py-2">
+                <span className="font-mono text-[11px] text-muted-foreground">
+                  {formatTime(e.time)}
+                </span>
+                <span
+                  className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold ${
+                    e.ok
+                      ? "bg-bull/15 text-bull"
+                      : "bg-bear/15 text-bear"
+                  }`}
+                >
+                  {e.ok ? "OK" : "ERR"}
+                </span>
+                <span className="font-mono text-xs">{e.symbol}</span>
+                {e.side && (
+                  <span
+                    className={`rounded px-1.5 py-0.5 font-mono text-[10px] ${
+                      e.side === "BUY"
+                        ? "bg-bull/15 text-bull"
+                        : "bg-bear/15 text-bear"
+                    }`}
+                  >
+                    {e.side}
+                  </span>
+                )}
+                <span className="min-w-0 flex-1 truncate text-xs text-muted-foreground">
+                  {e.message}
+                </span>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </>
+  );
+}
+
