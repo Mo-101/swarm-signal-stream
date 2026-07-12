@@ -136,6 +136,7 @@ function SwarmDashboard() {
   const [tab, setTab] = useState<Tab>("signals");
   const [query, setQuery] = useState("");
   const [liveMode, setLiveMode] = useState(false);
+  const [liveProvider, setLiveProvider] = useState<LiveProvider>("bybit");
   const [liveStatus, setLiveStatus] = useState<LiveStatus | null>(null);
   const [livePositions, setLivePositions] = useState<LivePosition[]>([]);
   const [liveLog, setLiveLog] = useState<LiveLogEntry[]>([]);
@@ -145,13 +146,31 @@ function SwarmDashboard() {
   const marksRef = useRef<Map<string, number>>(new Map());
   const tickCounter = useRef(0);
   const liveModeRef = useRef(liveMode);
+  const liveProviderRef = useRef(liveProvider);
   const liveCooldownRef = useRef<Map<string, number>>(new Map());
   const liveInFlightRef = useRef<Set<string>>(new Set());
 
-  const placeLive = useServerFn(placeLiveTrade);
-  const fetchLiveStatus = useServerFn(getLiveStatus);
-  const fetchLivePositions = useServerFn(getLivePositions);
-  const closeLive = useServerFn(closeLivePosition);
+  const placeBinance = useServerFn(placeLiveTrade);
+  const fetchBinanceStatus = useServerFn(getLiveStatus);
+  const fetchBinancePositions = useServerFn(getLivePositions);
+  const closeBinance = useServerFn(closeLivePosition);
+  const placeBybit = useServerFn(placeBybitTrade);
+  const fetchBybitStatus = useServerFn(getBybitStatus);
+  const fetchBybitPositions = useServerFn(getBybitPositions);
+  const closeBybit = useServerFn(closeBybitPosition);
+
+  const placeLive = liveProvider === "bybit" ? placeBybit : placeBinance;
+  const fetchLiveStatus = liveProvider === "bybit" ? fetchBybitStatus : fetchBinanceStatus;
+  const fetchLivePositions =
+    liveProvider === "bybit" ? fetchBybitPositions : fetchBinancePositions;
+  const closeLive = liveProvider === "bybit" ? closeBybit : closeBinance;
+
+  useEffect(() => {
+    liveProviderRef.current = liveProvider;
+    // Reset status/positions when switching providers.
+    setLiveStatus(null);
+    setLivePositions([]);
+  }, [liveProvider]);
 
   useEffect(() => {
     liveModeRef.current = liveMode;
