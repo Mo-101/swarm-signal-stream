@@ -6,6 +6,9 @@ import { createServerFn } from "@tanstack/react-start";
 
 const BASE = "https://testnet.binancefuture.com";
 
+const TESTNET_KEY_HELP =
+  "Use a Binance Futures Testnet key from testnet.binancefuture.com and save only the raw key text, not a .env line or quotes.";
+
 // ─── Signing ─────────────────────────────────────────────────────────────
 async function hmacSha256Hex(secret: string, msg: string): Promise<string> {
   const key = await crypto.subtle.importKey(
@@ -21,13 +24,48 @@ async function hmacSha256Hex(secret: string, msg: string): Promise<string> {
     .join("");
 }
 
+function normalizeSecret(raw: string | undefined, envName: string): string | undefined {
+  if (!raw) return undefined;
+  let value = raw.trim().replace(/[\u200B-\u200D\uFEFF]/g, "");
+  if (value.startsWith(`${envName}=`)) value = value.slice(envName.length + 1).trim();
+  if (
+    (value.startsWith('"') && value.endsWith('"')) ||
+    (value.startsWith("'") && value.endsWith("'")) ||
+    (value.startsWith("`") && value.endsWith("`"))
+  ) {
+    value = value.slice(1, -1).trim();
+  }
+  return value.replace(/\s+/g, "");
+}
+
 function creds() {
-  const apiKey = process.env.BINANCE_TESTNET_API_KEY?.trim();
-  const apiSecret = process.env.BINANCE_TESTNET_SECRET?.trim();
+  const apiKey = normalizeSecret(
+    process.env.BINANCE_TESTNET_API_KEY,
+    "BINANCE_TESTNET_API_KEY",
+  );
+  const apiSecret = normalizeSecret(
+    process.env.BINANCE_TESTNET_SECRET,
+    "BINANCE_TESTNET_SECRET",
+  );
   if (!apiKey || !apiSecret) {
     throw new Error("Binance testnet credentials are not configured.");
   }
+  if (!/^[A-Za-z0-9]{40,128}$/.test(apiKey)) {
+    throw new Error(`Stored BINANCE_TESTNET_API_KEY is malformed. ${TESTNET_KEY_HELP}`);
+  }
   return { apiKey, apiSecret };
+}
+
+function formatBinanceError(status: number, body: string): string {
+  try {
+    const parsed = JSON.parse(body) as { code?: number; msg?: string };
+    if (parsed.code === -2014) {
+      return `Binance rejected the stored API key. ${TESTNET_KEY_HELP}`;
+    }
+    return `Binance ${status}: ${parsed.msg ?? body}`;
+  } catch {
+    return `Binance ${status}: ${body}`;
+  }
 }
 
 async function signedRequest<T = unknown>(
@@ -49,7 +87,7 @@ async function signedRequest<T = unknown>(
   });
   const text = await res.text();
   if (!res.ok) {
-    throw new Error(`Binance ${res.status}: ${text}`);
+    throw new Error(formatBinanceError(res.status, text));
   }
   return text ? (JSON.parse(text) as T) : ({} as T);
 }
@@ -116,8 +154,14 @@ function roundStep(value: number, step: number, precision: number): string {
 // ─── Server functions ────────────────────────────────────────────────────
 
 export const getLiveStatus = createServerFn({ method: "GET" }).handler(async () => {
-  const apiKey = process.env.BINANCE_TESTNET_API_KEY;
-  const apiSecret = process.env.BINANCE_TESTNET_SECRET;
+  const apiKey = normalizeSecret(
+    process.env.BINANCE_TESTNET_API_KEY,
+    "BINANCE_TESTNET_API_KEY",
+  );
+  const apiSecret = normalizeSecret(
+    process.env.BINANCE_TESTNET_SECRET,
+    "BINANCE_TESTNET_SECRET",
+  );
   if (!apiKey || !apiSecret) {
     return { configured: false as const, message: "Testnet keys not set." };
   }
@@ -301,7 +345,11 @@ export const getLivePositions = createServerFn({ method: "GET" }).handler(async 
         };
       });
   } catch (e) {
-    throw new Error(e instanceof Error ? e.message : "Failed to fetch positions.");
+    console.warn(
+      "Unable to fetch Binance testnet positions:",
+      e instanceof Error ? e.message : "Failed to fetch positions.",
+    );
+    return [];
   }
 });
 
