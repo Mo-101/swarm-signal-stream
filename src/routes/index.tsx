@@ -398,7 +398,7 @@ function SwarmDashboard() {
       <div className="mx-auto max-w-[1600px] px-6 py-6">
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
           <div className="flex gap-1 rounded-lg border border-border bg-card p-1">
-            {(["signals", "positions", "history", "board"] as Tab[]).map((t) => (
+            {(["signals", "positions", "history", "board", "live"] as Tab[]).map((t) => (
               <button
                 key={t}
                 onClick={() => setTab(t)}
@@ -412,6 +412,7 @@ function SwarmDashboard() {
                 {t === "signals" && ` (${proposals.length})`}
                 {t === "positions" && ` (${positions.length})`}
                 {t === "history" && ` (${closed.length})`}
+                {t === "live" && ` (${livePositions.length})`}
               </button>
             ))}
           </div>
@@ -442,8 +443,18 @@ function SwarmDashboard() {
           {tab === "board" && (
             <BoardPanel rows={filteredBoard} query={query} setQuery={setQuery} />
           )}
+          {tab === "live" && (
+            <LivePanel
+              enabled={liveMode}
+              status={liveStatus}
+              positions={livePositions}
+              log={liveLog}
+              onClose={handleCloseLive}
+            />
+          )}
         </section>
       </div>
+
 
       <footer className="mx-auto max-w-[1600px] px-6 pb-8">
         <p className="text-[11px] leading-relaxed text-muted-foreground">
