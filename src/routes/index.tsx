@@ -19,6 +19,14 @@ import {
   placeLiveTrade,
   closeLivePosition,
 } from "@/lib/live-trader.functions";
+import {
+  getBybitStatus,
+  getBybitPositions,
+  placeBybitTrade,
+  closeBybitPosition,
+} from "@/lib/bybit-trader.functions";
+
+type LiveProvider = "binance" | "bybit";
 
 interface LiveStatus {
   configured: boolean;
