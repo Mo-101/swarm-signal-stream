@@ -1,4 +1,4 @@
-// AI Trading Swarm — browser-side implementation.
+// AI Trading Swarm — browser-side implementation (fixed)
 // Streams Binance USDT-M perpetual futures aggTrades via WebSocket,
 // runs a swarm of stateless agents, and emits consensus trade proposals.
 // PAPER TRADING ONLY — no order execution.
@@ -32,7 +32,7 @@ export interface SymbolState {
   lastPrice: number;
   prevPrice: number;
   lastTime: number;
-  change1m: number;
+  change1m: number; // actually change over the window (keep for compatibility)
   updates: number;
 }
 
@@ -127,10 +127,8 @@ export const BreakoutAgent: Agent = {
     const hi = Math.max(...w);
     const lo = Math.min(...w);
     const last = prices[prices.length - 1];
-    if (last > hi && hi > 0)
-      return { direction: "BUY", confidence: Math.min(((last - hi) / hi) * 100, 1) };
-    if (last < lo && lo > 0)
-      return { direction: "SELL", confidence: Math.min(((lo - last) / lo) * 100, 1) };
+    if (last > hi && hi > 0) return { direction: "BUY", confidence: Math.min(((last - hi) / hi) * 100, 1) };
+    if (last < lo && lo > 0) return { direction: "SELL", confidence: Math.min(((lo - last) / lo) * 100, 1) };
     return { direction: "NEUTRAL", confidence: 0 };
   },
 };
@@ -146,13 +144,10 @@ export const MemeAgent: Agent = {
     const avg = prior.reduce((a, b) => a + b, 0) / prior.length;
     if (avg === 0) return { direction: "NEUTRAL", confidence: 0 };
     const ratio = last / avg;
-    // Direction based on short price trend
     const p = prices.slice(-6);
     const trend = p.length >= 2 ? p[p.length - 1] - p[0] : 0;
-    if (ratio > 2.5 && trend > 0)
-      return { direction: "BUY", confidence: Math.min(ratio / 6, 1) };
-    if (ratio > 2.5 && trend < 0)
-      return { direction: "SELL", confidence: Math.min(ratio / 6, 1) };
+    if (ratio > 2.5 && trend > 0) return { direction: "BUY", confidence: Math.min(ratio / 6, 1) };
+    if (ratio > 2.5 && trend < 0) return { direction: "SELL", confidence: Math.min(ratio / 6, 1) };
     return { direction: "NEUTRAL", confidence: 0 };
   },
 };
@@ -224,16 +219,11 @@ export async function fetchPerpetualSymbols(signal?: AbortSignal): Promise<strin
     }>;
   };
   return data.symbols
-    .filter(
-      (s) =>
-        s.contractType === "PERPETUAL" &&
-        s.status === "TRADING" &&
-        s.quoteAsset === "USDT",
-    )
+    .filter((s) => s.contractType === "PERPETUAL" && s.status === "TRADING" && s.quoteAsset === "USDT")
     .map((s) => s.symbol);
 }
 
-// ─── Stream manager ───────────────────────────────────────────────────────
+// ─── Stream manager (FIXED) ───────────────────────────────────────────────
 export interface SwarmEvents {
   onTick?: (t: Tick) => void;
   onProposal?: (p: TradeProposal) => void;
@@ -245,6 +235,7 @@ const EVAL_INTERVAL_MS = 1500;
 
 export class SwarmEngine {
   private sockets: WebSocket[] = [];
+  private reconnectTimers = new Map<number, ReturnType<typeof setTimeout>>();
   private priceBuf = new Map<string, Ring>();
   private volBuf = new Map<string, Ring>();
   private state = new Map<string, SymbolState>();
@@ -262,15 +253,24 @@ export class SwarmEngine {
   }
 
   start() {
+    this.stopped = false;
     const chunks: string[][] = [];
     for (let i = 0; i < this.symbols.length; i += STREAMS_PER_CONN) {
       chunks.push(this.symbols.slice(i, i + STREAMS_PER_CONN));
     }
-    for (const chunk of chunks) this.openSocket(chunk);
+    for (let chunkId = 0; chunkId < chunks.length; chunkId++) {
+      this.openSocket(chunks[chunkId], chunkId);
+    }
   }
 
   stop() {
     this.stopped = true;
+    // Cancel all scheduled reconnections
+    for (const timer of this.reconnectTimers.values()) {
+      clearTimeout(timer);
+    }
+    this.reconnectTimers.clear();
+    // Close all active sockets
     for (const ws of this.sockets) {
       try {
         ws.close();
@@ -279,33 +279,63 @@ export class SwarmEngine {
       }
     }
     this.sockets = [];
+    this.connected = 0;
+    this.events.onStatus?.({ connected: 0, total: 0 });
   }
 
-  private openSocket(chunk: string[]) {
+  private openSocket(chunk: string[], chunkId: number) {
     const streams = chunk.map((s) => `${s.toLowerCase()}@aggTrade`).join("/");
     const url = `wss://fstream.binance.com/stream?streams=${streams}`;
     const ws = new WebSocket(url);
-    this.sockets.push(ws);
 
     ws.onopen = () => {
-      this.connected++;
-      this.events.onStatus?.({ connected: this.connected, total: this.sockets.length });
-    };
-    ws.onclose = () => {
-      this.connected = Math.max(0, this.connected - 1);
-      this.events.onStatus?.({ connected: this.connected, total: this.sockets.length });
-      if (!this.stopped) {
-        setTimeout(() => this.openSocket(chunk), 3000);
-        this.sockets = this.sockets.filter((s) => s !== ws);
+      if (this.stopped) {
+        ws.close();
+        return;
       }
+      this.connected++;
+      this.sockets.push(ws);
+      this.events.onStatus?.({
+        connected: this.connected,
+        total: this.sockets.length,
+      });
     };
+
+    ws.onclose = () => {
+      if (this.stopped) return;
+
+      this.connected = Math.max(0, this.connected - 1);
+      // Remove closed socket from the list before reporting status
+      this.sockets = this.sockets.filter((s) => s !== ws);
+      this.events.onStatus?.({
+        connected: this.connected,
+        total: this.sockets.length,
+      });
+
+      // Clear any previous pending reconnection timer for this chunk
+      const existingTimer = this.reconnectTimers.get(chunkId);
+      if (existingTimer !== undefined) {
+        clearTimeout(existingTimer);
+      }
+      // Schedule reconnection with a stable chunkId
+      const timer = setTimeout(() => {
+        this.reconnectTimers.delete(chunkId);
+        if (!this.stopped) {
+          this.openSocket(chunk, chunkId);
+        }
+      }, 3000);
+      this.reconnectTimers.set(chunkId, timer);
+    };
+
     ws.onerror = () => {
+      // The browser will trigger onclose after this, no need to duplicate logic
       try {
         ws.close();
       } catch {
         /* noop */
       }
     };
+
     ws.onmessage = (ev) => this.handleMessage(ev.data as string);
   }
 
@@ -335,17 +365,17 @@ export class SwarmEngine {
       this.volBuf.set(symbol, vb);
     }
     pb.push(price);
-    vb.push(qty * price);
+    vb.push(qty * price); // notional volume
 
     const prev = this.state.get(symbol);
-    const first = pb.toArray()[0] ?? price;
-    const change1m = first ? ((price - first) / first) * 100 : 0;
+    const windowStart = pb.toArray()[0] ?? price;
+    const change1m = windowStart ? ((price - windowStart) / windowStart) * 100 : 0;
     const next: SymbolState = {
       symbol,
       lastPrice: price,
       prevPrice: prev?.lastPrice ?? price,
       lastTime: time,
-      change1m,
+      change1m, // note: this is actually the change over the window (not exactly 1 min)
       updates: (prev?.updates ?? 0) + 1,
     };
     this.state.set(symbol, next);
