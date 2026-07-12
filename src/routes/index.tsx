@@ -1,5 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useServerFn } from "@tanstack/react-start";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   SwarmEngine,
   fetchPerpetualSymbols,
@@ -12,6 +13,46 @@ import {
   type Position,
   type ClosedTrade,
 } from "@/lib/paper-broker";
+import {
+  getLiveStatus,
+  getLivePositions,
+  placeLiveTrade,
+  closeLivePosition,
+} from "@/lib/live-trader.functions";
+
+interface LiveStatus {
+  configured: boolean;
+  wallet?: number;
+  unrealized?: number;
+  available?: number;
+  error?: string;
+  message?: string;
+}
+interface LivePosition {
+  symbol: string;
+  side: "BUY" | "SELL";
+  size: number;
+  entryPrice: number;
+  markPrice: number;
+  unrealized: number;
+  liquidation: number;
+  leverage: number;
+}
+interface LiveLogEntry {
+  id: string;
+  time: number;
+  ok: boolean;
+  symbol: string;
+  side?: "BUY" | "SELL";
+  message: string;
+}
+
+const LIVE_CONFIDENCE_THRESHOLD = 0.75;
+const LIVE_NOTIONAL_USD = 100;
+const LIVE_SL_PCT = 0.008;
+const LIVE_TP_PCT = 0.016;
+const LIVE_LEVERAGE = 5;
+const LIVE_COOLDOWN_MS = 60_000;
 
 export const Route = createFileRoute("/")({
   head: () => ({
