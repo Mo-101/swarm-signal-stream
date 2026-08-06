@@ -1,0 +1,130 @@
+{
+  "version": 1,
+  "sdk_version": "0.26.1",
+  "path": "/mcp",
+  "auth": {
+    "type": "none"
+  },
+  "mcp": {
+    "server": {
+      "name": "alpha-swarm",
+      "version": "0.1.0",
+      "title": "Alpha Swarm"
+    },
+    "tools": [
+      {
+        "name": "list_perpetuals",
+        "title": "List USDT-M perpetuals",
+        "description": "List every USDT-M perpetual futures contract currently trading on Binance, including altcoins, memecoins, and new listings. Optionally filter by a substring and sort newest-listed first.",
+        "annotations": {
+          "readOnlyHint": true,
+          "idempotentHint": true,
+          "openWorldHint": true
+        },
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "filter": {
+              "type": "string",
+              "description": "Case-insensitive substring to match against the symbol, e.g. 'DOGE'."
+            },
+            "newestFirst": {
+              "type": "boolean",
+              "description": "Sort by listing date, newest contracts first. Defaults to alphabetical."
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 500,
+              "description": "Maximum number of symbols to return. Defaults to 100."
+            }
+          },
+          "additionalProperties": false,
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        },
+        "outputSchema": null
+      },
+      {
+        "name": "market_movers",
+        "title": "Market movers",
+        "description": "Rank Binance USDT-M perpetuals by 24h price change or traded volume to see what is running right now. Returns last price, 24h change %, high/low, and quote volume for each contract.",
+        "annotations": {
+          "readOnlyHint": true,
+          "idempotentHint": true,
+          "openWorldHint": true
+        },
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "rankBy": {
+              "type": "string",
+              "enum": [
+                "gainers",
+                "losers",
+                "volume"
+              ],
+              "description": "Ranking to apply. Defaults to 'gainers'."
+            },
+            "minQuoteVolume": {
+              "type": "number",
+              "minimum": 0,
+              "description": "Ignore contracts below this 24h quote volume in USDT, to filter out illiquid noise. Defaults to 1,000,000."
+            },
+            "limit": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 100,
+              "description": "Number of contracts to return. Defaults to 15."
+            }
+          },
+          "additionalProperties": false,
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        },
+        "outputSchema": null
+      },
+      {
+        "name": "analyze_symbol",
+        "title": "Run the swarm on a symbol",
+        "description": "Run Alpha Swarm's four trading agents (Trend, MeanRev, Breakout, Meme) over recent Binance candles for one USDT-M perpetual and return each agent's vote plus the weighted consensus BUY/SELL/NEUTRAL signal and confidence. Analysis only — this places no orders.",
+        "annotations": {
+          "readOnlyHint": true,
+          "idempotentHint": true,
+          "openWorldHint": true
+        },
+        "inputSchema": {
+          "type": "object",
+          "properties": {
+            "symbol": {
+              "type": "string",
+              "description": "USDT-M perpetual symbol, e.g. 'BTCUSDT' or 'DOGEUSDT'."
+            },
+            "interval": {
+              "type": "string",
+              "enum": [
+                "1m",
+                "3m",
+                "5m",
+                "15m",
+                "1h",
+                "4h"
+              ],
+              "description": "Candle interval to analyze. Defaults to '1m'."
+            },
+            "threshold": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 3,
+              "description": "Weighted net score needed to emit a directional signal. Lower is more sensitive. Defaults to 0.6."
+            }
+          },
+          "required": [
+            "symbol"
+          ],
+          "additionalProperties": false,
+          "$schema": "http://json-schema.org/draft-07/schema#"
+        },
+        "outputSchema": null
+      }
+    ]
+  }
+}
