@@ -118,7 +118,13 @@ export function EdgePanel({
             minConf {learned.minConfidence.toFixed(2)}
           </span>
           <span className="rounded border border-border px-2 py-1 font-mono text-foreground">
+            edge hurdle {learned.requiredEdgeBps.toFixed(1)} bps
+          </span>
+          <span className="rounded border border-border px-2 py-1 font-mono text-foreground">
             suppressed {learned.suppressedSymbols.length}
+          </span>
+          <span className="rounded border border-border px-2 py-1 font-mono text-foreground">
+            cost-suppressed {learned.costSuppressedSymbols.length}
           </span>
         </div>
         {learned.suppressedSymbols.length > 0 && (
@@ -126,9 +132,27 @@ export function EdgePanel({
             {learned.suppressedSymbols.slice(0, 24).join(" · ")}
           </p>
         )}
+        {learned.costSuppressedSymbols.length > 0 && (
+          <p className="mt-1 font-mono text-[10px] text-accent">
+            cost drag kills edge: {learned.costSuppressedSymbols.slice(0, 24).join(" · ")}
+          </p>
+        )}
+        {report.execution && report.execution.trades > 0 && (
+          <p className="mt-2 text-[10px] text-muted-foreground">
+            Stored execution: gross {usd(report.execution.gross_pnl)} → net{" "}
+            {usd(report.execution.net_pnl)} after {usd(report.execution.fees)} fees,{" "}
+            {usd(report.execution.funding)} funding and {usd(report.execution.slip_cost)}{" "}
+            slippage · avg round-trip slip{" "}
+            {(
+              report.execution.avg_entry_slip_bps + report.execution.avg_exit_slip_bps
+            ).toFixed(1)}{" "}
+            bps · {report.execution.liquidations} liquidations.
+          </p>
+        )}
         <p className="mt-2 text-[10px] text-muted-foreground">
           Ingested: {storedSignals} signals · {storedTrades} trades persisted to your account.
         </p>
+
       </section>
 
       <div className="grid gap-3 lg:grid-cols-2">
