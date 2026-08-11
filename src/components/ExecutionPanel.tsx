@@ -262,7 +262,87 @@ export function ExecutionPanel({
   );
 }
 
+
+function AlphaVsFills({ closed, stats }: { closed: ClosedTrade[]; stats: ExecutionStats }) {
+  const n = closed.length;
+  const gross = closed.reduce((a, t) => a + t.grossPnl, 0);
+  const net = closed.reduce((a, t) => a + t.pnl, 0);
+  const fees = closed.reduce((a, t) => a + t.fees, 0);
+  const funding = closed.reduce((a, t) => a + t.funding, 0);
+  const slip = closed.reduce((a, t) => a + t.slipCostUsd, 0);
+  const cost = fees + funding + slip;
+  const share = (v: number) => (gross !== 0 ? Math.min(100, (Math.abs(v) / Math.abs(gross)) * 100) : 0);
+  const avgLatency = n ? closed.reduce((a, t) => a + t.latencyMs, 0) / n : 0;
+  const bookShare = n ? (closed.filter((t) => t.bookPriced).length / n) * 100 : 0;
+  const verdict =
+    n === 0
+      ? "No closed round trips yet."
+      : gross <= 0 && net > 0
+        ? "Profit is coming from fills, not alpha — the signal loses at mid price."
+        : gross > 0 && net <= 0
+          ? "Alpha is real but execution eats all of it — costs exceed the raw edge."
+          : gross > 0 && cost / Math.abs(gross) > 0.5
+            ? "Alpha-driven, but over half of the raw edge is lost to fills."
+            : gross > 0
+              ? "Alpha-driven: raw signal edge survives execution cost."
+              : "Both raw edge and net result are negative.";
+
+  return (
+    <section className="rounded-lg border border-border">
+      <Header
+        title="Alpha vs fills"
+        subtitle="Signal edge at mid price versus what the fills actually cost"
+      />
+      <div className="grid gap-3 p-4 sm:grid-cols-2 lg:grid-cols-4">
+        <Card
+          title="Gross (alpha)"
+          value={usd(gross)}
+          sub={`${n} round trips at signal-to-trigger prices`}
+          tone={gross >= 0 ? "bull" : "bear"}
+        />
+        <Card
+          title="Execution cost"
+          value={usd(-cost)}
+          sub={`fees ${usd(fees)} · funding ${usd(funding)} · slip ${usd(slip)}`}
+          tone={cost > 0 ? "bear" : "neutral"}
+        />
+        <Card
+          title="Net realized"
+          value={usd(net)}
+          sub={gross !== 0 ? `${((net / Math.abs(gross)) * 100).toFixed(0)}% of gross retained` : "—"}
+          tone={net >= 0 ? "bull" : "bear"}
+        />
+        <Card
+          title="Trigger → fill"
+          value={`${avgLatency.toFixed(0)} ms`}
+          sub={`entry ${bps(stats.avgEntrySlipBps)} · exit ${bps(stats.avgExitSlipBps)} · ${bookShare.toFixed(0)}% book-priced`}
+          tone={avgLatency <= 400 ? "bull" : "neutral"}
+        />
+      </div>
+      <div className="space-y-2 px-4 pb-4">
+        {[
+          { label: "Fees", value: fees, className: "bg-bear/60" },
+          { label: "Funding", value: funding, className: "bg-accent/60" },
+          { label: "Slippage", value: slip, className: "bg-bear/40" },
+        ].map((row) => (
+          <div key={row.label} className="flex items-center gap-3">
+            <span className="w-20 text-[11px] text-muted-foreground">{row.label}</span>
+            <div className="h-1.5 flex-1 overflow-hidden rounded bg-muted">
+              <div className={`h-full ${row.className}`} style={{ width: `${share(row.value)}%` }} />
+            </div>
+            <span className="w-28 text-right font-mono text-[11px] tabular text-muted-foreground">
+              {usd(row.value)} · {share(row.value).toFixed(0)}% of gross
+            </span>
+          </div>
+        ))}
+        <p className="pt-1 text-[11px] text-muted-foreground">{verdict}</p>
+      </div>
+    </section>
+  );
+}
+
 function Card({
+
   title,
   value,
   sub,
