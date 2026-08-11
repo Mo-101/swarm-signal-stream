@@ -123,7 +123,7 @@ async function signedRequest<T = unknown>(
 ): Promise<T> {
   const { apiKey, apiSecret } = creds();
   const timestamp = Date.now().toString();
-  let url = `${BASE}${path}`;
+  let url = `${baseUrl()}${path}`;
   let body = "";
   let payload = "";
   if (method === "GET") {
