@@ -1,13 +1,26 @@
-// Server-side Bybit V5 USDT-perpetual TESTNET trading.
-// Signs requests with HMAC-SHA256 via Web Crypto. Uses api-testnet.bybit.com.
+// Server-side Bybit V5 USDT-perpetual trading.
+// Signs requests with HMAC-SHA256 via Web Crypto.
+// Venue is testnet by default; set BYBIT_ENV=mainnet to trade the real book.
 
 import { createServerFn } from "@tanstack/react-start";
 
-const BASE = "https://api-testnet.bybit.com";
+const TESTNET_BASE = "https://api-testnet.bybit.com";
+const MAINNET_BASE = "https://api.bybit.com";
 const RECV_WINDOW = "5000";
 
+/** "testnet" (default) or "mainnet" — mainnet means REAL funds. */
+function venue(): "testnet" | "mainnet" {
+  const raw = (process.env.BYBIT_ENV ?? "").trim().toLowerCase();
+  return raw === "mainnet" || raw === "live" || raw === "prod" ? "mainnet" : "testnet";
+}
+
+function baseUrl(): string {
+  return venue() === "mainnet" ? MAINNET_BASE : TESTNET_BASE;
+}
+
 const KEY_HELP =
-  "Use a Bybit Testnet key from testnet.bybit.com (Account > API) and save only the raw key text, not a .env line or quotes.";
+  "Use a Bybit Testnet key from testnet.bybit.com (Account > API) and save only the raw key text, not a .env line or quotes. Mainnet keys do NOT work on testnet.";
+
 
 async function hmacSha256Hex(secret: string, msg: string): Promise<string> {
   const key = await crypto.subtle.importKey(
