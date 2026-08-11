@@ -1,13 +1,26 @@
-// Server-side Bybit V5 USDT-perpetual TESTNET trading.
-// Signs requests with HMAC-SHA256 via Web Crypto. Uses api-testnet.bybit.com.
+// Server-side Bybit V5 USDT-perpetual trading.
+// Signs requests with HMAC-SHA256 via Web Crypto.
+// Venue is testnet by default; set BYBIT_ENV=mainnet to trade the real book.
 
 import { createServerFn } from "@tanstack/react-start";
 
-const BASE = "https://api-testnet.bybit.com";
+const TESTNET_BASE = "https://api-testnet.bybit.com";
+const MAINNET_BASE = "https://api.bybit.com";
 const RECV_WINDOW = "5000";
 
+/** "testnet" (default) or "mainnet" — mainnet means REAL funds. */
+function venue(): "testnet" | "mainnet" {
+  const raw = (process.env.BYBIT_ENV ?? "").trim().toLowerCase();
+  return raw === "mainnet" || raw === "live" || raw === "prod" ? "mainnet" : "testnet";
+}
+
+function baseUrl(): string {
+  return venue() === "mainnet" ? MAINNET_BASE : TESTNET_BASE;
+}
+
 const KEY_HELP =
-  "Use a Bybit Testnet key from testnet.bybit.com (Account > API) and save only the raw key text, not a .env line or quotes.";
+  "Use a Bybit Testnet key from testnet.bybit.com (Account > API) and save only the raw key text, not a .env line or quotes. Mainnet keys do NOT work on testnet.";
+
 
 async function hmacSha256Hex(secret: string, msg: string): Promise<string> {
   const key = await crypto.subtle.importKey(
@@ -37,18 +50,23 @@ function normalizeSecret(raw: string | undefined, envName: string): string | und
   return value.replace(/\s+/g, "");
 }
 
+/** Testnet-named vars win; plain BYBIT_API_* are accepted as a fallback. */
+function readCreds() {
+  const apiKey =
+    normalizeSecret(process.env.BYBIT_TESTNET_API_KEY, "BYBIT_TESTNET_API_KEY") ||
+    normalizeSecret(process.env.BYBIT_API_KEY, "BYBIT_API_KEY");
+  const apiSecret =
+    normalizeSecret(process.env.BYBIT_TESTNET_SECRET, "BYBIT_TESTNET_SECRET") ||
+    normalizeSecret(process.env.BYBIT_API_SECRET, "BYBIT_API_SECRET");
+  return { apiKey, apiSecret };
+}
+
 function creds() {
-  const apiKey = normalizeSecret(
-    process.env.BYBIT_TESTNET_API_KEY,
-    "BYBIT_TESTNET_API_KEY",
-  );
-  const apiSecret = normalizeSecret(
-    process.env.BYBIT_TESTNET_SECRET,
-    "BYBIT_TESTNET_SECRET",
-  );
+  const { apiKey, apiSecret } = readCreds();
   if (!apiKey || !apiSecret) throw new Error("Bybit testnet credentials are not configured.");
   return { apiKey, apiSecret };
 }
+
 
 interface BybitErrorInfo {
   message: string;
@@ -105,7 +123,7 @@ async function signedRequest<T = unknown>(
 ): Promise<T> {
   const { apiKey, apiSecret } = creds();
   const timestamp = Date.now().toString();
-  let url = `${BASE}${path}`;
+  let url = `${baseUrl()}${path}`;
   let body = "";
   let payload = "";
   if (method === "GET") {
@@ -208,14 +226,8 @@ function roundStep(value: number, step: number, precision: number): string {
 
 // ─── Server functions ────────────────────────────────────────────────────
 export const getBybitStatus = createServerFn({ method: "GET" }).handler(async () => {
-  const apiKey = normalizeSecret(
-    process.env.BYBIT_TESTNET_API_KEY,
-    "BYBIT_TESTNET_API_KEY",
-  );
-  const apiSecret = normalizeSecret(
-    process.env.BYBIT_TESTNET_SECRET,
-    "BYBIT_TESTNET_SECRET",
-  );
+  const { apiKey, apiSecret } = readCreds();
+
   const diagnostics = {
     keyPresent: !!apiKey,
     secretPresent: !!apiSecret,
@@ -224,9 +236,11 @@ export const getBybitStatus = createServerFn({ method: "GET" }).handler(async ()
     keyFormatOk: !!apiKey && /^[A-Za-z0-9_-]{12,64}$/.test(apiKey),
     secretFormatOk: !!apiSecret && /^[A-Za-z0-9_-]{20,128}$/.test(apiSecret),
   };
+  const env = venue();
   if (!apiKey || !apiSecret) {
     return {
       configured: false as const,
+      env,
       message: !apiKey && !apiSecret
         ? "Neither BYBIT_TESTNET_API_KEY nor BYBIT_TESTNET_SECRET is saved."
         : !apiKey
@@ -240,6 +254,7 @@ export const getBybitStatus = createServerFn({ method: "GET" }).handler(async ()
       list: Array<{
         totalWalletBalance: string;
         totalAvailableBalance: string;
+        totalEquity?: string;
         totalPerpUPL?: string;
       }>;
     }
@@ -247,31 +262,91 @@ export const getBybitStatus = createServerFn({ method: "GET" }).handler(async ()
       accountType: "UNIFIED",
     });
     const row = w.list?.[0];
+    const wallet = parseFloat(row?.totalWalletBalance || row?.totalEquity || "0");
     return {
       configured: true as const,
-      wallet: parseFloat(row?.totalWalletBalance ?? "0"),
+      env,
+      wallet,
       unrealized: parseFloat(row?.totalPerpUPL ?? "0"),
       available: parseFloat(row?.totalAvailableBalance ?? "0"),
       diagnostics,
+      ...(wallet <= 0
+        ? {
+            warning:
+              env === "testnet"
+                ? "Account balance is zero — request testnet funds at testnet.bybit.com before arming live mode."
+                : "Account balance is zero — no order can be filled.",
+          }
+        : {}),
     };
   } catch (e) {
+    const wrongVenue = await detectVenueMismatch(apiKey, apiSecret, env);
+    const base = {
+      configured: true as const,
+      env,
+      diagnostics,
+      ...(wrongVenue ? { wrongVenue } : {}),
+    };
     if (e instanceof BybitError) {
       return {
-        configured: true as const,
-        error: e.info.message,
+        ...base,
+        error: wrongVenue
+          ? `These credentials are ${wrongVenue} keys, but the app is set to ${env}.`
+          : e.info.message,
         errorCode: e.info.code,
-        errorReason: e.info.reason,
-        hint: e.info.hint,
-        diagnostics,
+        errorReason: wrongVenue ? ("key-invalid" as const) : e.info.reason,
+        hint: wrongVenue
+          ? `Create a ${env} key pair (${env === "testnet" ? "testnet.bybit.com" : "bybit.com"} > API management) and save it, or switch the venue by setting BYBIT_ENV=${wrongVenue}.`
+          : e.info.hint,
       };
     }
     return {
-      configured: true as const,
-      error: e instanceof Error ? e.message : "Failed to reach testnet.",
-      diagnostics,
+      ...base,
+      error: e instanceof Error ? e.message : `Failed to reach Bybit ${env}.`,
+      ...(wrongVenue
+        ? {
+            hint: `These look like ${wrongVenue} credentials while the app is pointed at ${env}.`,
+          }
+        : {}),
     };
   }
 });
+
+/**
+ * When auth fails, probe the *other* venue with the same credentials so the
+ * UI can say "these are mainnet keys" instead of a generic signature error.
+ */
+async function detectVenueMismatch(
+  apiKey: string,
+  apiSecret: string,
+  current: "testnet" | "mainnet",
+): Promise<"testnet" | "mainnet" | null> {
+  const other = current === "testnet" ? "mainnet" : "testnet";
+  const host = other === "mainnet" ? MAINNET_BASE : TESTNET_BASE;
+  try {
+    const timestamp = Date.now().toString();
+    const query = "accountType=UNIFIED";
+    const signature = await hmacSha256Hex(
+      apiSecret,
+      `${timestamp}${apiKey}${RECV_WINDOW}${query}`,
+    );
+    const res = await fetch(`${host}/v5/account/wallet-balance?${query}`, {
+      headers: {
+        "X-BAPI-API-KEY": apiKey,
+        "X-BAPI-TIMESTAMP": timestamp,
+        "X-BAPI-RECV-WINDOW": RECV_WINDOW,
+        "X-BAPI-SIGN": signature,
+        "X-BAPI-SIGN-TYPE": "2",
+      },
+    });
+    if (!res.ok) return null;
+    const json = (await res.json()) as { retCode?: number };
+    return json.retCode === 0 ? other : null;
+  } catch {
+    return null;
+  }
+}
+
 
 interface LiveOrderInput {
   symbol: string;

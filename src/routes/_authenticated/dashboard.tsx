@@ -64,18 +64,22 @@ type LiveProvider = "binance" | "bybit";
 
 interface LiveStatus {
   configured: boolean;
+  env?: "testnet" | "mainnet";
   wallet?: number;
   unrealized?: number;
   available?: number;
   error?: string;
+  warning?: string;
   message?: string;
   errorCode?: number;
+  wrongVenue?: "testnet" | "mainnet" | null;
   errorReason?:
     | "key-invalid"
     | "signature-invalid"
     | "timestamp"
     | "permissions"
     | "ip"
+    | "network-blocked"
     | "other";
   hint?: string;
   diagnostics?: {
@@ -88,6 +92,7 @@ interface LiveStatus {
   };
 }
 interface LivePosition {
+
   symbol: string;
   side: "BUY" | "SELL";
   size: number;
@@ -104,6 +109,8 @@ interface LiveLogEntry {
   symbol: string;
   side?: "BUY" | "SELL";
   message: string;
+  /** Repeats of the same message collapse into one row with a count. */
+  count?: number;
 }
 
 const LIVE_CONFIDENCE_THRESHOLD = 0.75;
@@ -112,6 +119,9 @@ const LIVE_SL_PCT = 0.008;
 const LIVE_TP_PCT = 0.016;
 const LIVE_LEVERAGE = 5;
 const LIVE_COOLDOWN_MS = 60_000;
+/** Consecutive live-order failures before live mode disarms itself. */
+const LIVE_FAILURE_LIMIT = 3;
+
 
 export const Route = createFileRoute("/_authenticated/dashboard")({
   head: () => ({
@@ -201,6 +211,9 @@ function SwarmDashboard() {
   const [liveStatus, setLiveStatus] = useState<LiveStatus | null>(null);
   const [livePositions, setLivePositions] = useState<LivePosition[]>([]);
   const [liveLog, setLiveLog] = useState<LiveLogEntry[]>([]);
+  /** Non-null when the circuit breaker disarmed live mode; holds the reason. */
+  const [liveTripped, setLiveTripped] = useState<string | null>(null);
+
   const [metrics, setMetrics] = useState<SwarmMetrics | null>(null);
   const [tickRate, setTickRate] = useState(0);
   const [peakTickRate, setPeakTickRate] = useState(0);
@@ -261,6 +274,10 @@ function SwarmDashboard() {
   const liveProviderRef = useRef(liveProvider);
   const liveCooldownRef = useRef<Map<string, number>>(new Map());
   const liveInFlightRef = useRef<Set<string>>(new Set());
+  /** Proven-armed: credentials present AND an account probe succeeded. */
+  const liveReadyRef = useRef(false);
+  const liveFailStreakRef = useRef(0);
+
 
   const placeBinance = useServerFn(placeLiveTrade);
   const fetchBinanceStatus = useServerFn(getLiveStatus);
@@ -289,16 +306,30 @@ function SwarmDashboard() {
   }, [liveMode]);
 
   const pushLog = useCallback((entry: Omit<LiveLogEntry, "id" | "time">) => {
-    setLiveLog((prev) =>
-      [
+    setLiveLog((prev) => {
+      // Collapse an identical repeat of the newest row into a counter instead
+      // of flooding the feed with one line per rejected signal.
+      const head = prev[0];
+      if (head && head.ok === entry.ok && head.message === entry.message) {
+        const merged: LiveLogEntry = {
+          ...head,
+          time: Date.now(),
+          symbol: head.symbol === entry.symbol ? head.symbol : "—",
+          count: (head.count ?? 1) + 1,
+        };
+        return [merged, ...prev.slice(1)];
+      }
+      return [
         { ...entry, id: crypto.randomUUID(), time: Date.now() },
         ...prev,
-      ].slice(0, 40),
-    );
+      ].slice(0, 40);
+    });
   }, []);
 
   const submitLiveTrade = useCallback(
     async (p: TradeProposal) => {
+      // Readiness gate: never fire an order at a venue we know isn't armed.
+      if (!liveReadyRef.current) return;
       const now = Date.now();
       const cd = liveCooldownRef.current.get(p.symbol) ?? 0;
       if (now < cd) return;
@@ -317,6 +348,7 @@ function SwarmDashboard() {
             leverage: LIVE_LEVERAGE,
           },
         });
+        liveFailStreakRef.current = 0;
         pushLog({
           ok: true,
           symbol: p.symbol,
@@ -324,18 +356,28 @@ function SwarmDashboard() {
           message: `Filled ${res.quantity} @ ${formatPrice(res.entryPrice)} · SL ${res.slPrice} / TP ${res.tpPrice}`,
         });
       } catch (e) {
-        pushLog({
-          ok: false,
-          symbol: p.symbol,
-          side: p.direction,
-          message: e instanceof Error ? e.message : "Order failed",
-        });
+        const message = e instanceof Error ? e.message : "Order failed";
+        pushLog({ ok: false, symbol: p.symbol, side: p.direction, message });
+        liveFailStreakRef.current += 1;
+        if (liveFailStreakRef.current >= LIVE_FAILURE_LIMIT) {
+          // Circuit breaker: disarm rather than spray failing orders.
+          liveReadyRef.current = false;
+          liveModeRef.current = false;
+          setLiveMode(false);
+          setLiveTripped(message);
+          pushLog({
+            ok: false,
+            symbol: "SYSTEM",
+            message: `Live mode disarmed after ${LIVE_FAILURE_LIMIT} consecutive failures — ${message}`,
+          });
+        }
       } finally {
         liveInFlightRef.current.delete(p.symbol);
       }
     },
     [placeLive, pushLog],
   );
+
 
   useEffect(() => {
     const ac = new AbortController();
@@ -370,35 +412,46 @@ function SwarmDashboard() {
 
   }, []);
 
-  // Poll live status/positions when live mode is on.
+  // Probe the venue continuously — readiness must be proven before arming,
+  // not discovered by firing orders at it.
   useEffect(() => {
-    if (!liveMode) return;
     let cancelled = false;
     const load = async () => {
       try {
         const [st, ps] = await Promise.all([
           fetchLiveStatus(),
-          fetchLivePositions().catch(() => [] as LivePosition[]),
+          liveModeRef.current
+            ? fetchLivePositions().catch(() => [] as LivePosition[])
+            : Promise.resolve([] as LivePosition[]),
         ]);
         if (cancelled) return;
-        setLiveStatus(st as LiveStatus);
+        const status = st as LiveStatus;
+        setLiveStatus(status);
+        liveReadyRef.current = status.configured && !status.error;
+        if (!liveReadyRef.current && liveModeRef.current) {
+          liveModeRef.current = false;
+          setLiveMode(false);
+          setLiveTripped(status.error ?? status.message ?? "Venue is not reachable.");
+        }
         setLivePositions(ps as LivePosition[]);
         setLiveUpdatedAt(Date.now());
       } catch (e) {
-        if (!cancelled)
-          setLiveStatus({
-            configured: true,
-            error: e instanceof Error ? e.message : "Live fetch failed",
-          });
+        if (cancelled) return;
+        liveReadyRef.current = false;
+        setLiveStatus({
+          configured: true,
+          error: e instanceof Error ? e.message : "Live fetch failed",
+        });
       }
     };
     load();
-    const iv = setInterval(load, 5000);
+    const iv = setInterval(load, liveMode ? 5000 : 20000);
     return () => {
       cancelled = true;
       clearInterval(iv);
     };
   }, [liveMode, fetchLiveStatus, fetchLivePositions]);
+
 
   // Load the persisted account, open positions, history and edge report.
   useEffect(() => {
@@ -740,7 +793,11 @@ function SwarmDashboard() {
     [closeLive, fetchLivePositions, pushLog],
   );
 
+  // Venue is armable only when a live account probe has actually succeeded.
+  const liveArmed = !!liveStatus?.configured && !liveStatus?.error;
+
   return (
+
     <main className="min-h-screen bg-background text-foreground">
       <header className="border-b border-border">
         <div className="mx-auto flex max-w-[1600px] flex-wrap items-center justify-between gap-4 px-6 py-4">
@@ -777,18 +834,42 @@ function SwarmDashboard() {
             </div>
             <button
               onClick={() => {
-                setLiveMode((v) => !v);
-                if (!liveMode) setTab("live");
+                if (!liveMode) {
+                  if (!liveArmed) {
+                    setTab("live");
+                    return;
+                  }
+                  liveFailStreakRef.current = 0;
+                  setLiveTripped(null);
+                  setLiveMode(true);
+                  setTab("live");
+                } else {
+                  setLiveMode(false);
+                }
               }}
+              disabled={!liveMode && !liveArmed}
               className={`rounded-md border px-3 py-1.5 text-xs font-semibold transition-colors ${
                 liveMode
                   ? "border-accent bg-accent/20 text-accent"
-                  : "border-border bg-card text-muted-foreground hover:text-foreground"
+                  : liveArmed
+                    ? "border-border bg-card text-muted-foreground hover:text-foreground"
+                    : "cursor-not-allowed border-border bg-card text-muted-foreground opacity-50"
               }`}
-              title={`Toggle ${liveProvider} testnet live trading`}
+              title={
+                liveMode
+                  ? "Disarm live trading"
+                  : liveArmed
+                    ? `Arm ${liveProvider} ${liveStatus?.env ?? "testnet"} live trading`
+                    : `${liveProvider} is not reachable — see the Live tab`
+              }
             >
-              {liveMode ? "● LIVE TESTNET" : "○ Paper mode"}
+              {liveMode
+                ? `● LIVE ${(liveStatus?.env ?? "testnet").toUpperCase()}`
+                : liveArmed
+                  ? "○ Paper mode · ready"
+                  : "○ Paper mode · live blocked"}
             </button>
+
             <Stat
               label="Equity"
               value={formatUsd(equity)}
@@ -993,8 +1074,10 @@ function SwarmDashboard() {
               status={liveStatus}
               positions={livePositions}
               log={liveLog}
+              tripped={liveTripped}
               onClose={handleCloseLive}
             />
+
           )}
         </section>
       </div>
@@ -1517,6 +1600,7 @@ function LivePanel({
   status,
   positions,
   log,
+  tripped,
   onClose,
 }: {
   enabled: boolean;
@@ -1524,30 +1608,48 @@ function LivePanel({
   status: LiveStatus | null;
   positions: LivePosition[];
   log: LiveLogEntry[];
+  tripped: string | null;
   onClose: (symbol: string) => void;
 }) {
   const providerLabel = provider === "bybit" ? "Bybit" : "Binance";
+  const envLabel = (status?.env ?? "testnet").toUpperCase();
   return (
     <>
       <PanelHeader
-        title={`${providerLabel} Testnet — Live Orders`}
+        title={`${providerLabel} ${envLabel} — Live Orders`}
         subtitle={
           enabled
-            ? `High-confidence signals are executed on the ${providerLabel} futures testnet with attached SL/TP.`
-            : "Enable LIVE TESTNET in the header to route high-confidence signals to real orders."
+            ? `High-confidence signals are executed on the ${providerLabel} ${envLabel.toLowerCase()} futures account with attached SL/TP.`
+            : "Arm live mode in the header to route high-confidence signals to real orders."
         }
         badge={enabled ? "LIVE" : "OFF"}
       />
+      {tripped && (
+        <div className="border-b border-border bg-bear/10 px-4 py-2">
+          <p className="text-[11px] font-semibold text-bear">
+            Circuit breaker tripped — live mode disarmed
+          </p>
+          <p className="break-all font-mono text-[11px] text-bear/80">{tripped}</p>
+        </div>
+      )}
       <div className="border-b border-border px-4 py-3">
         {!enabled ? (
-          <p className="text-xs text-muted-foreground">
-            Live mode is off. Toggle the LIVE TESTNET button in the header to
-            start placing orders on {providerLabel} USDT perpetual futures testnet.
-          </p>
+          <>
+            <p className="text-xs text-muted-foreground">
+              Live mode is off. The venue is probed continuously below; the header
+              button only arms once {providerLabel} answers a real account query.
+            </p>
+            {status && (status.error || status.message) && (
+              <div className="mt-3">
+                <LiveErrorPanel status={status} />
+              </div>
+            )}
+          </>
         ) : !status ? (
           <p className="text-xs text-muted-foreground">Loading account…</p>
         ) : status.error || status.message ? (
           <LiveErrorPanel status={status} />
+
 
 
         ) : (
@@ -1659,6 +1761,12 @@ function LivePanel({
                   {e.ok ? "OK" : "ERR"}
                 </span>
                 <span className="font-mono text-xs">{e.symbol}</span>
+                {(e.count ?? 1) > 1 && (
+                  <span className="rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
+                    ×{e.count}
+                  </span>
+                )}
+
                 {e.side && (
                   <span
                     className={`rounded px-1.5 py-0.5 font-mono text-[10px] ${
