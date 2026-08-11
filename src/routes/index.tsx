@@ -26,6 +26,7 @@ import {
   placeBybitTrade,
   closeBybitPosition,
 } from "@/lib/bybit-trader.functions";
+import { SystemPanel, type DiscoveryHealth } from "@/components/SystemPanel";
 
 type LiveProvider = "binance" | "bybit";
 
