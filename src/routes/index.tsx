@@ -505,6 +505,34 @@ function SwarmDashboard() {
           {tab === "board" && (
             <BoardPanel rows={filteredBoard} query={query} setQuery={setQuery} />
           )}
+          {tab === "system" && (
+            <SystemPanel
+              metrics={metrics}
+              tickRate={tickRate}
+              peakTickRate={peakTickRate}
+              discovery={discovery}
+              paper={{
+                open: positions.length,
+                maxOpen: DEFAULT_PAPER_CONFIG.maxPositions,
+                realized,
+                unrealized,
+                opens: paperOpens,
+                closes: closed.length,
+                lastEventAt: lastPaperEventAt,
+                halted,
+              }}
+              live={{
+                enabled: liveMode,
+                provider: liveProvider === "bybit" ? "Bybit" : "Binance",
+                configured: liveStatus?.configured ?? false,
+                error: liveStatus?.error,
+                wallet: liveStatus?.wallet,
+                unrealized: liveStatus?.unrealized,
+                positions: livePositions.length,
+                lastUpdated: liveUpdatedAt,
+              }}
+            />
+          )}
           {tab === "live" && (
             <LivePanel
               enabled={liveMode}
