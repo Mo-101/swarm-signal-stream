@@ -919,6 +919,16 @@ function SwarmDashboard() {
           {tab === "board" && (
             <BoardPanel rows={filteredBoard} query={query} setQuery={setQuery} />
           )}
+          {tab === "execution" && (
+            <ExecutionPanel
+              stats={execStats}
+              micro={microMetrics}
+              pending={pendingOrders}
+              rejects={rejects}
+              closed={closed}
+            />
+          )}
+
           {tab === "edge" && (
             <div className="p-3">
               <EdgePanel
