@@ -1761,6 +1761,12 @@ function LivePanel({
                   {e.ok ? "OK" : "ERR"}
                 </span>
                 <span className="font-mono text-xs">{e.symbol}</span>
+                {(e.count ?? 1) > 1 && (
+                  <span className="rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
+                    ×{e.count}
+                  </span>
+                )}
+
                 {e.side && (
                   <span
                     className={`rounded px-1.5 py-0.5 font-mono text-[10px] ${
