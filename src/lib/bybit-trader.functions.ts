@@ -213,14 +213,8 @@ function roundStep(value: number, step: number, precision: number): string {
 
 // ─── Server functions ────────────────────────────────────────────────────
 export const getBybitStatus = createServerFn({ method: "GET" }).handler(async () => {
-  const apiKey = normalizeSecret(
-    process.env.BYBIT_TESTNET_API_KEY,
-    "BYBIT_TESTNET_API_KEY",
-  );
-  const apiSecret = normalizeSecret(
-    process.env.BYBIT_TESTNET_SECRET,
-    "BYBIT_TESTNET_SECRET",
-  );
+  const { apiKey, apiSecret } = readCreds();
+
   const diagnostics = {
     keyPresent: !!apiKey,
     secretPresent: !!apiSecret,
