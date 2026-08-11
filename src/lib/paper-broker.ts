@@ -357,10 +357,29 @@ export class PaperBroker {
     const riskAmount = equity * this.cfg.riskPerTrade * proposal.confidence;
     const stopDistance = proposal.price * this.cfg.slPct;
     if (stopDistance <= 0) return;
-    // Cap notional per position so total exposure stays within the account.
-    const maxNotional = equity / this.cfg.maxPositions;
+
+    // Free margin: wallet balance minus initial margin already locked, capped
+    // by the account-level margin usage limit.
+    let usedMargin = 0;
+    for (const open of this.positions.values()) usedMargin += open.initialMargin;
+    const marginBudget = Math.max(equity * this.cfg.maxMarginUsage - usedMargin, 0);
+    if (marginBudget <= 0) return;
+
+    // Cap notional per position so total exposure stays within the account,
+    // then translate the remaining margin budget into a notional ceiling.
+    const perPositionNotional = (equity / this.cfg.maxPositions) * this.cfg.leverage;
+    const marginNotional = marginBudget * this.cfg.leverage;
+    const maxNotional = Math.min(perPositionNotional, marginNotional);
     const size = Math.min(riskAmount / stopDistance, maxNotional / proposal.price);
     if (!Number.isFinite(size) || size <= 0) return;
+
+    const notional = proposal.price * size;
+    const tier = riskLimitTier(notional);
+    // Risk-limit tiers cap effective leverage as notional grows.
+    const leverage = Math.min(this.cfg.leverage, tier.maxLeverage);
+    const initialMargin = notional / leverage;
+    const entryFee = notional * this.cfg.takerFeeRate;
+    if (initialMargin + entryFee > marginBudget) return;
 
     const sl =
       proposal.direction === "BUY"
@@ -377,16 +396,28 @@ export class PaperBroker {
       side: proposal.direction,
       entryPrice: proposal.price,
       size,
-      notional: proposal.price * size,
+      notional,
       stopLoss: sl,
       takeProfit: tp,
       openedAt: proposal.time,
       confidence: proposal.confidence,
       regime: meta.regime,
       agents: proposal.contributions,
-      entryFee: proposal.price * size * this.cfg.takerFeeRate,
+      entryFee,
       fundingPaid: 0,
       lastFundingAt: lastFundingBoundary(proposal.time),
+      leverage,
+      initialMargin,
+      maintenanceMarginRate: tier.mmr,
+      maintenanceMargin: notional * tier.mmr,
+      liquidationPrice: liquidationPriceFor(
+        proposal.price,
+        proposal.direction,
+        leverage,
+        tier.mmr,
+        this.cfg.takerFeeRate,
+      ),
+      bankruptcyPrice: bankruptcyPriceFor(proposal.price, proposal.direction, leverage),
     };
     this.realizedPnl -= pos.entryFee;
     this.totalFees += pos.entryFee;
@@ -398,8 +429,17 @@ export class PaperBroker {
   markPrice(symbol: string, price: number, time: number) {
     const p = this.positions.get(symbol);
     if (!p) return;
-    let reason: "TP" | "SL" | null = null;
+    let reason: "TP" | "SL" | "LIQ" | null = null;
     let exit = price;
+    // Liquidation is checked first: the exchange closes the position the moment
+    // the mark crosses the liquidation price, regardless of where SL/TP sit.
+    if (
+      (p.side === "BUY" && price <= p.liquidationPrice) ||
+      (p.side === "SELL" && price >= p.liquidationPrice)
+    ) {
+      this.closePosition(p, p.liquidationPrice, time, "LIQ");
+      return;
+    }
     if (p.side === "BUY") {
       if (price <= p.stopLoss) {
         reason = "SL";
@@ -424,7 +464,7 @@ export class PaperBroker {
     p: Position,
     exitPrice: number,
     time: number,
-    reason: "TP" | "SL" | "MANUAL",
+    reason: "TP" | "SL" | "MANUAL" | "LIQ",
   ) {
     const grossPnl =
       p.side === "BUY"
@@ -433,10 +473,17 @@ export class PaperBroker {
     // Taker fee on the way out, same rate as entry.
     const exitFee = exitPrice * p.size * this.cfg.takerFeeRate;
     const fees = p.entryFee + exitFee;
-    const pnl = grossPnl - exitFee - p.fundingPaid;
+    let pnl = grossPnl - exitFee - p.fundingPaid;
+    if (reason === "LIQ") {
+      // Isolated margin: the loss is capped at the margin posted for the
+      // position (fees and funding already came out of that margin).
+      pnl = -p.initialMargin;
+      this.liquidations += 1;
+    }
     const pnlPct = (pnl / (p.entryPrice * p.size)) * 100;
     // entryFee and fundingPaid were already deducted from realizedPnl.
-    this.realizedPnl += grossPnl - exitFee;
+    this.realizedPnl +=
+      reason === "LIQ" ? -p.initialMargin + p.entryFee + p.fundingPaid : grossPnl - exitFee;
     this.totalFees += exitFee;
     const trade: ClosedTrade = {
       id: p.id,
@@ -451,6 +498,9 @@ export class PaperBroker {
       grossPnl,
       fees,
       funding: p.fundingPaid,
+      initialMargin: p.initialMargin,
+      leverage: p.leverage,
+      liquidationPrice: p.liquidationPrice,
       openedAt: p.openedAt,
       closedAt: time,
       confidence: p.confidence,
@@ -460,6 +510,7 @@ export class PaperBroker {
     this.closed = [trade, ...this.closed].slice(0, 200);
     this.positions.delete(p.symbol);
     this.events.onClose?.(trade);
+    if (reason === "LIQ") this.events.onLiquidate?.(trade);
 
     const dd = this.realizedPnl / this.cfg.startingBalance;
     if (dd <= -this.cfg.maxDailyDrawdown && !this.halted) {
@@ -484,5 +535,6 @@ export class PaperBroker {
     this.halted = false;
     this.totalFees = 0;
     this.totalFunding = 0;
+    this.liquidations = 0;
   }
 }
