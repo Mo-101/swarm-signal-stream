@@ -320,6 +320,13 @@ export class SwarmEngine {
   private evalMsTotal = 0;
   private lastEvalMs = 0;
   private maxEvalMs = 0;
+  /** Symbol chunks kept so the watchdog can rebuild an individual feed. */
+  private chunks: string[][] = [];
+  private chunkSockets = new Map<number, WebSocket>();
+  private watchdogTimer: ReturnType<typeof setInterval> | null = null;
+  private startedAt: number | null = null;
+  private watchdogRestarts = 0;
+  private onWake = () => this.sweep();
 
   constructor(
     private symbols: string[],
@@ -333,11 +340,15 @@ export class SwarmEngine {
     let totalMessages = 0;
     let totalTrades = 0;
     let lastMessageAt: number | null = null;
+    let stalledFeeds = 0;
+    const now = Date.now();
     for (const f of feeds) {
       totalMessages += f.messages;
       totalTrades += f.trades;
       if (f.lastMessageAt && (!lastMessageAt || f.lastMessageAt > lastMessageAt))
         lastMessageAt = f.lastMessageAt;
+      if (f.state === "open" && now - (f.lastMessageAt ?? f.openedAt ?? now) > STALL_MS)
+        stalledFeeds++;
     }
     return {
       exchange: "Bybit",
@@ -354,8 +365,12 @@ export class SwarmEngine {
       lastEvalMs: this.lastEvalMs,
       maxEvalMs: this.maxEvalMs,
       trackedSymbols: this.state.size,
+      startedAt: this.startedAt,
+      watchdogRestarts: this.watchdogRestarts,
+      stalledFeeds,
     };
   }
+
 
 
   getState(): SymbolState[] {
