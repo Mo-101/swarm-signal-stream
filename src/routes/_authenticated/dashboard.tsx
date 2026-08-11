@@ -830,18 +830,42 @@ function SwarmDashboard() {
             </div>
             <button
               onClick={() => {
-                setLiveMode((v) => !v);
-                if (!liveMode) setTab("live");
+                if (!liveMode) {
+                  if (!liveArmed) {
+                    setTab("live");
+                    return;
+                  }
+                  liveFailStreakRef.current = 0;
+                  setLiveTripped(null);
+                  setLiveMode(true);
+                  setTab("live");
+                } else {
+                  setLiveMode(false);
+                }
               }}
+              disabled={!liveMode && !liveArmed}
               className={`rounded-md border px-3 py-1.5 text-xs font-semibold transition-colors ${
                 liveMode
                   ? "border-accent bg-accent/20 text-accent"
-                  : "border-border bg-card text-muted-foreground hover:text-foreground"
+                  : liveArmed
+                    ? "border-border bg-card text-muted-foreground hover:text-foreground"
+                    : "cursor-not-allowed border-border bg-card text-muted-foreground opacity-50"
               }`}
-              title={`Toggle ${liveProvider} testnet live trading`}
+              title={
+                liveMode
+                  ? "Disarm live trading"
+                  : liveArmed
+                    ? `Arm ${liveProvider} ${liveStatus?.env ?? "testnet"} live trading`
+                    : `${liveProvider} is not reachable — see the Live tab`
+              }
             >
-              {liveMode ? "● LIVE TESTNET" : "○ Paper mode"}
+              {liveMode
+                ? `● LIVE ${(liveStatus?.env ?? "testnet").toUpperCase()}`
+                : liveArmed
+                  ? "○ Paper mode · ready"
+                  : "○ Paper mode · live blocked"}
             </button>
+
             <Stat
               label="Equity"
               value={formatUsd(equity)}
