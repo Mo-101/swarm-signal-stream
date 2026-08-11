@@ -14,13 +14,159 @@ export type Database = {
   }
   public: {
     Tables: {
-      [_ in never]: never
+      paper_accounts: {
+        Row: {
+          created_at: string
+          halted: boolean
+          realized_pnl: number
+          starting_balance: number
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          halted?: boolean
+          realized_pnl?: number
+          starting_balance?: number
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          halted?: boolean
+          realized_pnl?: number
+          starting_balance?: number
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
+      paper_trades: {
+        Row: {
+          agents: Json
+          client_id: string
+          closed_at: string | null
+          conf_bucket: string
+          confidence: number
+          entry_price: number
+          exit_price: number | null
+          hour_utc: number
+          id: string
+          notional: number
+          opened_at: string
+          pnl: number | null
+          pnl_pct: number | null
+          reason: string | null
+          regime: string
+          side: string
+          size: number
+          status: string
+          stop_loss: number
+          symbol: string
+          take_profit: number
+          user_id: string
+        }
+        Insert: {
+          agents?: Json
+          client_id: string
+          closed_at?: string | null
+          conf_bucket: string
+          confidence: number
+          entry_price: number
+          exit_price?: number | null
+          hour_utc?: number
+          id?: string
+          notional: number
+          opened_at?: string
+          pnl?: number | null
+          pnl_pct?: number | null
+          reason?: string | null
+          regime?: string
+          side: string
+          size: number
+          status?: string
+          stop_loss: number
+          symbol: string
+          take_profit: number
+          user_id: string
+        }
+        Update: {
+          agents?: Json
+          client_id?: string
+          closed_at?: string | null
+          conf_bucket?: string
+          confidence?: number
+          entry_price?: number
+          exit_price?: number | null
+          hour_utc?: number
+          id?: string
+          notional?: number
+          opened_at?: string
+          pnl?: number | null
+          pnl_pct?: number | null
+          reason?: string | null
+          regime?: string
+          side?: string
+          size?: number
+          status?: string
+          stop_loss?: number
+          symbol?: string
+          take_profit?: number
+          user_id?: string
+        }
+        Relationships: []
+      }
+      signals: {
+        Row: {
+          agents: Json
+          conf_bucket: string
+          confidence: number
+          created_at: string
+          executed: boolean
+          hour_utc: number
+          id: string
+          price: number
+          regime: string
+          side: string
+          symbol: string
+          user_id: string
+        }
+        Insert: {
+          agents?: Json
+          conf_bucket: string
+          confidence: number
+          created_at?: string
+          executed?: boolean
+          hour_utc?: number
+          id?: string
+          price: number
+          regime?: string
+          side: string
+          symbol: string
+          user_id: string
+        }
+        Update: {
+          agents?: Json
+          conf_bucket?: string
+          confidence?: number
+          created_at?: string
+          executed?: boolean
+          hour_utc?: number
+          id?: string
+          price?: number
+          regime?: string
+          side?: string
+          symbol?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
     }
     Views: {
       [_ in never]: never
     }
     Functions: {
-      [_ in never]: never
+      edge_report: { Args: never; Returns: Json }
     }
     Enums: {
       [_ in never]: never
