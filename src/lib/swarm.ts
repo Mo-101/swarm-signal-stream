@@ -528,7 +528,9 @@ export class SwarmEngine {
       }
       const st = this.feedStats.get(chunkId);
       if (st) st.state = "closed";
+      if (this.chunkSockets.get(chunkId) === ws) this.chunkSockets.delete(chunkId);
       if (this.stopped) return;
+
 
       this.connected = Math.max(0, this.connected - 1);
       this.sockets = this.sockets.filter((s) => s !== ws);
