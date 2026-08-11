@@ -622,6 +622,7 @@ function SwarmDashboard() {
       .catch(() => setPersistError("Instrument filters unavailable — fills will be rejected"));
     micro.start();
 
+    let lastPendingSweep = 0;
     const engine = new SwarmEngine(symbols, {
       onTick: (t) => {
         tickCounter.current += 1;
