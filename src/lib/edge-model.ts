@@ -165,9 +165,22 @@ export function deriveEdge(report: EdgeReport, baseMinConfidence = 0.6): Learned
     return Number((base * Math.max(0.15, Math.min(2, factor))).toFixed(3));
   };
 
+  const agentSamples: Record<string, number> = {};
+  const agentTrust: Record<string, TrustLevel> = {};
+  const pendingAgents: string[] = [];
+  for (const name of Object.keys(BASE_AGENT_WEIGHTS)) {
+    agentSamples[name] = 0;
+    agentTrust[name] = "none";
+  }
   for (const row of report.agents) {
+    agentSamples[row.name] = row.trades;
+    agentTrust[row.name] = trustLevel(row.trades);
     agentWeights[row.name] = scale(row, BASE_AGENT_WEIGHTS[row.name] ?? 1);
   }
+  for (const [name, n] of Object.entries(agentSamples)) {
+    if (n < MIN_BUCKET_SAMPLE) pendingAgents.push(name);
+  }
+
 
   const suppressedSymbols = report.symbols
     .filter((s) => s.trades >= 4 && s.pnl < 0 && winRate(s) < 0.4)
