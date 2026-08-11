@@ -412,35 +412,46 @@ function SwarmDashboard() {
 
   }, []);
 
-  // Poll live status/positions when live mode is on.
+  // Probe the venue continuously — readiness must be proven before arming,
+  // not discovered by firing orders at it.
   useEffect(() => {
-    if (!liveMode) return;
     let cancelled = false;
     const load = async () => {
       try {
         const [st, ps] = await Promise.all([
           fetchLiveStatus(),
-          fetchLivePositions().catch(() => [] as LivePosition[]),
+          liveModeRef.current
+            ? fetchLivePositions().catch(() => [] as LivePosition[])
+            : Promise.resolve([] as LivePosition[]),
         ]);
         if (cancelled) return;
-        setLiveStatus(st as LiveStatus);
+        const status = st as LiveStatus;
+        setLiveStatus(status);
+        liveReadyRef.current = status.configured && !status.error;
+        if (!liveReadyRef.current && liveModeRef.current) {
+          liveModeRef.current = false;
+          setLiveMode(false);
+          setLiveTripped(status.error ?? status.message ?? "Venue is not reachable.");
+        }
         setLivePositions(ps as LivePosition[]);
         setLiveUpdatedAt(Date.now());
       } catch (e) {
-        if (!cancelled)
-          setLiveStatus({
-            configured: true,
-            error: e instanceof Error ? e.message : "Live fetch failed",
-          });
+        if (cancelled) return;
+        liveReadyRef.current = false;
+        setLiveStatus({
+          configured: true,
+          error: e instanceof Error ? e.message : "Live fetch failed",
+        });
       }
     };
     load();
-    const iv = setInterval(load, 5000);
+    const iv = setInterval(load, liveMode ? 5000 : 20000);
     return () => {
       cancelled = true;
       clearInterval(iv);
     };
   }, [liveMode, fetchLiveStatus, fetchLivePositions]);
+
 
   // Load the persisted account, open positions, history and edge report.
   useEffect(() => {
