@@ -299,16 +299,30 @@ function SwarmDashboard() {
   }, [liveMode]);
 
   const pushLog = useCallback((entry: Omit<LiveLogEntry, "id" | "time">) => {
-    setLiveLog((prev) =>
-      [
+    setLiveLog((prev) => {
+      // Collapse an identical repeat of the newest row into a counter instead
+      // of flooding the feed with one line per rejected signal.
+      const head = prev[0];
+      if (head && head.ok === entry.ok && head.message === entry.message) {
+        const merged: LiveLogEntry = {
+          ...head,
+          time: Date.now(),
+          symbol: head.symbol === entry.symbol ? head.symbol : "—",
+          count: (head.count ?? 1) + 1,
+        };
+        return [merged, ...prev.slice(1)];
+      }
+      return [
         { ...entry, id: crypto.randomUUID(), time: Date.now() },
         ...prev,
-      ].slice(0, 40),
-    );
+      ].slice(0, 40);
+    });
   }, []);
 
   const submitLiveTrade = useCallback(
     async (p: TradeProposal) => {
+      // Readiness gate: never fire an order at a venue we know isn't armed.
+      if (!liveReadyRef.current) return;
       const now = Date.now();
       const cd = liveCooldownRef.current.get(p.symbol) ?? 0;
       if (now < cd) return;
@@ -327,6 +341,7 @@ function SwarmDashboard() {
             leverage: LIVE_LEVERAGE,
           },
         });
+        liveFailStreakRef.current = 0;
         pushLog({
           ok: true,
           symbol: p.symbol,
@@ -334,18 +349,28 @@ function SwarmDashboard() {
           message: `Filled ${res.quantity} @ ${formatPrice(res.entryPrice)} · SL ${res.slPrice} / TP ${res.tpPrice}`,
         });
       } catch (e) {
-        pushLog({
-          ok: false,
-          symbol: p.symbol,
-          side: p.direction,
-          message: e instanceof Error ? e.message : "Order failed",
-        });
+        const message = e instanceof Error ? e.message : "Order failed";
+        pushLog({ ok: false, symbol: p.symbol, side: p.direction, message });
+        liveFailStreakRef.current += 1;
+        if (liveFailStreakRef.current >= LIVE_FAILURE_LIMIT) {
+          // Circuit breaker: disarm rather than spray failing orders.
+          liveReadyRef.current = false;
+          liveModeRef.current = false;
+          setLiveMode(false);
+          setLiveTripped(message);
+          pushLog({
+            ok: false,
+            symbol: "SYSTEM",
+            message: `Live mode disarmed after ${LIVE_FAILURE_LIMIT} consecutive failures — ${message}`,
+          });
+        }
       } finally {
         liveInFlightRef.current.delete(p.symbol);
       }
     },
     [placeLive, pushLog],
   );
+
 
   useEffect(() => {
     const ac = new AbortController();
