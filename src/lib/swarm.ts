@@ -1,7 +1,7 @@
 // AI Trading Swarm — browser-side implementation (fixed)
-// Streams Binance USDT-M perpetual futures aggTrades via WebSocket,
+// Streams Bybit USDT perpetual futures public trades via WebSocket,
 // runs a swarm of stateless agents, and emits consensus trade proposals.
-// PAPER TRADING ONLY — no order execution.
+// Signal generation only — execution is handled by the paper/live brokers.
 
 export type Direction = "BUY" | "SELL" | "NEUTRAL";
 
