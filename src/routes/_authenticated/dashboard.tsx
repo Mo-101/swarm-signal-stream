@@ -814,7 +814,39 @@ function SwarmDashboard() {
     [closeLive, fetchLivePositions, pushLog],
   );
 
+  // Hold a screen wake lock so an unattended run isn't killed by display sleep.
+  useEffect(() => {
+    type WakeLock = { release: () => Promise<void> };
+    const nav = navigator as Navigator & {
+      wakeLock?: { request: (t: "screen") => Promise<WakeLock> };
+    };
+    if (!nav.wakeLock) return;
+    let lock: WakeLock | null = null;
+    let cancelled = false;
+    const acquire = async () => {
+      if (document.visibilityState !== "visible") return;
+      try {
+        const next = await nav.wakeLock!.request("screen");
+        if (cancelled) void next.release();
+        else lock = next;
+      } catch {
+        // Denied (unsupported browser / no user gesture) — run without it.
+      }
+    };
+    void acquire();
+    const onVis = () => {
+      if (document.visibilityState === "visible") void acquire();
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      cancelled = true;
+      document.removeEventListener("visibilitychange", onVis);
+      void lock?.release().catch(() => {});
+    };
+  }, []);
+
   // Venue is armable only when a live account probe has actually succeeded AND
+
   // the paper run has produced the agreed review sample of closed trades.
   const sampleReady = closed.length >= REVIEW_TRADE_TARGET;
   const liveArmed = !!liveStatus?.configured && !liveStatus?.error && sampleReady;
