@@ -117,7 +117,7 @@ function formatTime(ms: number): string {
   return new Date(ms).toLocaleTimeString([], { hour12: false });
 }
 
-type Tab = "signals" | "positions" | "history" | "board" | "live";
+type Tab = "signals" | "positions" | "history" | "board" | "live" | "system";
 
 function SwarmDashboard() {
   const [symbols, setSymbols] = useState<string[]>([]);
