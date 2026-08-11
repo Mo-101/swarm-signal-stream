@@ -161,8 +161,14 @@ export class PaperBroker {
 
   /** Restore a persisted account so the engine survives reloads. */
   hydrate(state: {
-    positions: Position[];
-    closed: ClosedTrade[];
+    positions: Array<
+      Omit<Position, "entryFee" | "fundingPaid" | "lastFundingAt"> &
+        Partial<Pick<Position, "entryFee" | "fundingPaid" | "lastFundingAt">>
+    >;
+    closed: Array<
+      Omit<ClosedTrade, "grossPnl" | "fees" | "funding"> &
+        Partial<Pick<ClosedTrade, "grossPnl" | "fees" | "funding">>
+    >;
     realizedPnl: number;
     halted: boolean;
   }) {
@@ -175,7 +181,12 @@ export class PaperBroker {
         lastFundingAt: p.lastFundingAt ?? lastFundingBoundary(p.openedAt),
       });
     }
-    this.closed = state.closed;
+    this.closed = state.closed.map((t) => ({
+      ...t,
+      grossPnl: t.grossPnl ?? t.pnl,
+      fees: t.fees ?? 0,
+      funding: t.funding ?? 0,
+    }));
     this.realizedPnl = state.realizedPnl;
     this.halted = state.halted;
   }
