@@ -234,6 +234,8 @@ function SwarmDashboard() {
   const [pendingOrders, setPendingOrders] = useState<PendingOrder[]>([]);
   const [rejects, setRejects] = useState<RejectRecord[]>([]);
   const [microMetrics, setMicroMetrics] = useState<MicroMetrics | null>(null);
+  const microRef = useRef<MicrostructureFeed | null>(null);
+
 
 
   const navigate = useNavigate();
