@@ -285,13 +285,23 @@ export interface SwarmMetrics {
   lastEvalMs: number;
   maxEvalMs: number;
   trackedSymbols: number;
+  /** Wall-clock start of this run, for uptime display. */
+  startedAt: number | null;
+  /** Feeds the watchdog recycled because they went silent while "open". */
+  watchdogRestarts: number;
+  /** Feeds currently open but silent past the stall threshold. */
+  stalledFeeds: number;
 }
 
 const STREAMS_PER_CONN = 150;
 const SUB_BATCH = 10; // Bybit accepts up to 10 topics per subscribe frame
 const EVAL_INTERVAL_MS = 1500;
 const PING_INTERVAL_MS = 20_000;
+/** An "open" socket with no frame for this long is treated as dead. */
+const STALL_MS = 60_000;
+const WATCHDOG_INTERVAL_MS = 15_000;
 const WS_URL = "wss://stream.bybit.com/v5/public/linear";
+
 
 export class SwarmEngine {
   private sockets: WebSocket[] = [];
