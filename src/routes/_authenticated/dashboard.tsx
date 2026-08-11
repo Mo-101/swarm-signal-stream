@@ -27,6 +27,26 @@ import {
   closeBybitPosition,
 } from "@/lib/bybit-trader.functions";
 import { SystemPanel, type DiscoveryHealth } from "@/components/SystemPanel";
+import { EdgePanel } from "@/components/EdgePanel";
+import { supabase } from "@/integrations/supabase/client";
+import { useNavigate } from "@tanstack/react-router";
+import { setAgentWeights } from "@/lib/swarm";
+import {
+  confBucket,
+  deriveEdge,
+  regimeOf,
+  EMPTY_EDGE_REPORT,
+  type EdgeReport,
+  type LearnedEdge,
+} from "@/lib/edge-model";
+import {
+  loadEngineState,
+  ingestSignals,
+  persistOpenTrade,
+  persistCloseTrade,
+  resetPaperAccount,
+  type SignalInput,
+} from "@/lib/edge.functions";
 
 type LiveProvider = "binance" | "bybit";
 
@@ -118,7 +138,7 @@ function formatTime(ms: number): string {
   return new Date(ms).toLocaleTimeString([], { hour12: false });
 }
 
-type Tab = "signals" | "positions" | "history" | "board" | "live" | "system";
+type Tab = "signals" | "positions" | "history" | "board" | "edge" | "live" | "system";
 
 function SwarmDashboard() {
   const [symbols, setSymbols] = useState<string[]>([]);
@@ -155,6 +175,27 @@ function SwarmDashboard() {
     at: null,
     error: null,
   });
+
+  const [edgeReport, setEdgeReport] = useState<EdgeReport>(EMPTY_EDGE_REPORT);
+  const [boot, setBoot] = useState<Awaited<ReturnType<typeof loadEngineState>> | null>(null);
+  const [storedSignals, setStoredSignals] = useState(0);
+  const [storedTrades, setStoredTrades] = useState(0);
+  const [persistError, setPersistError] = useState<string | null>(null);
+
+  const navigate = useNavigate();
+  const loadState = useServerFn(loadEngineState);
+  const sendSignals = useServerFn(ingestSignals);
+  const saveOpen = useServerFn(persistOpenTrade);
+  const saveClose = useServerFn(persistCloseTrade);
+  const resetAccount = useServerFn(resetPaperAccount);
+
+  const learned: LearnedEdge = useMemo(
+    () => deriveEdge(edgeReport, DEFAULT_PAPER_CONFIG.minConfidence),
+    [edgeReport],
+  );
+  const learnedRef = useRef(learned);
+  const regimeRef = useRef<Map<string, string>>(new Map());
+  const signalBufferRef = useRef<SignalInput[]>([]);
 
   const engineRef = useRef<SwarmEngine | null>(null);
   const brokerRef = useRef<PaperBroker | null>(null);
@@ -299,16 +340,141 @@ function SwarmDashboard() {
     };
   }, [liveMode, fetchLiveStatus, fetchLivePositions]);
 
+  // Load the persisted account, open positions, history and edge report.
   useEffect(() => {
-    if (symbols.length === 0) return;
+    let cancelled = false;
+    loadState()
+      .then((state) => {
+        if (cancelled) return;
+        setBoot(state);
+        setEdgeReport(state.report ?? EMPTY_EDGE_REPORT);
+        setStoredSignals(state.signalCount ?? 0);
+        setStoredTrades(state.open.length + state.closed.length);
+      })
+      .catch((e) => {
+        if (cancelled) return;
+        setPersistError(e instanceof Error ? e.message : "Could not load stored state");
+        setBoot({
+          account: { startingBalance: DEFAULT_PAPER_CONFIG.startingBalance, realizedPnl: 0, halted: false },
+          open: [],
+          closed: [],
+          report: EMPTY_EDGE_REPORT,
+          signalCount: 0,
+        });
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [loadState]);
+
+  // Feed learned edge back into the running swarm.
+  useEffect(() => {
+    learnedRef.current = learned;
+    setAgentWeights(learned.agentWeights);
+    brokerRef.current?.setMinConfidence(learned.minConfidence);
+  }, [learned]);
+
+  // Flush buffered signals to storage.
+  useEffect(() => {
+    if (!boot) return;
+    const iv = setInterval(() => {
+      const batch = signalBufferRef.current.splice(0, 200);
+      if (batch.length === 0) return;
+      void sendSignals({ data: { signals: batch } })
+        .then(() => setStoredSignals((n) => n + batch.length))
+        .catch((e) =>
+          setPersistError(e instanceof Error ? e.message : "Signal ingest failed"),
+        );
+    }, 8000);
+    return () => clearInterval(iv);
+  }, [boot, sendSignals]);
+
+  useEffect(() => {
+    if (symbols.length === 0 || !boot) return;
 
     const broker = new PaperBroker(DEFAULT_PAPER_CONFIG, {
       onHalt: (msg) => setHalted(msg),
-      onOpen: () => {
+      onOpen: (pos) => {
         setPaperOpens((n) => n + 1);
         setLastPaperEventAt(Date.now());
+        setStoredTrades((n) => n + 1);
+        void saveOpen({
+          data: {
+            clientId: pos.id,
+            symbol: pos.symbol,
+            side: pos.side,
+            entryPrice: pos.entryPrice,
+            size: pos.size,
+            notional: pos.notional,
+            stopLoss: pos.stopLoss,
+            takeProfit: pos.takeProfit,
+            confidence: pos.confidence,
+            confBucket: confBucket(pos.confidence),
+            regime: pos.regime,
+            hourUtc: new Date(pos.openedAt).getUTCHours(),
+            agents: pos.agents,
+            openedAt: pos.openedAt,
+          },
+        }).catch((e) =>
+          setPersistError(e instanceof Error ? e.message : "Trade save failed"),
+        );
       },
-      onClose: () => setLastPaperEventAt(Date.now()),
+      onClose: (trade) => {
+        setLastPaperEventAt(Date.now());
+        void saveClose({
+          data: {
+            clientId: trade.id,
+            exitPrice: trade.exitPrice,
+            pnl: trade.pnl,
+            pnlPct: trade.pnlPct,
+            reason: trade.reason,
+            closedAt: trade.closedAt,
+            realizedPnl: broker.getRealizedPnl(),
+            halted: broker.isHalted(),
+          },
+        })
+          .then((res) => setEdgeReport(res.report ?? EMPTY_EDGE_REPORT))
+          .catch((e) =>
+            setPersistError(e instanceof Error ? e.message : "Trade close save failed"),
+          );
+      },
+    });
+    broker.setMinConfidence(learnedRef.current.minConfidence);
+    broker.hydrate({
+      positions: boot.open.map((t) => ({
+        id: t.clientId,
+        symbol: t.symbol,
+        side: t.side,
+        entryPrice: t.entryPrice,
+        size: t.size,
+        notional: t.notional,
+        stopLoss: t.stopLoss,
+        takeProfit: t.takeProfit,
+        openedAt: t.openedAt,
+        confidence: t.confidence,
+        regime: t.regime,
+        agents: t.agents as Position["agents"],
+      })),
+      closed: boot.closed
+        .filter((t) => t.exitPrice !== null && t.closedAt !== null)
+        .map((t) => ({
+          id: t.clientId,
+          symbol: t.symbol,
+          side: t.side,
+          entryPrice: t.entryPrice,
+          exitPrice: t.exitPrice as number,
+          size: t.size,
+          pnl: t.pnl ?? 0,
+          pnlPct: t.pnlPct ?? 0,
+          reason: (t.reason as ClosedTrade["reason"]) ?? "MANUAL",
+          openedAt: t.openedAt,
+          closedAt: t.closedAt as number,
+          confidence: t.confidence,
+          regime: t.regime,
+          agents: t.agents as Position["agents"],
+        })),
+      realizedPnl: boot.account.realizedPnl,
+      halted: boot.account.halted,
     });
     brokerRef.current = broker;
 
@@ -320,7 +486,25 @@ function SwarmDashboard() {
       },
       onProposal: (p) => {
         setProposals((prev) => [p, ...prev].slice(0, 80));
-        broker.onProposal(p);
+        const regime = regimeRef.current.get(p.symbol) ?? "unknown";
+        const suppressed = learnedRef.current.suppressedSymbols.includes(p.symbol);
+        const before = broker.getPositions().length;
+        if (!suppressed) broker.onProposal(p, { regime });
+        const executed = broker.getPositions().length > before;
+        signalBufferRef.current.push({
+          symbol: p.symbol,
+          side: p.direction,
+          price: p.price,
+          confidence: p.confidence,
+          confBucket: confBucket(p.confidence),
+          regime,
+          hourUtc: new Date(p.time).getUTCHours(),
+          agents: p.contributions,
+          executed,
+        });
+        if (signalBufferRef.current.length > 400) {
+          signalBufferRef.current.splice(0, signalBufferRef.current.length - 400);
+        }
         if (liveModeRef.current && p.confidence >= LIVE_CONFIDENCE_THRESHOLD) {
           void submitLiveTrade(p);
         }
@@ -345,7 +529,9 @@ function SwarmDashboard() {
       lastSample = now;
 
       setTicks(tickCounter.current);
-      setBoard(engine.getState());
+      const state = engine.getState();
+      for (const row of state) regimeRef.current.set(row.symbol, regimeOf(row.change1m));
+      setBoard(state);
       setPositions(broker.getPositions());
       setClosed(broker.getClosed());
       setRealized(broker.getRealizedPnl());
@@ -359,7 +545,7 @@ function SwarmDashboard() {
       engineRef.current = null;
       brokerRef.current = null;
     };
-  }, [symbols]);
+  }, [symbols, boot, saveOpen, saveClose]);
 
   const equity = DEFAULT_PAPER_CONFIG.startingBalance + realized + unrealized;
   const equityPct = ((equity - DEFAULT_PAPER_CONFIG.startingBalance) /
@@ -383,6 +569,13 @@ function SwarmDashboard() {
   const resetBroker = () => {
     brokerRef.current?.reset();
     setHalted(null);
+    void resetAccount({ data: { wipeHistory: false } })
+      .then((res) => setEdgeReport(res.report ?? EMPTY_EDGE_REPORT))
+      .catch((e) => setPersistError(e instanceof Error ? e.message : "Reset failed"));
+  };
+  const signOut = async () => {
+    await supabase.auth.signOut();
+    navigate({ to: "/auth", replace: true });
   };
 
   const handleCloseLive = useCallback(
@@ -513,7 +706,7 @@ function SwarmDashboard() {
       <div className="mx-auto max-w-[1600px] px-6 py-6">
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
           <div className="flex gap-1 rounded-lg border border-border bg-card p-1">
-            {(["signals", "positions", "history", "board", "live", "system"] as Tab[]).map((t) => (
+            {(["signals", "positions", "history", "board", "edge", "live", "system"] as Tab[]).map((t) => (
               <button
                 key={t}
                 onClick={() => setTab(t)}
@@ -546,6 +739,12 @@ function SwarmDashboard() {
             >
               Reset paper account
             </button>
+            <button
+              onClick={signOut}
+              className="rounded-md border border-border bg-card px-3 py-1.5 text-xs font-medium text-muted-foreground hover:text-foreground"
+            >
+              Sign out
+            </button>
           </div>
         </div>
 
@@ -557,6 +756,17 @@ function SwarmDashboard() {
           {tab === "history" && <HistoryPanel closed={closed} />}
           {tab === "board" && (
             <BoardPanel rows={filteredBoard} query={query} setQuery={setQuery} />
+          )}
+          {tab === "edge" && (
+            <div className="p-3">
+              <EdgePanel
+                report={edgeReport}
+                learned={learned}
+                storedSignals={storedSignals}
+                storedTrades={storedTrades}
+                persistError={persistError}
+              />
+            </div>
           )}
           {tab === "system" && (
             <SystemPanel
