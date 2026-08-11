@@ -38,6 +38,8 @@ import {
 } from "@/lib/bybit-trader.functions";
 import { SystemPanel, type DiscoveryHealth } from "@/components/SystemPanel";
 import { EdgePanel } from "@/components/EdgePanel";
+import { ExecutionPanel } from "@/components/ExecutionPanel";
+
 import { supabase } from "@/integrations/supabase/client";
 import { useNavigate } from "@tanstack/react-router";
 import { setAgentWeights } from "@/lib/swarm";
