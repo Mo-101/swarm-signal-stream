@@ -236,9 +236,11 @@ export const getBybitStatus = createServerFn({ method: "GET" }).handler(async ()
     keyFormatOk: !!apiKey && /^[A-Za-z0-9_-]{12,64}$/.test(apiKey),
     secretFormatOk: !!apiSecret && /^[A-Za-z0-9_-]{20,128}$/.test(apiSecret),
   };
+  const env = venue();
   if (!apiKey || !apiSecret) {
     return {
       configured: false as const,
+      env,
       message: !apiKey && !apiSecret
         ? "Neither BYBIT_TESTNET_API_KEY nor BYBIT_TESTNET_SECRET is saved."
         : !apiKey
@@ -252,6 +254,7 @@ export const getBybitStatus = createServerFn({ method: "GET" }).handler(async ()
       list: Array<{
         totalWalletBalance: string;
         totalAvailableBalance: string;
+        totalEquity?: string;
         totalPerpUPL?: string;
       }>;
     }
@@ -259,31 +262,91 @@ export const getBybitStatus = createServerFn({ method: "GET" }).handler(async ()
       accountType: "UNIFIED",
     });
     const row = w.list?.[0];
+    const wallet = parseFloat(row?.totalWalletBalance || row?.totalEquity || "0");
     return {
       configured: true as const,
-      wallet: parseFloat(row?.totalWalletBalance ?? "0"),
+      env,
+      wallet,
       unrealized: parseFloat(row?.totalPerpUPL ?? "0"),
       available: parseFloat(row?.totalAvailableBalance ?? "0"),
       diagnostics,
+      ...(wallet <= 0
+        ? {
+            warning:
+              env === "testnet"
+                ? "Account balance is zero — request testnet funds at testnet.bybit.com before arming live mode."
+                : "Account balance is zero — no order can be filled.",
+          }
+        : {}),
     };
   } catch (e) {
+    const wrongVenue = await detectVenueMismatch(apiKey, apiSecret, env);
+    const base = {
+      configured: true as const,
+      env,
+      diagnostics,
+      ...(wrongVenue ? { wrongVenue } : {}),
+    };
     if (e instanceof BybitError) {
       return {
-        configured: true as const,
-        error: e.info.message,
+        ...base,
+        error: wrongVenue
+          ? `These credentials are ${wrongVenue} keys, but the app is set to ${env}.`
+          : e.info.message,
         errorCode: e.info.code,
-        errorReason: e.info.reason,
-        hint: e.info.hint,
-        diagnostics,
+        errorReason: wrongVenue ? ("key-invalid" as const) : e.info.reason,
+        hint: wrongVenue
+          ? `Create a ${env} key pair (${env === "testnet" ? "testnet.bybit.com" : "bybit.com"} > API management) and save it, or switch the venue by setting BYBIT_ENV=${wrongVenue}.`
+          : e.info.hint,
       };
     }
     return {
-      configured: true as const,
-      error: e instanceof Error ? e.message : "Failed to reach testnet.",
-      diagnostics,
+      ...base,
+      error: e instanceof Error ? e.message : `Failed to reach Bybit ${env}.`,
+      ...(wrongVenue
+        ? {
+            hint: `These look like ${wrongVenue} credentials while the app is pointed at ${env}.`,
+          }
+        : {}),
     };
   }
 });
+
+/**
+ * When auth fails, probe the *other* venue with the same credentials so the
+ * UI can say "these are mainnet keys" instead of a generic signature error.
+ */
+async function detectVenueMismatch(
+  apiKey: string,
+  apiSecret: string,
+  current: "testnet" | "mainnet",
+): Promise<"testnet" | "mainnet" | null> {
+  const other = current === "testnet" ? "mainnet" : "testnet";
+  const host = other === "mainnet" ? MAINNET_BASE : TESTNET_BASE;
+  try {
+    const timestamp = Date.now().toString();
+    const query = "accountType=UNIFIED";
+    const signature = await hmacSha256Hex(
+      apiSecret,
+      `${timestamp}${apiKey}${RECV_WINDOW}${query}`,
+    );
+    const res = await fetch(`${host}/v5/account/wallet-balance?${query}`, {
+      headers: {
+        "X-BAPI-API-KEY": apiKey,
+        "X-BAPI-TIMESTAMP": timestamp,
+        "X-BAPI-RECV-WINDOW": RECV_WINDOW,
+        "X-BAPI-SIGN": signature,
+        "X-BAPI-SIGN-TYPE": "2",
+      },
+    });
+    if (!res.ok) return null;
+    const json = (await res.json()) as { retCode?: number };
+    return json.retCode === 0 ? other : null;
+  } catch {
+    return null;
+  }
+}
+
 
 interface LiveOrderInput {
   symbol: string;
