@@ -64,18 +64,22 @@ type LiveProvider = "binance" | "bybit";
 
 interface LiveStatus {
   configured: boolean;
+  env?: "testnet" | "mainnet";
   wallet?: number;
   unrealized?: number;
   available?: number;
   error?: string;
+  warning?: string;
   message?: string;
   errorCode?: number;
+  wrongVenue?: "testnet" | "mainnet" | null;
   errorReason?:
     | "key-invalid"
     | "signature-invalid"
     | "timestamp"
     | "permissions"
     | "ip"
+    | "network-blocked"
     | "other";
   hint?: string;
   diagnostics?: {
@@ -88,6 +92,7 @@ interface LiveStatus {
   };
 }
 interface LivePosition {
+
   symbol: string;
   side: "BUY" | "SELL";
   size: number;
