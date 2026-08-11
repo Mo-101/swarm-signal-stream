@@ -237,6 +237,104 @@ export function deriveEdge(report: EdgeReport, baseMinConfidence = 0.6): Learned
     minConfidence,
     requiredEdgeBps,
     sample: report.totals.trades,
+    agentSamples,
+    agentTrust,
+    pendingAgents,
+    trust: trustLevel(report.totals.trades),
+    minBucketSample: MIN_BUCKET_SAMPLE,
+  };
+}
+
+// ── Rolling-window edge stability ─────────────────────────────────────────
+
+export interface RollingTrade {
+  pnl: number;
+  grossPnl: number;
+  fees: number;
+  funding: number;
+  slipCostUsd: number;
+  closedAt: number;
+}
+
+export interface RollingWindow {
+  label: string;
+  size: number;
+  trades: number;
+  wins: number;
+  winRate: number;
+  netPnl: number;
+  grossPnl: number;
+  fees: number;
+  funding: number;
+  slipCost: number;
+  /** Share of gross PnL eaten by fees + funding + slippage. */
+  costDrag: number;
+  expectancy: number;
+  /** Sharpe-like stability: mean / stdev of per-trade net PnL, scaled by √n. */
+  stability: number;
+  trust: TrustLevel;
+}
+
+const WINDOWS: Array<{ label: string; size: number }> = [
+  { label: "Last 20", size: 20 },
+  { label: "Last 50", size: 50 },
+  { label: "Last 100", size: 100 },
+  { label: "All time", size: Infinity },
+];
+
+function summarize(label: string, size: number, slice: RollingTrade[]): RollingWindow {
+  const n = slice.length;
+  const wins = slice.filter((t) => t.pnl > 0).length;
+  const netPnl = slice.reduce((a, t) => a + t.pnl, 0);
+  const grossPnl = slice.reduce((a, t) => a + t.grossPnl, 0);
+  const fees = slice.reduce((a, t) => a + t.fees, 0);
+  const funding = slice.reduce((a, t) => a + t.funding, 0);
+  const slipCost = slice.reduce((a, t) => a + t.slipCostUsd, 0);
+  const mean = n ? netPnl / n : 0;
+  const variance = n > 1 ? slice.reduce((a, t) => a + (t.pnl - mean) ** 2, 0) / (n - 1) : 0;
+  const sd = Math.sqrt(variance);
+  const stability = n > 1 && sd > 0 ? (mean / sd) * Math.sqrt(n) : 0;
+  return {
+    label,
+    size,
+    trades: n,
+    wins,
+    winRate: n ? wins / n : 0,
+    netPnl,
+    grossPnl,
+    fees,
+    funding,
+    slipCost,
+    costDrag: grossPnl !== 0 ? (fees + funding + slipCost) / Math.abs(grossPnl) : 0,
+    expectancy: mean,
+    stability,
+    trust: trustLevel(n),
+  };
+}
+
+/**
+ * Rolling-window performance over the most recent closed trades, so a decaying
+ * edge shows up as a gap between the short and the long window.
+ */
+export function rollingEdge(trades: RollingTrade[]): RollingWindow[] {
+  const ordered = [...trades].sort((a, b) => a.closedAt - b.closedAt);
+  return WINDOWS.map((w) =>
+    summarize(w.label, w.size, w.size === Infinity ? ordered : ordered.slice(-w.size)),
+  );
+}
+
+/** Recent-vs-prior expectancy drift on equal halves of the last 2N trades. */
+export function edgeDrift(trades: RollingTrade[], n = 25) {
+  const ordered = [...trades].sort((a, b) => a.closedAt - b.closedAt);
+  if (ordered.length < n * 2) return null;
+  const recent = ordered.slice(-n);
+  const prior = ordered.slice(-n * 2, -n);
+  const exp = (xs: RollingTrade[]) => xs.reduce((a, t) => a + t.pnl, 0) / xs.length;
+  const recentExp = exp(recent);
+  const priorExp = exp(prior);
+  return { recentExp, priorExp, delta: recentExp - priorExp, sample: n };
+}
+
   };
 }
 
