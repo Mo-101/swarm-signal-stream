@@ -793,7 +793,11 @@ function SwarmDashboard() {
     [closeLive, fetchLivePositions, pushLog],
   );
 
+  // Venue is armable only when a live account probe has actually succeeded.
+  const liveArmed = !!liveStatus?.configured && !liveStatus?.error;
+
   return (
+
     <main className="min-h-screen bg-background text-foreground">
       <header className="border-b border-border">
         <div className="mx-auto flex max-w-[1600px] flex-wrap items-center justify-between gap-4 px-6 py-4">
