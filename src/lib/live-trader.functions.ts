@@ -60,7 +60,14 @@ interface BinanceErrorInfo {
   message: string;
   status: number;
   code?: number;
-  reason: "key-invalid" | "signature-invalid" | "timestamp" | "permissions" | "ip" | "other";
+  reason:
+    | "key-invalid"
+    | "signature-invalid"
+    | "timestamp"
+    | "permissions"
+    | "ip"
+    | "network-blocked"
+    | "other";
   hint?: string;
 }
 
@@ -74,8 +81,23 @@ function formatBinanceError(status: number, body: string): BinanceErrorInfo {
   } catch {
     /* keep raw body */
   }
+  // CloudFront refuses the request before it reaches Binance at all: an HTML
+  // 403 page, not an API error. No key or signature change can fix this.
+  if (
+    (status === 403 || status === 401) &&
+    /cloudfront|request could not be satisfied|<html/i.test(body)
+  ) {
+    return {
+      message:
+        "Binance testnet is blocked at the network edge (CloudFront 403) for requests from this server region — the request never reaches the trading API.",
+      status,
+      reason: "network-blocked",
+      hint: "This is not a key or permission problem. Use Bybit testnet for live execution; Binance testnet is unreachable from here.",
+    };
+  }
   let reason: BinanceErrorInfo["reason"] = "other";
   let hint: string | undefined;
+
   if (code === -2014 || /API-key format invalid/i.test(msg)) {
     reason = "key-invalid";
     hint = `The stored BINANCE_TESTNET_API_KEY is not a valid Binance key string. ${TESTNET_KEY_HELP}`;
