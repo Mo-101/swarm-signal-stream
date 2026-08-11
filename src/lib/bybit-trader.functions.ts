@@ -37,18 +37,23 @@ function normalizeSecret(raw: string | undefined, envName: string): string | und
   return value.replace(/\s+/g, "");
 }
 
+/** Testnet-named vars win; plain BYBIT_API_* are accepted as a fallback. */
+function readCreds() {
+  const apiKey =
+    normalizeSecret(process.env.BYBIT_TESTNET_API_KEY, "BYBIT_TESTNET_API_KEY") ||
+    normalizeSecret(process.env.BYBIT_API_KEY, "BYBIT_API_KEY");
+  const apiSecret =
+    normalizeSecret(process.env.BYBIT_TESTNET_SECRET, "BYBIT_TESTNET_SECRET") ||
+    normalizeSecret(process.env.BYBIT_API_SECRET, "BYBIT_API_SECRET");
+  return { apiKey, apiSecret };
+}
+
 function creds() {
-  const apiKey = normalizeSecret(
-    process.env.BYBIT_TESTNET_API_KEY,
-    "BYBIT_TESTNET_API_KEY",
-  );
-  const apiSecret = normalizeSecret(
-    process.env.BYBIT_TESTNET_SECRET,
-    "BYBIT_TESTNET_SECRET",
-  );
+  const { apiKey, apiSecret } = readCreds();
   if (!apiKey || !apiSecret) throw new Error("Bybit testnet credentials are not configured.");
   return { apiKey, apiSecret };
 }
+
 
 interface BybitErrorInfo {
   message: string;
