@@ -228,11 +228,30 @@ function SwarmDashboard() {
 
   useEffect(() => {
     const ac = new AbortController();
+    const t0 = performance.now();
+    setDiscovery((d) => ({ ...d, state: "loading", error: null }));
     fetchPerpetualSymbols(ac.signal)
-      .then(setSymbols)
-      .catch((e) =>
-        setError(e instanceof Error ? e.message : "Failed to load symbols."),
-      );
+      .then((list) => {
+        setSymbols(list);
+        setDiscovery({
+          state: "ok",
+          count: list.length,
+          durationMs: performance.now() - t0,
+          at: Date.now(),
+          error: null,
+        });
+      })
+      .catch((e) => {
+        const msg = e instanceof Error ? e.message : "Failed to load symbols.";
+        setError(msg);
+        setDiscovery({
+          state: "error",
+          count: 0,
+          durationMs: performance.now() - t0,
+          at: Date.now(),
+          error: msg,
+        });
+      });
     return () => ac.abort();
   }, []);
 
