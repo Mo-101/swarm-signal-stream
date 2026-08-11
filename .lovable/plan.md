@@ -1,0 +1,57 @@
+# Let paper run to 100 trades, then prep a $5 live account
+
+## The one thing to know first
+
+Publishing does **not** make the swarm run on a server. The agents, the WebSocket feeds and the paper broker all run inside the browser tab. The trades and the edge report are saved to the cloud database, so nothing is lost when the tab closes — but no new trades accumulate while no tab is open.
+
+So "non-stop running" means: one tab, somewhere, left open. Publishing helps because that tab can be a spare laptop, a second monitor, or a phone instead of the editor preview.
+
+On visibility: the dashboard already sits behind sign-in, so publishing it publicly still requires your account to view it. Private publishing is a Business/Enterprise plan feature and would add nothing here. Recommendation: publish normally and rely on the existing auth gate.
+
+## What to build
+
+### 1. Survive a long unattended run
+Currently a backgrounded tab gets its timers throttled, and a dropped feed can sit dead until someone notices.
+
+- Auto-reconnect the market feeds on `visibilitychange`, `online`, and on a stall watchdog (no ticks for 60s → rebuild the socket).
+- Make the persistence flush event-driven (on every open/close) rather than interval-driven, so a throttled tab still records every trade.
+- Optional Screen Wake Lock toggle so a dedicated device does not sleep.
+- Show "running for Xh Ym · last tick Ns ago" in the header so a dead run is obvious at a glance.
+
+### 2. A visible run-to-100 milestone
+- Progress bar in the header: `closed trades / 100`.
+- Hard lock: the live-arm button stays disabled until 100 closed paper trades exist, regardless of venue readiness. The circuit breaker and venue probe stay as they are.
+- A "Review" banner appears at 100 with a link to the Edge tab.
+
+### 3. The review pack at 100 trades
+A one-screen summary you can judge in a minute, on the Edge tab:
+
+- Net PnL after fees, funding and slippage, versus gross alpha PnL.
+- Win rate, average win/loss, largest drawdown, longest losing streak.
+- Per-agent net edge with its trust level and sample count.
+- Per-symbol net edge, highlighting cost-suppressed symbols.
+- The verdict line: whether the net edge clears the round-trip cost hurdle with enough samples to be trusted.
+
+### 4. Prep for a $5 live account (built now, armed later)
+A $5 account cannot use the current fixed $100 notional, and Bybit rejects orders under about 5 USDT notional.
+
+- Replace the fixed live notional with equity-derived sizing: risk a fixed fraction of the real wallet balance per trade, floor it at the venue minimum, and refuse the trade if the minimum notional would exceed the risk budget rather than silently oversizing.
+- Fetch the real per-symbol lot size, tick size and minimum notional from Bybit before sizing, and skip symbols whose minimum order is too large for a $5 account.
+- Add a hard daily loss cap: after a set loss in a day, live mode disarms until you re-arm manually.
+- Pre-flight panel on the Live tab showing, for the top current signals, the exact quantity, notional, margin and whether the symbol is tradable at your balance.
+
+## Technical notes
+
+- Reconnect/watchdog logic goes in `src/lib/swarm.ts` alongside the existing `SwarmMetrics`; the dashboard already renders the connection state in the System tab.
+- The 100-trade gate reads the closed-trade count that already flows into the Edge model, and combines with the existing `liveArmed` probe flag in `src/routes/_authenticated/dashboard.tsx`.
+- The review pack extends `src/components/EdgePanel.tsx` and reuses the rolling-window and trust-level values already computed in `src/lib/edge-model.ts`.
+- Sizing changes touch `src/lib/bybit-trader.functions.ts` (instrument filters, quantity rounding) and the live constants block in the dashboard.
+- No change to the paper engine's mechanics — fees, funding, margin and liquidation stay as they are so the 100 trades are measured consistently.
+
+## Order of work
+
+1. Reconnect hardening, run-time indicator, event-driven persistence.
+2. Run-to-100 progress and the live lock.
+3. Publish so the run can live on a spare device.
+4. Review pack on the Edge tab.
+5. $5 sizing, instrument filters and daily loss cap — built and visible, but unusable until the 100-trade gate clears and you arm it.
