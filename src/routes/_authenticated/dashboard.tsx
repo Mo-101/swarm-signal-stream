@@ -124,6 +124,16 @@ const LIVE_FAILURE_LIMIT = 3;
 /** Closed paper trades required before live arming unlocks for review. */
 const REVIEW_TRADE_TARGET = 100;
 
+function formatDuration(ms: number): string {
+  if (ms <= 0) return "0m";
+  const mins = Math.floor(ms / 60000);
+  const h = Math.floor(mins / 60);
+  const d = Math.floor(h / 24);
+  if (d > 0) return `${d}d ${h % 24}h`;
+  if (h > 0) return `${h}h ${mins % 60}m`;
+  return `${mins}m`;
+}
+
 
 export const Route = createFileRoute("/_authenticated/dashboard")({
   head: () => ({
