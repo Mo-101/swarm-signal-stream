@@ -13,6 +13,8 @@ export interface Position {
   takeProfit: number;
   openedAt: number;
   confidence: number;
+  regime: string;
+  agents: Record<string, { direction: string; confidence: number }>;
 }
 
 export interface ClosedTrade {
@@ -27,6 +29,9 @@ export interface ClosedTrade {
   reason: "TP" | "SL" | "MANUAL";
   openedAt: number;
   closedAt: number;
+  confidence: number;
+  regime: string;
+  agents: Record<string, { direction: string; confidence: number }>;
 }
 
 export interface PaperConfig {
@@ -91,7 +96,29 @@ export class PaperBroker {
     return this.halted;
   }
 
-  onProposal(proposal: TradeProposal) {
+  /** Restore a persisted account so the engine survives reloads. */
+  hydrate(state: {
+    positions: Position[];
+    closed: ClosedTrade[];
+    realizedPnl: number;
+    halted: boolean;
+  }) {
+    this.positions.clear();
+    for (const p of state.positions) this.positions.set(p.symbol, p);
+    this.closed = state.closed;
+    this.realizedPnl = state.realizedPnl;
+    this.halted = state.halted;
+  }
+
+  /** Confidence calibration learned from realized outcomes. */
+  setMinConfidence(v: number) {
+    this.cfg = { ...this.cfg, minConfidence: v };
+  }
+  getMinConfidence() {
+    return this.cfg.minConfidence;
+  }
+
+  onProposal(proposal: TradeProposal, meta: { regime: string } = { regime: "unknown" }) {
     if (this.halted) return;
     if (proposal.confidence < this.cfg.minConfidence) return;
     if (this.positions.has(proposal.symbol)) return;
@@ -126,6 +153,8 @@ export class PaperBroker {
       takeProfit: tp,
       openedAt: proposal.time,
       confidence: proposal.confidence,
+      regime: meta.regime,
+      agents: proposal.contributions,
     };
     this.positions.set(proposal.symbol, pos);
     this.events.onOpen?.(pos);
@@ -181,6 +210,9 @@ export class PaperBroker {
       reason,
       openedAt: p.openedAt,
       closedAt: time,
+      confidence: p.confidence,
+      regime: p.regime,
+      agents: p.agents,
     };
     this.closed = [trade, ...this.closed].slice(0, 200);
     this.positions.delete(p.symbol);
