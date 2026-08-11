@@ -252,6 +252,34 @@ export interface SwarmEvents {
   onStatus?: (s: { connected: number; total: number }) => void;
 }
 
+export interface FeedStat {
+  chunkId: number;
+  symbols: number;
+  state: "connecting" | "open" | "closed";
+  messages: number;
+  trades: number;
+  lastMessageAt: number | null;
+  openedAt: number | null;
+  reconnects: number;
+}
+
+export interface SwarmMetrics {
+  exchange: string;
+  wsUrl: string;
+  connected: number;
+  total: number;
+  feeds: FeedStat[];
+  totalMessages: number;
+  totalTrades: number;
+  lastMessageAt: number | null;
+  evaluations: number;
+  proposals: number;
+  avgEvalMs: number;
+  lastEvalMs: number;
+  maxEvalMs: number;
+  trackedSymbols: number;
+}
+
 const STREAMS_PER_CONN = 150;
 const SUB_BATCH = 10; // Bybit accepts up to 10 topics per subscribe frame
 const EVAL_INTERVAL_MS = 1500;
@@ -269,11 +297,49 @@ export class SwarmEngine {
   private connected = 0;
   private totalChunks = 0;
   private stopped = false;
+  private feedStats = new Map<number, FeedStat>();
+  private evaluations = 0;
+  private proposalCount = 0;
+  private evalMsTotal = 0;
+  private lastEvalMs = 0;
+  private maxEvalMs = 0;
 
   constructor(
     private symbols: string[],
     private events: SwarmEvents = {},
   ) {}
+
+  getMetrics(): SwarmMetrics {
+    const feeds = Array.from(this.feedStats.values()).sort(
+      (a, b) => a.chunkId - b.chunkId,
+    );
+    let totalMessages = 0;
+    let totalTrades = 0;
+    let lastMessageAt: number | null = null;
+    for (const f of feeds) {
+      totalMessages += f.messages;
+      totalTrades += f.trades;
+      if (f.lastMessageAt && (!lastMessageAt || f.lastMessageAt > lastMessageAt))
+        lastMessageAt = f.lastMessageAt;
+    }
+    return {
+      exchange: "Bybit",
+      wsUrl: WS_URL,
+      connected: this.connected,
+      total: this.totalChunks,
+      feeds,
+      totalMessages,
+      totalTrades,
+      lastMessageAt,
+      evaluations: this.evaluations,
+      proposals: this.proposalCount,
+      avgEvalMs: this.evaluations ? this.evalMsTotal / this.evaluations : 0,
+      lastEvalMs: this.lastEvalMs,
+      maxEvalMs: this.maxEvalMs,
+      trackedSymbols: this.state.size,
+    };
+  }
+
 
   getState(): SymbolState[] {
     return Array.from(this.state.values());
@@ -317,6 +383,17 @@ export class SwarmEngine {
   }
 
   private openSocket(chunk: string[], chunkId: number) {
+    const existing = this.feedStats.get(chunkId);
+    this.feedStats.set(chunkId, {
+      chunkId,
+      symbols: chunk.length,
+      state: "connecting",
+      messages: existing?.messages ?? 0,
+      trades: existing?.trades ?? 0,
+      lastMessageAt: existing?.lastMessageAt ?? null,
+      openedAt: null,
+      reconnects: existing ? existing.reconnects + 1 : 0,
+    });
     const ws = new WebSocket(WS_URL);
 
     ws.onopen = () => {
@@ -326,6 +403,11 @@ export class SwarmEngine {
       }
       this.connected++;
       this.sockets.push(ws);
+      const st = this.feedStats.get(chunkId);
+      if (st) {
+        st.state = "open";
+        st.openedAt = Date.now();
+      }
       this.emitStatus();
       for (let i = 0; i < chunk.length; i += SUB_BATCH) {
         const args = chunk.slice(i, i + SUB_BATCH).map((s) => `publicTrade.${s}`);
@@ -353,6 +435,8 @@ export class SwarmEngine {
         clearInterval(ping);
         this.pingTimers.delete(ws);
       }
+      const st = this.feedStats.get(chunkId);
+      if (st) st.state = "closed";
       if (this.stopped) return;
 
       this.connected = Math.max(0, this.connected - 1);
@@ -376,10 +460,15 @@ export class SwarmEngine {
       }
     };
 
-    ws.onmessage = (ev) => this.handleMessage(ev.data as string);
+    ws.onmessage = (ev) => this.handleMessage(ev.data as string, chunkId);
   }
 
-  private handleMessage(raw: string) {
+  private handleMessage(raw: string, chunkId: number) {
+    const st = this.feedStats.get(chunkId);
+    if (st) {
+      st.messages += 1;
+      st.lastMessageAt = Date.now();
+    }
     let parsed: {
       topic?: string;
       data?: Array<{ s: string; p: string; v: string; T: number }>;
@@ -390,10 +479,12 @@ export class SwarmEngine {
       return;
     }
     if (!parsed.topic?.startsWith("publicTrade.") || !Array.isArray(parsed.data)) return;
+    if (st) st.trades += parsed.data.length;
     for (const trade of parsed.data) {
       this.handleTrade(trade);
     }
   }
+
 
   private handleTrade(d: { s: string; p: string; v: string; T: number }) {
     const symbol = d.s;
@@ -432,8 +523,17 @@ export class SwarmEngine {
     if (time - lastE < EVAL_INTERVAL_MS) return;
     this.lastEval.set(symbol, time);
 
+    const t0 = performance.now();
     const proposal = combine(symbol, price, time, pb.toArray(), vb.toArray());
-    if (proposal) this.events.onProposal?.(proposal);
+    const dt = performance.now() - t0;
+    this.evaluations += 1;
+    this.evalMsTotal += dt;
+    this.lastEvalMs = dt;
+    if (dt > this.maxEvalMs) this.maxEvalMs = dt;
+    if (proposal) {
+      this.proposalCount += 1;
+      this.events.onProposal?.(proposal);
+    }
   }
 }
 

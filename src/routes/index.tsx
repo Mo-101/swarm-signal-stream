@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   SwarmEngine,
   fetchPerpetualSymbols,
+  type SwarmMetrics,
   type SymbolState,
   type TradeProposal,
 } from "@/lib/swarm";
@@ -25,6 +26,7 @@ import {
   placeBybitTrade,
   closeBybitPosition,
 } from "@/lib/bybit-trader.functions";
+import { SystemPanel, type DiscoveryHealth } from "@/components/SystemPanel";
 
 type LiveProvider = "binance" | "bybit";
 
@@ -116,7 +118,7 @@ function formatTime(ms: number): string {
   return new Date(ms).toLocaleTimeString([], { hour12: false });
 }
 
-type Tab = "signals" | "positions" | "history" | "board" | "live";
+type Tab = "signals" | "positions" | "history" | "board" | "live" | "system";
 
 function SwarmDashboard() {
   const [symbols, setSymbols] = useState<string[]>([]);
@@ -140,6 +142,19 @@ function SwarmDashboard() {
   const [liveStatus, setLiveStatus] = useState<LiveStatus | null>(null);
   const [livePositions, setLivePositions] = useState<LivePosition[]>([]);
   const [liveLog, setLiveLog] = useState<LiveLogEntry[]>([]);
+  const [metrics, setMetrics] = useState<SwarmMetrics | null>(null);
+  const [tickRate, setTickRate] = useState(0);
+  const [peakTickRate, setPeakTickRate] = useState(0);
+  const [paperOpens, setPaperOpens] = useState(0);
+  const [lastPaperEventAt, setLastPaperEventAt] = useState<number | null>(null);
+  const [liveUpdatedAt, setLiveUpdatedAt] = useState<number | null>(null);
+  const [discovery, setDiscovery] = useState<DiscoveryHealth>({
+    state: "loading",
+    count: 0,
+    durationMs: 0,
+    at: null,
+    error: null,
+  });
 
   const engineRef = useRef<SwarmEngine | null>(null);
   const brokerRef = useRef<PaperBroker | null>(null);
@@ -227,11 +242,30 @@ function SwarmDashboard() {
 
   useEffect(() => {
     const ac = new AbortController();
+    const t0 = performance.now();
+    setDiscovery((d) => ({ ...d, state: "loading", error: null }));
     fetchPerpetualSymbols(ac.signal)
-      .then(setSymbols)
-      .catch((e) =>
-        setError(e instanceof Error ? e.message : "Failed to load symbols."),
-      );
+      .then((list) => {
+        setSymbols(list);
+        setDiscovery({
+          state: "ok",
+          count: list.length,
+          durationMs: performance.now() - t0,
+          at: Date.now(),
+          error: null,
+        });
+      })
+      .catch((e) => {
+        const msg = e instanceof Error ? e.message : "Failed to load symbols.";
+        setError(msg);
+        setDiscovery({
+          state: "error",
+          count: 0,
+          durationMs: performance.now() - t0,
+          at: Date.now(),
+          error: msg,
+        });
+      });
     return () => ac.abort();
   }, []);
 
@@ -248,6 +282,7 @@ function SwarmDashboard() {
         if (cancelled) return;
         setLiveStatus(st as LiveStatus);
         setLivePositions(ps as LivePosition[]);
+        setLiveUpdatedAt(Date.now());
       } catch (e) {
         if (!cancelled)
           setLiveStatus({
@@ -269,6 +304,11 @@ function SwarmDashboard() {
 
     const broker = new PaperBroker(DEFAULT_PAPER_CONFIG, {
       onHalt: (msg) => setHalted(msg),
+      onOpen: () => {
+        setPaperOpens((n) => n + 1);
+        setLastPaperEventAt(Date.now());
+      },
+      onClose: () => setLastPaperEventAt(Date.now()),
     });
     brokerRef.current = broker;
 
@@ -290,13 +330,27 @@ function SwarmDashboard() {
     engineRef.current = engine;
     engine.start();
 
+    let lastTickCount = 0;
+    let lastSample = Date.now();
     const iv = setInterval(() => {
+      const now = Date.now();
+      const dt = (now - lastSample) / 1000;
+      const delta = tickCounter.current - lastTickCount;
+      if (dt > 0) {
+        const rate = delta / dt;
+        setTickRate(rate);
+        setPeakTickRate((p) => (rate > p ? rate : p));
+      }
+      lastTickCount = tickCounter.current;
+      lastSample = now;
+
       setTicks(tickCounter.current);
       setBoard(engine.getState());
       setPositions(broker.getPositions());
       setClosed(broker.getClosed());
       setRealized(broker.getRealizedPnl());
       setUnrealized(broker.getUnrealizedPnl(marksRef.current));
+      setMetrics(engine.getMetrics());
     }, 500);
 
     return () => {
@@ -459,7 +513,7 @@ function SwarmDashboard() {
       <div className="mx-auto max-w-[1600px] px-6 py-6">
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
           <div className="flex gap-1 rounded-lg border border-border bg-card p-1">
-            {(["signals", "positions", "history", "board", "live"] as Tab[]).map((t) => (
+            {(["signals", "positions", "history", "board", "live", "system"] as Tab[]).map((t) => (
               <button
                 key={t}
                 onClick={() => setTab(t)}
@@ -503,6 +557,34 @@ function SwarmDashboard() {
           {tab === "history" && <HistoryPanel closed={closed} />}
           {tab === "board" && (
             <BoardPanel rows={filteredBoard} query={query} setQuery={setQuery} />
+          )}
+          {tab === "system" && (
+            <SystemPanel
+              metrics={metrics}
+              tickRate={tickRate}
+              peakTickRate={peakTickRate}
+              discovery={discovery}
+              paper={{
+                open: positions.length,
+                maxOpen: DEFAULT_PAPER_CONFIG.maxPositions,
+                realized,
+                unrealized,
+                opens: paperOpens,
+                closes: closed.length,
+                lastEventAt: lastPaperEventAt,
+                halted,
+              }}
+              live={{
+                enabled: liveMode,
+                provider: liveProvider === "bybit" ? "Bybit" : "Binance",
+                configured: liveStatus?.configured ?? false,
+                error: liveStatus?.error,
+                wallet: liveStatus?.wallet,
+                unrealized: liveStatus?.unrealized,
+                positions: livePositions.length,
+                lastUpdated: liveUpdatedAt,
+              }}
+            />
           )}
           {tab === "live" && (
             <LivePanel
