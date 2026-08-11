@@ -1074,8 +1074,10 @@ function SwarmDashboard() {
               status={liveStatus}
               positions={livePositions}
               log={liveLog}
+              tripped={liveTripped}
               onClose={handleCloseLive}
             />
+
           )}
         </section>
       </div>
