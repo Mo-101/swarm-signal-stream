@@ -81,7 +81,7 @@ const LIVE_TP_PCT = 0.016;
 const LIVE_LEVERAGE = 5;
 const LIVE_COOLDOWN_MS = 60_000;
 
-export const Route = createFileRoute("/")({
+export const Route = createFileRoute("/_authenticated/dashboard")({
   head: () => ({
     meta: [
       { title: "Swarm Terminal — Live USDT-M Perp Signals" },
