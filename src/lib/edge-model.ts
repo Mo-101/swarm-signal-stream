@@ -335,6 +335,3 @@ export function edgeDrift(trades: RollingTrade[], n = 25) {
   return { recentExp, priorExp, delta: recentExp - priorExp, sample: n };
 }
 
-  };
-}
-
