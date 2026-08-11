@@ -916,15 +916,20 @@ function SwarmDashboard() {
                   ? "Disarm live trading"
                   : liveArmed
                     ? `Arm ${liveProvider} ${liveStatus?.env ?? "testnet"} live trading`
-                    : `${liveProvider} is not reachable — see the Live tab`
+                    : !sampleReady
+                      ? `Locked until ${REVIEW_TRADE_TARGET} closed paper trades (${closed.length} so far)`
+                      : `${liveProvider} is not reachable — see the Live tab`
               }
             >
               {liveMode
                 ? `● LIVE ${(liveStatus?.env ?? "testnet").toUpperCase()}`
                 : liveArmed
                   ? "○ Paper mode · ready"
-                  : "○ Paper mode · live blocked"}
+                  : !sampleReady
+                    ? `○ Paper mode · ${REVIEW_TRADE_TARGET - closed.length} trades to review`
+                    : "○ Paper mode · live blocked"}
             </button>
+
 
             <Stat
               label="Equity"
