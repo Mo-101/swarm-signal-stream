@@ -160,6 +160,13 @@ export const AGENT_WEIGHTS: Record<string, number> = {
   Meme: 1.1,
 };
 
+/** Apply weights learned from realized trade outcomes (edge feedback loop). */
+export function setAgentWeights(weights: Record<string, number>) {
+  for (const [name, w] of Object.entries(weights)) {
+    if (Number.isFinite(w) && w > 0) AGENT_WEIGHTS[name] = w;
+  }
+}
+
 // ─── Combiner ─────────────────────────────────────────────────────────────
 export function combine(
   symbol: string,
