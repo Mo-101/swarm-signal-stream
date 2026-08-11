@@ -353,6 +353,9 @@ function SwarmDashboard() {
         });
       })
       .catch((e) => {
+        // Effect cleanup (remount / navigation) aborts the in-flight fetch —
+        // that is not a discovery failure, so don't surface it as an error.
+        if (ac.signal.aborted || (e as { name?: string })?.name === "AbortError") return;
         const msg = e instanceof Error ? e.message : "Failed to load symbols.";
         setError(msg);
         setDiscovery({
@@ -363,7 +366,8 @@ function SwarmDashboard() {
           error: msg,
         });
       });
-    return () => ac.abort();
+    return () => ac.abort(new DOMException("dashboard unmounted", "AbortError"));
+
   }, []);
 
   // Poll live status/positions when live mode is on.
