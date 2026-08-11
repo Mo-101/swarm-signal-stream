@@ -42,5 +42,7 @@ The Bybit perpetual mechanics already modelled in paper mode (0.055% taker per l
 - Gates 4a-4d live in `src/lib/paper-broker.ts` / `src/lib/microstructure.ts` and are called from the same place for both paper and live, so behaviour cannot diverge.
 - Cost hurdle reuses the already-derived `requiredEdgeBps` from `src/lib/edge-model.ts`.
 
-## Needed from you
-The Bybit testnet API key and secret (create at testnet.bybit.com, under API Management, with Unified Trading / Orders permission enabled). I'll request them through the secure secrets form once you approve.
+## Credentials — done
+
+The Bybit key/secret you put in `.env` are now saved as project secrets (`BYBIT_TESTNET_API_KEY` / `BYBIT_TESTNET_SECRET`), which is what the server-side trading code reads. The code will also accept the plain `BYBIT_API_KEY` / `BYBIT_API_SECRET` names as a fallback. Note: those look like **mainnet** keys — if the status probe returns "API key invalid", generate a testnet pair at testnet.bybit.com and I'll swap them in.
+
