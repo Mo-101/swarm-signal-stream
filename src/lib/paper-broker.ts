@@ -15,6 +15,12 @@ export interface Position {
   confidence: number;
   regime: string;
   agents: Record<string, { direction: string; confidence: number }>;
+  /** Taker fee already paid on entry (Bybit USDT perp taker rate). */
+  entryFee: number;
+  /** Funding paid (+) or received (-) so far while holding. */
+  fundingPaid: number;
+  /** Last 8h funding boundary already settled for this position. */
+  lastFundingAt: number;
 }
 
 export interface ClosedTrade {
@@ -27,6 +33,12 @@ export interface ClosedTrade {
   pnl: number;
   pnlPct: number;
   reason: "TP" | "SL" | "MANUAL";
+  /** Gross price PnL before costs. */
+  grossPnl: number;
+  /** Entry + exit taker fees. */
+  fees: number;
+  /** Net funding paid over the holding period. */
+  funding: number;
   openedAt: number;
   closedAt: number;
   confidence: number;
@@ -42,6 +54,17 @@ export interface PaperConfig {
   tpPct: number;
   minConfidence: number;
   maxDailyDrawdown: number; // fraction of starting balance
+  /** Bybit USDT perp taker fee rate, charged on entry and exit notional. */
+  takerFeeRate: number;
+  /** Assumed funding rate per 8h interval when the live rate is unknown. */
+  defaultFundingRate: number;
+}
+
+/** Bybit settles funding at 00:00, 08:00 and 16:00 UTC. */
+export const FUNDING_INTERVAL_MS = 8 * 60 * 60 * 1000;
+
+export function lastFundingBoundary(t: number): number {
+  return Math.floor(t / FUNDING_INTERVAL_MS) * FUNDING_INTERVAL_MS;
 }
 
 export const DEFAULT_PAPER_CONFIG: PaperConfig = {
@@ -52,6 +75,10 @@ export const DEFAULT_PAPER_CONFIG: PaperConfig = {
   tpPct: 0.04,
   minConfidence: 0.7,
   maxDailyDrawdown: 0.05,
+  // https://www.bybit.com/en/help-center/article/Futures-Contracts-Fees-Explained
+  takerFeeRate: 0.00055,
+  // Interest rate component: 0.03%/day = 0.01% per 8h interval.
+  defaultFundingRate: 0.0001,
 };
 
 export interface PaperEvents {
@@ -65,6 +92,10 @@ export class PaperBroker {
   private closed: ClosedTrade[] = [];
   private realizedPnl = 0;
   private halted = false;
+  /** Live funding rate per symbol (per interval), when the feed provides one. */
+  private fundingRates = new Map<string, number>();
+  private totalFees = 0;
+  private totalFunding = 0;
 
   constructor(
     private cfg: PaperConfig = DEFAULT_PAPER_CONFIG,
@@ -80,12 +111,44 @@ export class PaperBroker {
   getRealizedPnl(): number {
     return this.realizedPnl;
   }
+  getCosts() {
+    return { fees: this.totalFees, funding: this.totalFunding };
+  }
+  /** Feed in Bybit's live funding rate (per interval) for accurate carry. */
+  setFundingRate(symbol: string, rate: number) {
+    if (Number.isFinite(rate)) this.fundingRates.set(symbol, rate);
+  }
+  private rateFor(symbol: string) {
+    return this.fundingRates.get(symbol) ?? this.cfg.defaultFundingRate;
+  }
+
+  /**
+   * Settle any 8h funding boundaries crossed since the last check.
+   * Positive rate: longs pay shorts. Negative: shorts pay longs.
+   * Charged on position value at the mark, per Bybit's funding mechanism.
+   */
+  accrueFunding(now: number, marks: Map<string, number>) {
+    for (const p of this.positions.values()) {
+      const boundary = lastFundingBoundary(now);
+      if (boundary <= p.lastFundingAt) continue;
+      const intervals = Math.round((boundary - p.lastFundingAt) / FUNDING_INTERVAL_MS);
+      const mark = marks.get(p.symbol) ?? p.entryPrice;
+      const rate = this.rateFor(p.symbol);
+      const fee = mark * p.size * rate * intervals * (p.side === "BUY" ? 1 : -1);
+      p.fundingPaid += fee;
+      p.lastFundingAt = boundary;
+      this.realizedPnl -= fee;
+      this.totalFunding += fee;
+    }
+  }
   getUnrealizedPnl(marks: Map<string, number>): number {
     let u = 0;
     for (const p of this.positions.values()) {
       const m = marks.get(p.symbol);
       if (!m) continue;
-      u += p.side === "BUY" ? (m - p.entryPrice) * p.size : (p.entryPrice - m) * p.size;
+      const gross = p.side === "BUY" ? (m - p.entryPrice) * p.size : (p.entryPrice - m) * p.size;
+      // Net of the taker fee that closing would cost.
+      u += gross - m * p.size * this.cfg.takerFeeRate;
     }
     return u;
   }
@@ -104,7 +167,14 @@ export class PaperBroker {
     halted: boolean;
   }) {
     this.positions.clear();
-    for (const p of state.positions) this.positions.set(p.symbol, p);
+    for (const p of state.positions) {
+      this.positions.set(p.symbol, {
+        ...p,
+        entryFee: p.entryFee ?? p.notional * this.cfg.takerFeeRate,
+        fundingPaid: p.fundingPaid ?? 0,
+        lastFundingAt: p.lastFundingAt ?? lastFundingBoundary(p.openedAt),
+      });
+    }
     this.closed = state.closed;
     this.realizedPnl = state.realizedPnl;
     this.halted = state.halted;
@@ -155,7 +225,12 @@ export class PaperBroker {
       confidence: proposal.confidence,
       regime: meta.regime,
       agents: proposal.contributions,
+      entryFee: proposal.price * size * this.cfg.takerFeeRate,
+      fundingPaid: 0,
+      lastFundingAt: lastFundingBoundary(proposal.time),
     };
+    this.realizedPnl -= pos.entryFee;
+    this.totalFees += pos.entryFee;
     this.positions.set(proposal.symbol, pos);
     this.events.onOpen?.(pos);
   }
@@ -192,12 +267,18 @@ export class PaperBroker {
     time: number,
     reason: "TP" | "SL" | "MANUAL",
   ) {
-    const pnl =
+    const grossPnl =
       p.side === "BUY"
         ? (exitPrice - p.entryPrice) * p.size
         : (p.entryPrice - exitPrice) * p.size;
+    // Taker fee on the way out, same rate as entry.
+    const exitFee = exitPrice * p.size * this.cfg.takerFeeRate;
+    const fees = p.entryFee + exitFee;
+    const pnl = grossPnl - exitFee - p.fundingPaid;
     const pnlPct = (pnl / (p.entryPrice * p.size)) * 100;
-    this.realizedPnl += pnl;
+    // entryFee and fundingPaid were already deducted from realizedPnl.
+    this.realizedPnl += grossPnl - exitFee;
+    this.totalFees += exitFee;
     const trade: ClosedTrade = {
       id: p.id,
       symbol: p.symbol,
@@ -208,6 +289,9 @@ export class PaperBroker {
       pnl,
       pnlPct,
       reason,
+      grossPnl,
+      fees,
+      funding: p.fundingPaid,
       openedAt: p.openedAt,
       closedAt: time,
       confidence: p.confidence,
@@ -239,5 +323,7 @@ export class PaperBroker {
     this.closed = [];
     this.realizedPnl = 0;
     this.halted = false;
+    this.totalFees = 0;
+    this.totalFunding = 0;
   }
 }
