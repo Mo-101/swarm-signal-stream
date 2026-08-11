@@ -121,6 +121,8 @@ const LIVE_LEVERAGE = 5;
 const LIVE_COOLDOWN_MS = 60_000;
 /** Consecutive live-order failures before live mode disarms itself. */
 const LIVE_FAILURE_LIMIT = 3;
+/** Closed paper trades required before live arming unlocks for review. */
+const REVIEW_TRADE_TARGET = 100;
 
 
 export const Route = createFileRoute("/_authenticated/dashboard")({
