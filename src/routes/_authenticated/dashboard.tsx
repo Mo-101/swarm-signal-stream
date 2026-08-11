@@ -150,7 +150,34 @@ function formatTime(ms: number): string {
   return new Date(ms).toLocaleTimeString([], { hour12: false });
 }
 
-type Tab = "signals" | "positions" | "history" | "board" | "edge" | "live" | "system";
+type Tab =
+  | "signals"
+  | "positions"
+  | "history"
+  | "board"
+  | "execution"
+  | "edge"
+  | "live"
+  | "system";
+
+const EMPTY_EXEC_STATS: ExecutionStats = {
+  submitted: 0,
+  filled: 0,
+  partialFills: 0,
+  rejected: 0,
+  pending: 0,
+  rejectsByReason: {},
+  avgEntrySlipBps: 0,
+  avgExitSlipBps: 0,
+  worstSlipBps: 0,
+  avgSpreadBps: 0,
+  avgFillLatencyMs: 0,
+  avgFillRatio: 0,
+  slipCostUsd: 0,
+  bookPricedFills: 0,
+  modelPricedFills: 0,
+};
+
 
 function SwarmDashboard() {
   const [symbols, setSymbols] = useState<string[]>([]);
