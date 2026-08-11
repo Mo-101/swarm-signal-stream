@@ -953,7 +953,9 @@ function SwarmDashboard() {
                 storedSignals={storedSignals}
                 storedTrades={storedTrades}
                 persistError={persistError}
+                closedTrades={closed}
               />
+
             </div>
           )}
           {tab === "system" && (
