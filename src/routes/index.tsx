@@ -249,6 +249,7 @@ function SwarmDashboard() {
         if (cancelled) return;
         setLiveStatus(st as LiveStatus);
         setLivePositions(ps as LivePosition[]);
+        setLiveUpdatedAt(Date.now());
       } catch (e) {
         if (!cancelled)
           setLiveStatus({
