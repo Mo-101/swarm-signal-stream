@@ -559,6 +559,12 @@ function SwarmDashboard() {
     });
     brokerRef.current = broker;
 
+    // Exchange instrument filters (tick / lot / min-notional) then depth feed.
+    void fetchInstrumentFilters()
+      .then((f) => micro.setFilters(f))
+      .catch(() => setPersistError("Instrument filters unavailable — fills will be rejected"));
+    micro.start();
+
     const engine = new SwarmEngine(symbols, {
       onTick: (t) => {
         tickCounter.current += 1;
@@ -568,10 +574,13 @@ function SwarmDashboard() {
       onProposal: (p) => {
         setProposals((prev) => [p, ...prev].slice(0, 80));
         const regime = regimeRef.current.get(p.symbol) ?? "unknown";
-        const suppressed = learnedRef.current.suppressedSymbols.includes(p.symbol);
-        const before = broker.getPositions().length;
+        const edge = learnedRef.current;
+        const suppressed =
+          edge.suppressedSymbols.includes(p.symbol) ||
+          edge.costSuppressedSymbols.includes(p.symbol);
+        const before = broker.getPositions().length + broker.getPending().length;
         if (!suppressed) broker.onProposal(p, { regime });
-        const executed = broker.getPositions().length > before;
+        const executed = broker.getPositions().length + broker.getPending().length > before;
         signalBufferRef.current.push({
           symbol: p.symbol,
           side: p.direction,
@@ -615,6 +624,23 @@ function SwarmDashboard() {
     void loadFunding();
     const fundingIv = setInterval(loadFunding, 5 * 60 * 1000);
 
+    // Matching engine tick: fill in-flight orders as soon as their latency
+    // elapses, using whatever the book looks like at that moment.
+    const matchIv = setInterval(() => broker.processPending(Date.now()), 100);
+
+    // Keep full depth on what matters: open positions, orders in flight, then
+    // the hottest movers (the symbols most likely to produce the next signal).
+    const trackIv = setInterval(() => {
+      const hot = new Set<string>();
+      for (const p of broker.getPositions()) hot.add(p.symbol);
+      for (const o of broker.getPending()) hot.add(o.symbol);
+      const movers = [...engine.getState()]
+        .sort((a, b) => Math.abs(b.change1m) - Math.abs(a.change1m))
+        .slice(0, 50);
+      for (const m of movers) hot.add(m.symbol);
+      micro.track([...hot]);
+    }, 2000);
+
     let lastTickCount = 0;
     let lastSample = Date.now();
     const iv = setInterval(() => {
@@ -642,16 +668,24 @@ function SwarmDashboard() {
       setRealized(broker.getRealizedPnl());
       setUnrealized(broker.getUnrealizedPnl(marksRef.current));
       setMetrics(engine.getMetrics());
+      setExecStats(broker.getExecutionStats());
+      setPendingOrders(broker.getPending());
+      setMicroMetrics(micro.getMetrics());
     }, 500);
 
     return () => {
       clearInterval(iv);
       clearInterval(fundingIv);
+      clearInterval(matchIv);
+      clearInterval(trackIv);
       engine.stop();
+      micro.stop();
+      microRef.current = null;
       engineRef.current = null;
       brokerRef.current = null;
     };
   }, [symbols, boot, saveOpen, saveClose]);
+
 
   const equity = DEFAULT_PAPER_CONFIG.startingBalance + realized + unrealized;
   const equityPct = ((equity - DEFAULT_PAPER_CONFIG.startingBalance) /
