@@ -1,4 +1,4 @@
-# Let paper run to 100 trades, then prep a $5 live account
+# Keep paper running to 100 trades
 
 ## The one thing to know first
 
