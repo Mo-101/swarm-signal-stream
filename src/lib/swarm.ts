@@ -383,6 +383,17 @@ export class SwarmEngine {
   }
 
   private openSocket(chunk: string[], chunkId: number) {
+    const existing = this.feedStats.get(chunkId);
+    this.feedStats.set(chunkId, {
+      chunkId,
+      symbols: chunk.length,
+      state: "connecting",
+      messages: existing?.messages ?? 0,
+      trades: existing?.trades ?? 0,
+      lastMessageAt: existing?.lastMessageAt ?? null,
+      openedAt: null,
+      reconnects: existing ? existing.reconnects + 1 : 0,
+    });
     const ws = new WebSocket(WS_URL);
 
     ws.onopen = () => {
@@ -392,6 +403,11 @@ export class SwarmEngine {
       }
       this.connected++;
       this.sockets.push(ws);
+      const st = this.feedStats.get(chunkId);
+      if (st) {
+        st.state = "open";
+        st.openedAt = Date.now();
+      }
       this.emitStatus();
       for (let i = 0; i < chunk.length; i += SUB_BATCH) {
         const args = chunk.slice(i, i + SUB_BATCH).map((s) => `publicTrade.${s}`);
@@ -419,6 +435,8 @@ export class SwarmEngine {
         clearInterval(ping);
         this.pingTimers.delete(ws);
       }
+      const st = this.feedStats.get(chunkId);
+      if (st) st.state = "closed";
       if (this.stopped) return;
 
       this.connected = Math.max(0, this.connected - 1);
@@ -442,10 +460,15 @@ export class SwarmEngine {
       }
     };
 
-    ws.onmessage = (ev) => this.handleMessage(ev.data as string);
+    ws.onmessage = (ev) => this.handleMessage(ev.data as string, chunkId);
   }
 
-  private handleMessage(raw: string) {
+  private handleMessage(raw: string, chunkId: number) {
+    const st = this.feedStats.get(chunkId);
+    if (st) {
+      st.messages += 1;
+      st.lastMessageAt = Date.now();
+    }
     let parsed: {
       topic?: string;
       data?: Array<{ s: string; p: string; v: string; T: number }>;
@@ -456,10 +479,12 @@ export class SwarmEngine {
       return;
     }
     if (!parsed.topic?.startsWith("publicTrade.") || !Array.isArray(parsed.data)) return;
+    if (st) st.trades += parsed.data.length;
     for (const trade of parsed.data) {
       this.handleTrade(trade);
     }
   }
+
 
   private handleTrade(d: { s: string; p: string; v: string; T: number }) {
     const symbol = d.s;
