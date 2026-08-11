@@ -864,7 +864,19 @@ function SwarmDashboard() {
       <div className="mx-auto max-w-[1600px] px-6 py-6">
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
           <div className="flex gap-1 rounded-lg border border-border bg-card p-1">
-            {(["signals", "positions", "history", "board", "edge", "live", "system"] as Tab[]).map((t) => (
+            {(
+              [
+                "signals",
+                "positions",
+                "history",
+                "board",
+                "execution",
+                "edge",
+                "live",
+                "system",
+              ] as Tab[]
+            ).map((t) => (
+
               <button
                 key={t}
                 onClick={() => setTab(t)}
