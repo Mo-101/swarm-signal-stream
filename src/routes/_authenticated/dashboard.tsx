@@ -109,6 +109,8 @@ interface LiveLogEntry {
   symbol: string;
   side?: "BUY" | "SELL";
   message: string;
+  /** Repeats of the same message collapse into one row with a count. */
+  count?: number;
 }
 
 const LIVE_CONFIDENCE_THRESHOLD = 0.75;
@@ -117,6 +119,9 @@ const LIVE_SL_PCT = 0.008;
 const LIVE_TP_PCT = 0.016;
 const LIVE_LEVERAGE = 5;
 const LIVE_COOLDOWN_MS = 60_000;
+/** Consecutive live-order failures before live mode disarms itself. */
+const LIVE_FAILURE_LIMIT = 3;
+
 
 export const Route = createFileRoute("/_authenticated/dashboard")({
   head: () => ({
