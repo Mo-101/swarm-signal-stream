@@ -97,14 +97,18 @@ export function EdgePanel({
   storedSignals,
   storedTrades,
   persistError,
+  closedTrades = [],
 }: {
   report: EdgeReport;
   learned: LearnedEdge;
   storedSignals: number;
   storedTrades: number;
   persistError: string | null;
+  closedTrades?: RollingTrade[];
 }) {
   const t = report.totals;
+  const windows = rollingEdge(closedTrades);
+  const drift = edgeDrift(closedTrades);
   return (
     <div className="space-y-3">
       {persistError && (
@@ -128,6 +132,123 @@ export function EdgePanel({
       </div>
 
       <section className="rounded-lg border border-border bg-card p-3">
+        <div className="flex items-baseline justify-between gap-2">
+          <h3 className="text-xs font-medium text-foreground">Sample size & trust</h3>
+          <TrustBadge level={learned.trust} sample={learned.sample} />
+        </div>
+        <p className="mt-0.5 text-[10px] text-muted-foreground">
+          Agent weights only move once a bucket has at least {learned.minBucketSample} closed
+          trades. Below that the base weight is held and the bucket is marked pending.
+        </p>
+        <div className="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
+          {Object.entries(learned.agentSamples)
+            .sort((a, b) => b[1] - a[1])
+            .map(([name, n]) => {
+              const level = learned.agentTrust[name] ?? "none";
+              const locked = n < learned.minBucketSample;
+              const progress = Math.min(1, n / learned.minBucketSample);
+              return (
+                <div key={name} className="rounded border border-border p-2">
+                  <div className="flex items-baseline justify-between gap-2">
+                    <span className="font-mono text-[11px] text-foreground">{name}</span>
+                    <span className="font-mono text-[11px] text-foreground">
+                      ×{(learned.agentWeights[name] ?? 1).toFixed(2)}
+                    </span>
+                  </div>
+                  <div className="mt-1.5 h-1 w-full overflow-hidden rounded bg-muted">
+                    <div
+                      className={locked ? "h-full bg-accent" : "h-full bg-emerald-500"}
+                      style={{ width: `${progress * 100}%` }}
+                    />
+                  </div>
+                  <p className="mt-1 text-[10px] text-muted-foreground">
+                    {locked
+                      ? `pending — ${n}/${learned.minBucketSample} trades, weight locked`
+                      : `${level} trust · ${n} closed trades`}
+                  </p>
+                </div>
+              );
+            })}
+        </div>
+      </section>
+
+      <section className="rounded-lg border border-border bg-card p-3">
+        <h3 className="text-xs font-medium text-foreground">Rolling-window edge</h3>
+        <p className="mt-0.5 text-[10px] text-muted-foreground">
+          Recent windows vs all time. A short window well below the long one means the edge is
+          decaying, not just noisy.
+        </p>
+        {closedTrades.length === 0 ? (
+          <p className="mt-3 text-[11px] text-muted-foreground">
+            No closed round trips this session yet.
+          </p>
+        ) : (
+          <table className="mt-2 w-full text-[11px]">
+            <thead className="text-muted-foreground">
+              <tr>
+                <th className="py-1 text-left font-normal">Window</th>
+                <th className="py-1 text-right font-normal">N</th>
+                <th className="py-1 text-right font-normal">Win</th>
+                <th className="py-1 text-right font-normal">Net PnL</th>
+                <th className="py-1 text-right font-normal">Exp/trade</th>
+                <th className="py-1 text-right font-normal">Fees+funding</th>
+                <th className="py-1 text-right font-normal">Cost drag</th>
+                <th className="py-1 text-right font-normal">Stability</th>
+                <th className="py-1 text-right font-normal">Trust</th>
+              </tr>
+            </thead>
+            <tbody>
+              {windows.map((w) => (
+                <tr key={w.label} className="border-t border-border/50">
+                  <td className="py-1 text-foreground">{w.label}</td>
+                  <td className="py-1 text-right tabular-nums text-muted-foreground">{w.trades}</td>
+                  <td className="py-1 text-right tabular-nums text-muted-foreground">
+                    {pct(w.winRate)}
+                  </td>
+                  <td
+                    className={`py-1 text-right tabular-nums ${w.netPnl >= 0 ? "text-emerald-400" : "text-red-400"}`}
+                  >
+                    {usd(w.netPnl)}
+                  </td>
+                  <td
+                    className={`py-1 text-right tabular-nums ${w.expectancy >= 0 ? "text-emerald-400" : "text-red-400"}`}
+                  >
+                    {usd(w.expectancy)}
+                  </td>
+                  <td className="py-1 text-right tabular-nums text-muted-foreground">
+                    {usd(w.fees + w.funding)}
+                  </td>
+                  <td className="py-1 text-right tabular-nums text-muted-foreground">
+                    {pct(w.costDrag)}
+                  </td>
+                  <td
+                    className={`py-1 text-right tabular-nums ${w.stability >= 1 ? "text-emerald-400" : w.stability <= -1 ? "text-red-400" : "text-muted-foreground"}`}
+                  >
+                    {w.stability.toFixed(2)}
+                  </td>
+                  <td className="py-1 text-right">
+                    <span className={`font-mono text-[10px] uppercase ${TRUST_CLASS[w.trust]}`}>
+                      {w.trust}
+                    </span>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+        {drift && (
+          <p className="mt-2 text-[10px] text-muted-foreground">
+            Drift: last {drift.sample} trades {usd(drift.recentExp)}/trade vs prior {drift.sample}{" "}
+            at {usd(drift.priorExp)} —{" "}
+            <span className={drift.delta >= 0 ? "text-emerald-400" : "text-red-400"}>
+              {drift.delta >= 0 ? "improving" : "decaying"} {usd(Math.abs(drift.delta))}/trade
+            </span>
+            .
+          </p>
+        )}
+      </section>
+
+      <section className="rounded-lg border border-border bg-card p-3">
         <h3 className="text-xs font-medium text-foreground">Live learned parameters</h3>
         <p className="mt-0.5 text-[10px] text-muted-foreground">
           Derived from {learned.sample} closed trades and applied to the running swarm.
@@ -139,6 +260,9 @@ export function EdgePanel({
               className="rounded border border-border px-2 py-1 font-mono text-foreground"
             >
               {name} ×{w.toFixed(2)}
+              {(learned.agentSamples[name] ?? 0) < learned.minBucketSample && (
+                <span className="ml-1 text-accent">(base)</span>
+              )}
             </span>
           ))}
           <span className="rounded border border-border px-2 py-1 font-mono text-foreground">
@@ -154,6 +278,7 @@ export function EdgePanel({
             cost-suppressed {learned.costSuppressedSymbols.length}
           </span>
         </div>
+
         {learned.suppressedSymbols.length > 0 && (
           <p className="mt-2 font-mono text-[10px] text-muted-foreground">
             {learned.suppressedSymbols.slice(0, 24).join(" · ")}
