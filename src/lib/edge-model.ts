@@ -88,7 +88,24 @@ export function winRate(row: { trades: number; wins: number }): number {
   return row.trades > 0 ? row.wins / row.trades : 0;
 }
 
-const MIN_SAMPLE = 8;
+/**
+ * Minimum closed trades in a bucket before its realized outcome is allowed to
+ * move anything. Below this the bucket is statistically noise and the base
+ * weight / threshold is kept unchanged.
+ */
+export const MIN_BUCKET_SAMPLE = 20;
+const MIN_SAMPLE = MIN_BUCKET_SAMPLE;
+
+export type TrustLevel = "none" | "low" | "medium" | "high";
+
+/** Confidence we place in a bucket's measured edge, purely from sample size. */
+export function trustLevel(sample: number): TrustLevel {
+  if (sample < MIN_BUCKET_SAMPLE) return "none";
+  if (sample < MIN_BUCKET_SAMPLE * 2.5) return "low";
+  if (sample < MIN_BUCKET_SAMPLE * 6) return "medium";
+  return "high";
+}
+
 
 /**
  * Learned weights derived from realized outcomes. Agents that make money get
