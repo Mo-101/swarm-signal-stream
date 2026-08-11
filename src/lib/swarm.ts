@@ -252,6 +252,34 @@ export interface SwarmEvents {
   onStatus?: (s: { connected: number; total: number }) => void;
 }
 
+export interface FeedStat {
+  chunkId: number;
+  symbols: number;
+  state: "connecting" | "open" | "closed";
+  messages: number;
+  trades: number;
+  lastMessageAt: number | null;
+  openedAt: number | null;
+  reconnects: number;
+}
+
+export interface SwarmMetrics {
+  exchange: string;
+  wsUrl: string;
+  connected: number;
+  total: number;
+  feeds: FeedStat[];
+  totalMessages: number;
+  totalTrades: number;
+  lastMessageAt: number | null;
+  evaluations: number;
+  proposals: number;
+  avgEvalMs: number;
+  lastEvalMs: number;
+  maxEvalMs: number;
+  trackedSymbols: number;
+}
+
 const STREAMS_PER_CONN = 150;
 const SUB_BATCH = 10; // Bybit accepts up to 10 topics per subscribe frame
 const EVAL_INTERVAL_MS = 1500;
@@ -269,11 +297,49 @@ export class SwarmEngine {
   private connected = 0;
   private totalChunks = 0;
   private stopped = false;
+  private feedStats = new Map<number, FeedStat>();
+  private evaluations = 0;
+  private proposalCount = 0;
+  private evalMsTotal = 0;
+  private lastEvalMs = 0;
+  private maxEvalMs = 0;
 
   constructor(
     private symbols: string[],
     private events: SwarmEvents = {},
   ) {}
+
+  getMetrics(): SwarmMetrics {
+    const feeds = Array.from(this.feedStats.values()).sort(
+      (a, b) => a.chunkId - b.chunkId,
+    );
+    let totalMessages = 0;
+    let totalTrades = 0;
+    let lastMessageAt: number | null = null;
+    for (const f of feeds) {
+      totalMessages += f.messages;
+      totalTrades += f.trades;
+      if (f.lastMessageAt && (!lastMessageAt || f.lastMessageAt > lastMessageAt))
+        lastMessageAt = f.lastMessageAt;
+    }
+    return {
+      exchange: "Bybit",
+      wsUrl: WS_URL,
+      connected: this.connected,
+      total: this.totalChunks,
+      feeds,
+      totalMessages,
+      totalTrades,
+      lastMessageAt,
+      evaluations: this.evaluations,
+      proposals: this.proposalCount,
+      avgEvalMs: this.evaluations ? this.evalMsTotal / this.evaluations : 0,
+      lastEvalMs: this.lastEvalMs,
+      maxEvalMs: this.maxEvalMs,
+      trackedSymbols: this.state.size,
+    };
+  }
+
 
   getState(): SymbolState[] {
     return Array.from(this.state.values());
