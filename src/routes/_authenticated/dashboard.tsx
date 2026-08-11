@@ -1600,6 +1600,7 @@ function LivePanel({
   status,
   positions,
   log,
+  tripped,
   onClose,
 }: {
   enabled: boolean;
@@ -1607,30 +1608,48 @@ function LivePanel({
   status: LiveStatus | null;
   positions: LivePosition[];
   log: LiveLogEntry[];
+  tripped: string | null;
   onClose: (symbol: string) => void;
 }) {
   const providerLabel = provider === "bybit" ? "Bybit" : "Binance";
+  const envLabel = (status?.env ?? "testnet").toUpperCase();
   return (
     <>
       <PanelHeader
-        title={`${providerLabel} Testnet — Live Orders`}
+        title={`${providerLabel} ${envLabel} — Live Orders`}
         subtitle={
           enabled
-            ? `High-confidence signals are executed on the ${providerLabel} futures testnet with attached SL/TP.`
-            : "Enable LIVE TESTNET in the header to route high-confidence signals to real orders."
+            ? `High-confidence signals are executed on the ${providerLabel} ${envLabel.toLowerCase()} futures account with attached SL/TP.`
+            : "Arm live mode in the header to route high-confidence signals to real orders."
         }
         badge={enabled ? "LIVE" : "OFF"}
       />
+      {tripped && (
+        <div className="border-b border-border bg-bear/10 px-4 py-2">
+          <p className="text-[11px] font-semibold text-bear">
+            Circuit breaker tripped — live mode disarmed
+          </p>
+          <p className="break-all font-mono text-[11px] text-bear/80">{tripped}</p>
+        </div>
+      )}
       <div className="border-b border-border px-4 py-3">
         {!enabled ? (
-          <p className="text-xs text-muted-foreground">
-            Live mode is off. Toggle the LIVE TESTNET button in the header to
-            start placing orders on {providerLabel} USDT perpetual futures testnet.
-          </p>
+          <>
+            <p className="text-xs text-muted-foreground">
+              Live mode is off. The venue is probed continuously below; the header
+              button only arms once {providerLabel} answers a real account query.
+            </p>
+            {status && (status.error || status.message) && (
+              <div className="mt-3">
+                <LiveErrorPanel status={status} />
+              </div>
+            )}
+          </>
         ) : !status ? (
           <p className="text-xs text-muted-foreground">Loading account…</p>
         ) : status.error || status.message ? (
           <LiveErrorPanel status={status} />
+
 
 
         ) : (
