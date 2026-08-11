@@ -141,6 +141,19 @@ function SwarmDashboard() {
   const [liveStatus, setLiveStatus] = useState<LiveStatus | null>(null);
   const [livePositions, setLivePositions] = useState<LivePosition[]>([]);
   const [liveLog, setLiveLog] = useState<LiveLogEntry[]>([]);
+  const [metrics, setMetrics] = useState<SwarmMetrics | null>(null);
+  const [tickRate, setTickRate] = useState(0);
+  const [peakTickRate, setPeakTickRate] = useState(0);
+  const [paperOpens, setPaperOpens] = useState(0);
+  const [lastPaperEventAt, setLastPaperEventAt] = useState<number | null>(null);
+  const [liveUpdatedAt, setLiveUpdatedAt] = useState<number | null>(null);
+  const [discovery, setDiscovery] = useState<DiscoveryHealth>({
+    state: "loading",
+    count: 0,
+    durationMs: 0,
+    at: null,
+    error: null,
+  });
 
   const engineRef = useRef<SwarmEngine | null>(null);
   const brokerRef = useRef<PaperBroker | null>(null);
