@@ -627,7 +627,15 @@ function SwarmDashboard() {
         tickCounter.current += 1;
         marksRef.current.set(t.symbol, t.price);
         broker.markPrice(t.symbol, t.price, t.time);
+        // Tick-driven matching: a backgrounded tab throttles setInterval to
+        // ~1Hz, but socket frames keep arriving, so drive fills from them too.
+        const now = Date.now();
+        if (now - lastPendingSweep > 50) {
+          lastPendingSweep = now;
+          broker.processPending(now);
+        }
       },
+
       onProposal: (p) => {
         setProposals((prev) => [p, ...prev].slice(0, 80));
         const regime = regimeRef.current.get(p.symbol) ?? "unknown";
