@@ -206,41 +206,68 @@ export function combine(
   return null;
 }
 
-// ─── Symbol discovery ─────────────────────────────────────────────────────
+// ─── Symbol discovery (Bybit linear USDT perpetuals) ─────────────────────
 export async function fetchPerpetualSymbols(signal?: AbortSignal): Promise<string[]> {
-  const res = await fetch("https://fapi.binance.com/fapi/v1/exchangeInfo", { signal });
-  if (!res.ok) throw new Error(`exchangeInfo ${res.status}`);
-  const data = (await res.json()) as {
-    symbols: Array<{
-      symbol: string;
-      contractType: string;
-      status: string;
-      quoteAsset: string;
-    }>;
-  };
-  return data.symbols
-    .filter((s) => s.contractType === "PERPETUAL" && s.status === "TRADING" && s.quoteAsset === "USDT")
-    .map((s) => s.symbol);
+  interface Instrument {
+    symbol: string;
+    contractType: string;
+    status: string;
+    quoteCoin: string;
+  }
+  interface Resp {
+    retCode: number;
+    retMsg: string;
+    result: { list: Instrument[]; nextPageCursor?: string };
+  }
+  const out: string[] = [];
+  let cursor = "";
+  for (let page = 0; page < 10; page++) {
+    const url = new URL("https://api.bybit.com/v5/market/instruments-info");
+    url.searchParams.set("category", "linear");
+    url.searchParams.set("limit", "1000");
+    if (cursor) url.searchParams.set("cursor", cursor);
+    const res = await fetch(url.toString(), { signal });
+    if (!res.ok) throw new Error(`instruments-info ${res.status}`);
+    const data = (await res.json()) as Resp;
+    if (data.retCode !== 0) throw new Error(data.retMsg || "instruments-info failed");
+    for (const i of data.result.list) {
+      if (
+        i.status === "Trading" &&
+        i.quoteCoin === "USDT" &&
+        i.contractType === "LinearPerpetual"
+      ) {
+        out.push(i.symbol);
+      }
+    }
+    cursor = data.result.nextPageCursor ?? "";
+    if (!cursor) break;
+  }
+  return out;
 }
 
-// ─── Stream manager (FIXED) ───────────────────────────────────────────────
+// ─── Stream manager (Bybit public linear trades) ─────────────────────────
 export interface SwarmEvents {
   onTick?: (t: Tick) => void;
   onProposal?: (p: TradeProposal) => void;
   onStatus?: (s: { connected: number; total: number }) => void;
 }
 
-const STREAMS_PER_CONN = 100;
+const STREAMS_PER_CONN = 150;
+const SUB_BATCH = 10; // Bybit accepts up to 10 topics per subscribe frame
 const EVAL_INTERVAL_MS = 1500;
+const PING_INTERVAL_MS = 20_000;
+const WS_URL = "wss://stream.bybit.com/v5/public/linear";
 
 export class SwarmEngine {
   private sockets: WebSocket[] = [];
   private reconnectTimers = new Map<number, ReturnType<typeof setTimeout>>();
+  private pingTimers = new Map<WebSocket, ReturnType<typeof setInterval>>();
   private priceBuf = new Map<string, Ring>();
   private volBuf = new Map<string, Ring>();
   private state = new Map<string, SymbolState>();
   private lastEval = new Map<string, number>();
   private connected = 0;
+  private totalChunks = 0;
   private stopped = false;
 
   constructor(
@@ -258,6 +285,7 @@ export class SwarmEngine {
     for (let i = 0; i < this.symbols.length; i += STREAMS_PER_CONN) {
       chunks.push(this.symbols.slice(i, i + STREAMS_PER_CONN));
     }
+    this.totalChunks = chunks.length;
     for (let chunkId = 0; chunkId < chunks.length; chunkId++) {
       this.openSocket(chunks[chunkId], chunkId);
     }
@@ -265,12 +293,10 @@ export class SwarmEngine {
 
   stop() {
     this.stopped = true;
-    // Cancel all scheduled reconnections
-    for (const timer of this.reconnectTimers.values()) {
-      clearTimeout(timer);
-    }
+    for (const timer of this.reconnectTimers.values()) clearTimeout(timer);
     this.reconnectTimers.clear();
-    // Close all active sockets
+    for (const t of this.pingTimers.values()) clearInterval(t);
+    this.pingTimers.clear();
     for (const ws of this.sockets) {
       try {
         ws.close();
@@ -283,10 +309,15 @@ export class SwarmEngine {
     this.events.onStatus?.({ connected: 0, total: 0 });
   }
 
+  private emitStatus() {
+    this.events.onStatus?.({
+      connected: this.connected,
+      total: this.totalChunks,
+    });
+  }
+
   private openSocket(chunk: string[], chunkId: number) {
-    const streams = chunk.map((s) => `${s.toLowerCase()}@aggTrade`).join("/");
-    const url = `wss://fstream.binance.com/stream?streams=${streams}`;
-    const ws = new WebSocket(url);
+    const ws = new WebSocket(WS_URL);
 
     ws.onopen = () => {
       if (this.stopped) {
@@ -295,40 +326,49 @@ export class SwarmEngine {
       }
       this.connected++;
       this.sockets.push(ws);
-      this.events.onStatus?.({
-        connected: this.connected,
-        total: this.sockets.length,
-      });
+      this.emitStatus();
+      for (let i = 0; i < chunk.length; i += SUB_BATCH) {
+        const args = chunk.slice(i, i + SUB_BATCH).map((s) => `publicTrade.${s}`);
+        try {
+          ws.send(JSON.stringify({ op: "subscribe", args }));
+        } catch {
+          /* noop */
+        }
+      }
+      const ping = setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) {
+          try {
+            ws.send(JSON.stringify({ op: "ping" }));
+          } catch {
+            /* noop */
+          }
+        }
+      }, PING_INTERVAL_MS);
+      this.pingTimers.set(ws, ping);
     };
 
     ws.onclose = () => {
+      const ping = this.pingTimers.get(ws);
+      if (ping) {
+        clearInterval(ping);
+        this.pingTimers.delete(ws);
+      }
       if (this.stopped) return;
 
       this.connected = Math.max(0, this.connected - 1);
-      // Remove closed socket from the list before reporting status
       this.sockets = this.sockets.filter((s) => s !== ws);
-      this.events.onStatus?.({
-        connected: this.connected,
-        total: this.sockets.length,
-      });
+      this.emitStatus();
 
-      // Clear any previous pending reconnection timer for this chunk
       const existingTimer = this.reconnectTimers.get(chunkId);
-      if (existingTimer !== undefined) {
-        clearTimeout(existingTimer);
-      }
-      // Schedule reconnection with a stable chunkId
+      if (existingTimer !== undefined) clearTimeout(existingTimer);
       const timer = setTimeout(() => {
         this.reconnectTimers.delete(chunkId);
-        if (!this.stopped) {
-          this.openSocket(chunk, chunkId);
-        }
+        if (!this.stopped) this.openSocket(chunk, chunkId);
       }, 3000);
       this.reconnectTimers.set(chunkId, timer);
     };
 
     ws.onerror = () => {
-      // The browser will trigger onclose after this, no need to duplicate logic
       try {
         ws.close();
       } catch {
@@ -340,19 +380,27 @@ export class SwarmEngine {
   }
 
   private handleMessage(raw: string) {
-    let parsed: { data?: { s: string; p: string; q: string; T: number } };
+    let parsed: {
+      topic?: string;
+      data?: Array<{ s: string; p: string; v: string; T: number }>;
+    };
     try {
       parsed = JSON.parse(raw);
     } catch {
       return;
     }
-    const d = parsed.data;
-    if (!d) return;
+    if (!parsed.topic?.startsWith("publicTrade.") || !Array.isArray(parsed.data)) return;
+    for (const trade of parsed.data) {
+      this.handleTrade(trade);
+    }
+  }
+
+  private handleTrade(d: { s: string; p: string; v: string; T: number }) {
     const symbol = d.s;
     const price = parseFloat(d.p);
-    const qty = parseFloat(d.q);
+    const qty = parseFloat(d.v);
     const time = d.T;
-    if (!Number.isFinite(price) || !Number.isFinite(qty)) return;
+    if (!symbol || !Number.isFinite(price) || !Number.isFinite(qty)) return;
 
     let pb = this.priceBuf.get(symbol);
     if (!pb) {
@@ -370,15 +418,14 @@ export class SwarmEngine {
     const prev = this.state.get(symbol);
     const windowStart = pb.toArray()[0] ?? price;
     const change1m = windowStart ? ((price - windowStart) / windowStart) * 100 : 0;
-    const next: SymbolState = {
+    this.state.set(symbol, {
       symbol,
       lastPrice: price,
       prevPrice: prev?.lastPrice ?? price,
       lastTime: time,
-      change1m, // note: this is actually the change over the window (not exactly 1 min)
+      change1m,
       updates: (prev?.updates ?? 0) + 1,
-    };
-    this.state.set(symbol, next);
+    });
     this.events.onTick?.({ symbol, price, quantity: qty, time });
 
     const lastE = this.lastEval.get(symbol) ?? 0;
@@ -389,3 +436,4 @@ export class SwarmEngine {
     if (proposal) this.events.onProposal?.(proposal);
   }
 }
+
