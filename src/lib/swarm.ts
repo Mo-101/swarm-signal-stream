@@ -484,6 +484,8 @@ export class SwarmEngine {
       reconnects: existing ? existing.reconnects + 1 : 0,
     });
     const ws = new WebSocket(WS_URL);
+    this.chunkSockets.set(chunkId, ws);
+
 
     ws.onopen = () => {
       if (this.stopped) {
