@@ -181,6 +181,7 @@ function SwarmDashboard() {
   const [storedSignals, setStoredSignals] = useState(0);
   const [storedTrades, setStoredTrades] = useState(0);
   const [persistError, setPersistError] = useState<string | null>(null);
+  const [costs, setCosts] = useState({ fees: 0, funding: 0 });
 
   const navigate = useNavigate();
   const loadState = useServerFn(loadEngineState);
@@ -514,6 +515,26 @@ function SwarmDashboard() {
     engineRef.current = engine;
     engine.start();
 
+    // Pull Bybit's live funding rates so paper carry matches the real book.
+    const loadFunding = async () => {
+      try {
+        const res = await fetch(
+          "https://api.bybit.com/v5/market/tickers?category=linear",
+        );
+        const json = (await res.json()) as {
+          result?: { list?: Array<{ symbol: string; fundingRate: string }> };
+        };
+        for (const t of json.result?.list ?? []) {
+          const rate = Number(t.fundingRate);
+          if (Number.isFinite(rate)) broker.setFundingRate(t.symbol, rate);
+        }
+      } catch {
+        // Keep the default 0.01%/8h assumption when the REST call fails.
+      }
+    };
+    void loadFunding();
+    const fundingIv = setInterval(loadFunding, 5 * 60 * 1000);
+
     let lastTickCount = 0;
     let lastSample = Date.now();
     const iv = setInterval(() => {
@@ -528,6 +549,8 @@ function SwarmDashboard() {
       lastTickCount = tickCounter.current;
       lastSample = now;
 
+      broker.accrueFunding(now, marksRef.current);
+      setCosts(broker.getCosts());
       setTicks(tickCounter.current);
       const state = engine.getState();
       for (const row of state) regimeRef.current.set(row.symbol, regimeOf(row.change1m));
@@ -541,6 +564,7 @@ function SwarmDashboard() {
 
     return () => {
       clearInterval(iv);
+      clearInterval(fundingIv);
       engine.stop();
       engineRef.current = null;
       brokerRef.current = null;
@@ -816,6 +840,11 @@ function SwarmDashboard() {
           sizing = (equity × {(DEFAULT_PAPER_CONFIG.riskPerTrade * 100).toFixed(1)}%
           × confidence) / stop distance. SL/TP simulated against the live mark;
           fills assumed at signal price. New entries pause automatically if
+          Costs modelled on Bybit USDT perpetuals: 0.055% taker fee on entry and
+          exit, plus funding settled every 8h (00:00 / 08:00 / 16:00 UTC) at the
+          live Bybit funding rate — longs pay when positive, shorts pay when
+          negative. Session costs so far: {formatUsd(costs.fees)} fees ·{" "}
+          {formatUsd(costs.funding)} funding. New entries pause if
           realized PnL drops by{" "}
           {(DEFAULT_PAPER_CONFIG.maxDailyDrawdown * 100).toFixed(0)}%. No real
           orders are placed.
