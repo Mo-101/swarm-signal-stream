@@ -101,7 +101,9 @@ export class PaperBroker {
     const riskAmount = equity * this.cfg.riskPerTrade * proposal.confidence;
     const stopDistance = proposal.price * this.cfg.slPct;
     if (stopDistance <= 0) return;
-    const size = riskAmount / stopDistance;
+    // Cap notional per position so total exposure stays within the account.
+    const maxNotional = equity / this.cfg.maxPositions;
+    const size = Math.min(riskAmount / stopDistance, maxNotional / proposal.price);
     if (!Number.isFinite(size) || size <= 0) return;
 
     const sl =

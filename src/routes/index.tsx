@@ -86,13 +86,13 @@ export const Route = createFileRoute("/")({
       {
         name: "description",
         content:
-          "Real-time AI trading swarm streaming every Binance USDT-M perpetual future with paper-trading execution, SL/TP, and PnL tracking.",
+          "Real-time AI trading swarm streaming every Bybit USDT perpetual future with paper-trading execution, SL/TP, and PnL tracking.",
       },
       { property: "og:title", content: "Swarm Terminal — Live USDT-M Perp Signals" },
       {
         property: "og:description",
         content:
-          "Live consensus signals with paper execution across every Binance USDT-M perpetual future.",
+          "Live consensus signals with paper execution across every Bybit USDT perpetual future.",
       },
       { property: "og:type", content: "website" },
       { name: "twitter:card", content: "summary_large_image" },
@@ -520,7 +520,7 @@ function SwarmDashboard() {
 
       <footer className="mx-auto max-w-[1600px] px-6 pb-8">
         <p className="text-[11px] leading-relaxed text-muted-foreground">
-          Paper trading against live Binance USDT-M aggTrade streams. Position
+          Paper trading against live Bybit USDT perpetual trade streams. Position
           sizing = (equity × {(DEFAULT_PAPER_CONFIG.riskPerTrade * 100).toFixed(1)}%
           × confidence) / stop distance. SL/TP simulated against the live mark;
           fills assumed at signal price. New entries pause automatically if
