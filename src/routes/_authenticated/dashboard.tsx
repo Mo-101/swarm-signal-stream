@@ -230,6 +230,11 @@ function SwarmDashboard() {
     atRisk: 0,
   });
   const [liquidations, setLiquidations] = useState(0);
+  const [execStats, setExecStats] = useState<ExecutionStats>(EMPTY_EXEC_STATS);
+  const [pendingOrders, setPendingOrders] = useState<PendingOrder[]>([]);
+  const [rejects, setRejects] = useState<RejectRecord[]>([]);
+  const [microMetrics, setMicroMetrics] = useState<MicroMetrics | null>(null);
+
 
   const navigate = useNavigate();
   const loadState = useServerFn(loadEngineState);
