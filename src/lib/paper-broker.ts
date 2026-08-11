@@ -1,6 +1,19 @@
-// Paper trading engine — simulates fills, SL/TP, PnL against live prices.
+// Paper trading engine — simulates realistic Bybit USDT-perp execution:
+// latency, spread crossing, depth-aware sizing, orderbook-walked fills,
+// exchange lot/tick/notional filters, funding, isolated margin and
+// mark-price liquidation.
 
 import type { TradeProposal } from "@/lib/swarm";
+import {
+  maxExecutableQty,
+  modelledFillPrice,
+  roundPrice,
+  roundQty,
+  slippageBps,
+  walkBook,
+  type BookSnapshot,
+  type InstrumentFilter,
+} from "@/lib/microstructure";
 
 export interface Position {
   id: string;
@@ -29,11 +42,29 @@ export interface Position {
   maintenanceMarginRate: number;
   /** Maintenance margin requirement at entry notional. */
   maintenanceMargin: number;
-  /** Price at which isolated margin is exhausted and the position is liquidated. */
+  /** Price at which the MARK crosses isolated-margin exhaustion. */
   liquidationPrice: number;
   /** Bankruptcy price — where equity of the position hits zero. */
   bankruptcyPrice: number;
+
+  // ── execution quality ──
+  /** Price the signal was generated at, before latency and spread. */
+  signalPrice: number;
+  /** Entry slippage vs the signal price, in bps (positive = worse). */
+  entrySlipBps: number;
+  /** Book spread at the moment of the entry fill, in bps. */
+  spreadAtEntryBps: number;
+  /** Size the sizer asked for before depth capping / lot rounding. */
+  requestedSize: number;
+  /** Simulated order latency applied before the fill, in ms. */
+  latencyMs: number;
+  /** Book levels consumed by the entry order. */
+  entryLevels: number;
+  /** True when the entry was priced off a real L2 book rather than the model. */
+  bookPriced: boolean;
 }
+
+export type ExitReason = "TP" | "SL" | "MANUAL" | "LIQ";
 
 export interface ClosedTrade {
   id: string;
@@ -44,7 +75,7 @@ export interface ClosedTrade {
   size: number;
   pnl: number;
   pnlPct: number;
-  reason: "TP" | "SL" | "MANUAL" | "LIQ";
+  reason: ExitReason;
   /** Gross price PnL before costs. */
   grossPnl: number;
   /** Entry + exit taker fees. */
@@ -60,6 +91,56 @@ export interface ClosedTrade {
   confidence: number;
   regime: string;
   agents: Record<string, { direction: string; confidence: number }>;
+  // ── execution quality ──
+  signalPrice: number;
+  entrySlipBps: number;
+  /** Exit slippage vs the trigger price, in bps (positive = worse). */
+  exitSlipBps: number;
+  /** Price the SL/TP/liq actually triggered at, before exit slippage. */
+  triggerPrice: number;
+  spreadAtEntryBps: number;
+  spreadAtExitBps: number;
+  latencyMs: number;
+  /** Total USD lost to spread + market impact on both legs. */
+  slipCostUsd: number;
+  bookPriced: boolean;
+}
+
+export type RejectReason =
+  | "no-book"
+  | "stale-book"
+  | "thin-book"
+  | "min-qty"
+  | "min-notional"
+  | "margin"
+  | "slippage"
+  | "signal-stale"
+  | "duplicate"
+  | "halted"
+  | "max-positions"
+  | "confidence"
+  | "no-filter";
+
+export interface PendingOrder {
+  id: string;
+  symbol: string;
+  side: "BUY" | "SELL";
+  signalPrice: number;
+  confidence: number;
+  regime: string;
+  agents: Record<string, { direction: string; confidence: number }>;
+  createdAt: number;
+  /** Wall-clock time the order reaches the matching engine. */
+  readyAt: number;
+}
+
+export interface RejectRecord {
+  id: string;
+  symbol: string;
+  side: "BUY" | "SELL";
+  reason: RejectReason;
+  detail: string;
+  at: number;
 }
 
 export interface PaperConfig {
@@ -78,6 +159,28 @@ export interface PaperConfig {
   leverage: number;
   /** Maximum fraction of equity that may be locked as initial margin. */
   maxMarginUsage: number;
+
+  // ── execution realism ──
+  /** Simulated signal→fill round trip (order submit + match + ack). */
+  latencyMs: number;
+  /** Jitter applied to latency, in ms (uniform ±). */
+  latencyJitterMs: number;
+  /** Max average price impact tolerated when sizing against the book, in bps. */
+  maxImpactBps: number;
+  /** Never take more than this fraction of the visible depth on one side. */
+  maxDepthFraction: number;
+  /** Cancel the order if the market moved this far against us during latency. */
+  maxAdverseMoveBps: number;
+  /** Reject entries whose modelled/actual entry slippage exceeds this, in bps. */
+  maxEntrySlipBps: number;
+  /** Reject entries on books wider than this, in bps. */
+  maxSpreadBps: number;
+  /** Require a live L2 book to enter (no book → reject instead of modelling). */
+  requireBook: boolean;
+  /** Spread assumed when a book is unavailable (exits only), in bps. */
+  fallbackSpreadBps: number;
+  /** Allow the book to fill less than the requested size. */
+  allowPartialFills: boolean;
 }
 
 /** Bybit settles funding at 00:00, 08:00 and 16:00 UTC. */
@@ -101,6 +204,17 @@ export const DEFAULT_PAPER_CONFIG: PaperConfig = {
   defaultFundingRate: 0.0001,
   leverage: 10,
   maxMarginUsage: 0.8,
+
+  latencyMs: 250,
+  latencyJitterMs: 120,
+  maxImpactBps: 12,
+  maxDepthFraction: 0.2,
+  maxAdverseMoveBps: 25,
+  maxEntrySlipBps: 30,
+  maxSpreadBps: 25,
+  requireBook: true,
+  fallbackSpreadBps: 8,
+  allowPartialFills: true,
 };
 
 /**
@@ -124,6 +238,7 @@ export function riskLimitTier(notional: number) {
  * Long:  entry * (1 - IMR + MMR + taker)
  * Short: entry * (1 + IMR - MMR - taker)
  * where IMR = 1 / leverage. The taker term reserves the closing fee.
+ * Bybit evaluates this against MARK price, not last traded price.
  */
 export function liquidationPriceFor(
   entryPrice: number,
@@ -162,11 +277,47 @@ export interface MarginSummary {
   atRisk: number;
 }
 
+export interface ExecutionStats {
+  submitted: number;
+  filled: number;
+  partialFills: number;
+  rejected: number;
+  pending: number;
+  rejectsByReason: Record<string, number>;
+  avgEntrySlipBps: number;
+  avgExitSlipBps: number;
+  worstSlipBps: number;
+  avgSpreadBps: number;
+  avgFillLatencyMs: number;
+  avgFillRatio: number;
+  /** Total USD given up to spread + market impact across all legs. */
+  slipCostUsd: number;
+  bookPricedFills: number;
+  modelPricedFills: number;
+}
+
+/** Live market data the broker needs to price executions. */
+export interface MarketAccess {
+  /** Fresh L2 book, or null when unavailable/stale. */
+  book(symbol: string): BookSnapshot | null;
+  /** Bybit mark price — used for liquidation, falls back to last. */
+  mark(symbol: string): number | null;
+  /** Exchange lot/tick/notional filters. */
+  filter(symbol: string): InstrumentFilter | null;
+}
+
+const NO_MARKET: MarketAccess = {
+  book: () => null,
+  mark: () => null,
+  filter: () => null,
+};
+
 export interface PaperEvents {
   onOpen?: (p: Position) => void;
   onClose?: (t: ClosedTrade) => void;
   onHalt?: (reason: string) => void;
   onLiquidate?: (t: ClosedTrade) => void;
+  onReject?: (r: RejectRecord) => void;
 }
 
 export class PaperBroker {
@@ -180,10 +331,40 @@ export class PaperBroker {
   private totalFunding = 0;
   private liquidations = 0;
 
+  private market: MarketAccess = NO_MARKET;
+  private pending = new Map<string, PendingOrder>();
+  private rejects: RejectRecord[] = [];
+  private lastMark = new Map<string, number>();
+
+  // execution accounting
+  private submitted = 0;
+  private fills = 0;
+  private partialFills = 0;
+  private rejected = 0;
+  private rejectsByReason: Record<string, number> = {};
+  private entrySlipSum = 0;
+  private exitSlipSum = 0;
+  private exitSlipCount = 0;
+  private worstSlipBps = 0;
+  private spreadSum = 0;
+  private spreadCount = 0;
+  private latencySum = 0;
+  private fillRatioSum = 0;
+  private slipCostUsd = 0;
+  private bookPricedFills = 0;
+  private modelPricedFills = 0;
+
   constructor(
     private cfg: PaperConfig = DEFAULT_PAPER_CONFIG,
     private events: PaperEvents = {},
   ) {}
+
+  setMarket(market: MarketAccess) {
+    this.market = market;
+  }
+  getConfig(): PaperConfig {
+    return this.cfg;
+  }
 
   getPositions(): Position[] {
     return Array.from(this.positions.values());
@@ -195,7 +376,7 @@ export class PaperBroker {
     return this.realizedPnl;
   }
   getCosts() {
-    return { fees: this.totalFees, funding: this.totalFunding };
+    return { fees: this.totalFees, funding: this.totalFunding, slippage: this.slipCostUsd };
   }
   getLiquidations() {
     return this.liquidations;
@@ -203,13 +384,39 @@ export class PaperBroker {
   getLeverage() {
     return this.cfg.leverage;
   }
+  getPending(): PendingOrder[] {
+    return Array.from(this.pending.values());
+  }
+  getRejects(): RejectRecord[] {
+    return this.rejects;
+  }
+  getExecutionStats(): ExecutionStats {
+    return {
+      submitted: this.submitted,
+      filled: this.fills,
+      partialFills: this.partialFills,
+      rejected: this.rejected,
+      pending: this.pending.size,
+      rejectsByReason: { ...this.rejectsByReason },
+      avgEntrySlipBps: this.fills ? this.entrySlipSum / this.fills : 0,
+      avgExitSlipBps: this.exitSlipCount ? this.exitSlipSum / this.exitSlipCount : 0,
+      worstSlipBps: this.worstSlipBps,
+      avgSpreadBps: this.spreadCount ? this.spreadSum / this.spreadCount : 0,
+      avgFillLatencyMs: this.fills ? this.latencySum / this.fills : 0,
+      avgFillRatio: this.fills ? this.fillRatioSum / this.fills : 0,
+      slipCostUsd: this.slipCostUsd,
+      bookPricedFills: this.bookPricedFills,
+      modelPricedFills: this.modelPricedFills,
+    };
+  }
+
   /** Margin usage / liquidation-risk snapshot for the whole account. */
   getMarginSummary(marks: Map<string, number>): MarginSummary {
     let usedMargin = 0;
     let maintenanceMargin = 0;
     let atRisk = 0;
     for (const p of this.positions.values()) {
-      const mark = marks.get(p.symbol) ?? p.entryPrice;
+      const mark = this.markFor(p.symbol, marks) ?? p.entryPrice;
       usedMargin += p.initialMargin;
       maintenanceMargin += mark * p.size * p.maintenanceMarginRate;
       const distance = Math.abs(mark - p.liquidationPrice) / (mark || 1);
@@ -226,12 +433,23 @@ export class PaperBroker {
       atRisk,
     };
   }
+
   /** Feed in Bybit's live funding rate (per interval) for accurate carry. */
   setFundingRate(symbol: string, rate: number) {
     if (Number.isFinite(rate)) this.fundingRates.set(symbol, rate);
   }
   private rateFor(symbol: string) {
     return this.fundingRates.get(symbol) ?? this.cfg.defaultFundingRate;
+  }
+
+  /** Prefer the exchange mark price; fall back to the last trade. */
+  private markFor(symbol: string, marks?: Map<string, number>): number | null {
+    const m = this.market.mark(symbol);
+    if (m && m > 0) return m;
+    const cached = this.lastMark.get(symbol);
+    if (cached && cached > 0) return cached;
+    const last = marks?.get(symbol);
+    return last && last > 0 ? last : null;
   }
 
   /**
@@ -244,7 +462,7 @@ export class PaperBroker {
       const boundary = lastFundingBoundary(now);
       if (boundary <= p.lastFundingAt) continue;
       const intervals = Math.round((boundary - p.lastFundingAt) / FUNDING_INTERVAL_MS);
-      const mark = marks.get(p.symbol) ?? p.entryPrice;
+      const mark = this.markFor(p.symbol, marks) ?? p.entryPrice;
       const rate = this.rateFor(p.symbol);
       const fee = mark * p.size * rate * intervals * (p.side === "BUY" ? 1 : -1);
       p.fundingPaid += fee;
@@ -253,14 +471,17 @@ export class PaperBroker {
       this.totalFunding += fee;
     }
   }
+
   getUnrealizedPnl(marks: Map<string, number>): number {
     let u = 0;
     for (const p of this.positions.values()) {
-      const m = marks.get(p.symbol);
+      const m = this.markFor(p.symbol, marks);
       if (!m) continue;
       const gross = p.side === "BUY" ? (m - p.entryPrice) * p.size : (p.entryPrice - m) * p.size;
-      // Net of the taker fee that closing would cost.
-      u += gross - m * p.size * this.cfg.takerFeeRate;
+      // Net of the taker fee and modelled exit slippage that closing would cost.
+      const exitSpreadBps = this.market.book(p.symbol)?.spreadBps ?? this.cfg.fallbackSpreadBps;
+      const exitSlipCost = ((m * p.size * exitSpreadBps) / 2) / 10_000;
+      u += gross - m * p.size * this.cfg.takerFeeRate - exitSlipCost;
     }
     return u;
   }
@@ -274,24 +495,40 @@ export class PaperBroker {
   /** Restore a persisted account so the engine survives reloads. */
   hydrate(state: {
     positions: Array<
-      Omit<
+      Pick<
         Position,
-        | "entryFee"
-        | "fundingPaid"
-        | "lastFundingAt"
-        | "leverage"
-        | "initialMargin"
-        | "maintenanceMarginRate"
-        | "maintenanceMargin"
-        | "liquidationPrice"
-        | "bankruptcyPrice"
+        | "id"
+        | "symbol"
+        | "side"
+        | "entryPrice"
+        | "size"
+        | "notional"
+        | "stopLoss"
+        | "takeProfit"
+        | "openedAt"
+        | "confidence"
+        | "regime"
+        | "agents"
       > &
         Partial<Position>
     >;
     closed: Array<
-      Omit<
+      Pick<
         ClosedTrade,
-        "grossPnl" | "fees" | "funding" | "initialMargin" | "leverage" | "liquidationPrice"
+        | "id"
+        | "symbol"
+        | "side"
+        | "entryPrice"
+        | "exitPrice"
+        | "size"
+        | "pnl"
+        | "pnlPct"
+        | "reason"
+        | "openedAt"
+        | "closedAt"
+        | "confidence"
+        | "regime"
+        | "agents"
       > &
         Partial<ClosedTrade>
     >;
@@ -316,6 +553,13 @@ export class PaperBroker {
           p.liquidationPrice ??
           liquidationPriceFor(p.entryPrice, p.side, leverage, mmr, this.cfg.takerFeeRate),
         bankruptcyPrice: p.bankruptcyPrice ?? bankruptcyPriceFor(p.entryPrice, p.side, leverage),
+        signalPrice: p.signalPrice ?? p.entryPrice,
+        entrySlipBps: p.entrySlipBps ?? 0,
+        spreadAtEntryBps: p.spreadAtEntryBps ?? 0,
+        requestedSize: p.requestedSize ?? p.size,
+        latencyMs: p.latencyMs ?? this.cfg.latencyMs,
+        entryLevels: p.entryLevels ?? 0,
+        bookPriced: p.bookPriced ?? false,
       });
     }
     this.closed = state.closed.map((t) => ({
@@ -334,6 +578,15 @@ export class PaperBroker {
           riskLimitTier(t.entryPrice * t.size).mmr,
           this.cfg.takerFeeRate,
         ),
+      signalPrice: t.signalPrice ?? t.entryPrice,
+      entrySlipBps: t.entrySlipBps ?? 0,
+      exitSlipBps: t.exitSlipBps ?? 0,
+      triggerPrice: t.triggerPrice ?? t.exitPrice,
+      spreadAtEntryBps: t.spreadAtEntryBps ?? 0,
+      spreadAtExitBps: t.spreadAtExitBps ?? 0,
+      latencyMs: t.latencyMs ?? this.cfg.latencyMs,
+      slipCostUsd: t.slipCostUsd ?? 0,
+      bookPriced: t.bookPriced ?? false,
     }));
     this.realizedPnl = state.realizedPnl;
     this.halted = state.halted;
@@ -347,144 +600,348 @@ export class PaperBroker {
     return this.cfg.minConfidence;
   }
 
+  private reject(order: Pick<PendingOrder, "id" | "symbol" | "side">, reason: RejectReason, detail: string) {
+    this.rejected += 1;
+    this.rejectsByReason[reason] = (this.rejectsByReason[reason] ?? 0) + 1;
+    const rec: RejectRecord = {
+      id: `${order.id}-${reason}`,
+      symbol: order.symbol,
+      side: order.side,
+      reason,
+      detail,
+      at: Date.now(),
+    };
+    this.rejects = [rec, ...this.rejects].slice(0, 60);
+    this.events.onReject?.(rec);
+  }
+
+  /**
+   * A signal becomes a *pending* market order. It is not filled here: the
+   * exchange sees it `latencyMs` later, at whatever price the book is then.
+   */
   onProposal(proposal: TradeProposal, meta: { regime: string } = { regime: "unknown" }) {
-    if (this.halted) return;
-    if (proposal.confidence < this.cfg.minConfidence) return;
-    if (this.positions.has(proposal.symbol)) return;
-    if (this.positions.size >= this.cfg.maxPositions) return;
+    const base = { id: proposal.id, symbol: proposal.symbol, side: proposal.direction };
+    if (this.halted) return this.reject(base, "halted", "Risk halt active");
+    if (proposal.confidence < this.cfg.minConfidence)
+      return this.reject(base, "confidence", `conf ${proposal.confidence.toFixed(2)} < ${this.cfg.minConfidence.toFixed(2)}`);
+    if (this.positions.has(proposal.symbol)) return; // already exposed, silent
+    if (this.pending.has(proposal.symbol)) return; // order already in flight
+    if (this.positions.size + this.pending.size >= this.cfg.maxPositions)
+      return this.reject(base, "max-positions", `${this.cfg.maxPositions} slots in use`);
 
+    const jitter = (Math.random() * 2 - 1) * this.cfg.latencyJitterMs;
+    const latency = Math.max(20, this.cfg.latencyMs + jitter);
+    this.submitted += 1;
+    this.pending.set(proposal.symbol, {
+      id: proposal.id,
+      symbol: proposal.symbol,
+      side: proposal.direction,
+      signalPrice: proposal.price,
+      confidence: proposal.confidence,
+      regime: meta.regime,
+      agents: proposal.contributions,
+      createdAt: Date.now(),
+      readyAt: Date.now() + latency,
+    });
+  }
+
+  /** Drive the matching engine: fill any pending orders whose latency elapsed. */
+  processPending(now = Date.now()) {
+    for (const order of Array.from(this.pending.values())) {
+      if (now < order.readyAt) continue;
+      this.pending.delete(order.symbol);
+      this.tryFill(order, now);
+    }
+  }
+
+  private tryFill(order: PendingOrder, now: number) {
+    if (this.halted) return this.reject(order, "halted", "Risk halt active during flight");
+    if (this.positions.has(order.symbol)) return;
+
+    const filters = this.market.filter(order.symbol);
+    if (!filters) return this.reject(order, "no-filter", "No instrument filters loaded");
+
+    const book = this.market.book(order.symbol);
+    if (!book && this.cfg.requireBook)
+      return this.reject(order, "no-book", "No live L2 depth for this symbol");
+    if (book && book.spreadBps > this.cfg.maxSpreadBps)
+      return this.reject(order, "thin-book", `spread ${book.spreadBps.toFixed(1)}bps > ${this.cfg.maxSpreadBps}bps`);
+
+    const touch = book ? (order.side === "BUY" ? book.ask : book.bid) : order.signalPrice;
+    const reference = book ? book.mid : order.signalPrice;
+
+    // The market moved while the order was in flight — a real desk cancels.
+    const adverse = slippageBps(order.signalPrice, reference, order.side);
+    if (adverse > this.cfg.maxAdverseMoveBps)
+      return this.reject(order, "signal-stale", `moved ${adverse.toFixed(1)}bps against us in ${(now - order.createdAt).toFixed(0)}ms`);
+
+    // ── Risk sizing ──
     const equity = this.cfg.startingBalance + this.realizedPnl;
-    const riskAmount = equity * this.cfg.riskPerTrade * proposal.confidence;
-    const stopDistance = proposal.price * this.cfg.slPct;
-    if (stopDistance <= 0) return;
+    const riskAmount = equity * this.cfg.riskPerTrade * order.confidence;
+    const stopDistance = touch * this.cfg.slPct;
+    if (!(stopDistance > 0)) return this.reject(order, "min-qty", "Invalid stop distance");
 
-    // Free margin: wallet balance minus initial margin already locked, capped
-    // by the account-level margin usage limit.
     let usedMargin = 0;
     for (const open of this.positions.values()) usedMargin += open.initialMargin;
     const marginBudget = Math.max(equity * this.cfg.maxMarginUsage - usedMargin, 0);
-    if (marginBudget <= 0) return;
+    if (marginBudget <= 0) return this.reject(order, "margin", "Margin budget exhausted");
 
-    // Cap notional per position so total exposure stays within the account,
-    // then translate the remaining margin budget into a notional ceiling.
     const perPositionNotional = (equity / this.cfg.maxPositions) * this.cfg.leverage;
     const marginNotional = marginBudget * this.cfg.leverage;
     const maxNotional = Math.min(perPositionNotional, marginNotional);
-    const size = Math.min(riskAmount / stopDistance, maxNotional / proposal.price);
-    if (!Number.isFinite(size) || size <= 0) return;
+    let requested = Math.min(riskAmount / stopDistance, maxNotional / touch);
 
-    const notional = proposal.price * size;
+    // ── Depth-aware cap: never demand more than the book can absorb ──
+    let depthCap = Number.POSITIVE_INFINITY;
+    if (book) {
+      depthCap = maxExecutableQty(book, order.side, this.cfg.maxImpactBps, this.cfg.maxDepthFraction);
+      if (!(depthCap > 0))
+        return this.reject(order, "thin-book", "No depth inside the impact limit");
+    }
+    const targetSize = Math.min(requested, depthCap, filters.maxOrderQty);
+
+    // ── Exchange filters ──
+    let size = roundQty(targetSize, filters.qtyStep);
+    if (size < filters.minOrderQty)
+      return this.reject(
+        order,
+        "min-qty",
+        `size ${targetSize.toPrecision(3)} < min lot ${filters.minOrderQty}`,
+      );
+    if (size * touch < filters.minNotional)
+      return this.reject(
+        order,
+        "min-notional",
+        `$${(size * touch).toFixed(2)} < $${filters.minNotional} minimum`,
+      );
+
+    // ── Fill ──
+    let fillPrice: number;
+    let levelsUsed = 0;
+    let bookPriced = false;
+    if (book) {
+      const walk = walkBook(book, order.side, size);
+      if (walk.filled <= 0) return this.reject(order, "thin-book", "Book empty on the taking side");
+      if (walk.exhausted) {
+        if (!this.cfg.allowPartialFills)
+          return this.reject(order, "thin-book", "Insufficient depth for full size");
+        const partial = roundQty(walk.filled, filters.qtyStep);
+        if (partial < filters.minOrderQty || partial * touch < filters.minNotional)
+          return this.reject(order, "thin-book", "Partial fill below exchange minimums");
+        size = partial;
+        this.partialFills += 1;
+      }
+      fillPrice = walk.avgPrice;
+      levelsUsed = walk.levels;
+      bookPriced = true;
+      this.bookPricedFills += 1;
+    } else {
+      fillPrice = modelledFillPrice(
+        order.signalPrice,
+        order.side,
+        size * order.signalPrice,
+        this.cfg.fallbackSpreadBps,
+      );
+      this.modelPricedFills += 1;
+    }
+    fillPrice = roundPrice(fillPrice, filters.tickSize);
+
+    const entrySlip = slippageBps(order.signalPrice, fillPrice, order.side);
+    if (entrySlip > this.cfg.maxEntrySlipBps)
+      return this.reject(order, "slippage", `${entrySlip.toFixed(1)}bps > ${this.cfg.maxEntrySlipBps}bps cap`);
+
+    const notional = fillPrice * size;
     const tier = riskLimitTier(notional);
-    // Risk-limit tiers cap effective leverage as notional grows.
-    const leverage = Math.min(this.cfg.leverage, tier.maxLeverage);
+    const leverage = Math.min(this.cfg.leverage, tier.maxLeverage, filters.maxLeverage);
     const initialMargin = notional / leverage;
     const entryFee = notional * this.cfg.takerFeeRate;
-    if (initialMargin + entryFee > marginBudget) return;
+    if (initialMargin + entryFee > marginBudget)
+      return this.reject(order, "margin", `IM $${initialMargin.toFixed(2)} exceeds free margin`);
 
-    const sl =
-      proposal.direction === "BUY"
-        ? proposal.price * (1 - this.cfg.slPct)
-        : proposal.price * (1 + this.cfg.slPct);
-    const tp =
-      proposal.direction === "BUY"
-        ? proposal.price * (1 + this.cfg.tpPct)
-        : proposal.price * (1 - this.cfg.tpPct);
+    const sl = roundPrice(
+      order.side === "BUY" ? fillPrice * (1 - this.cfg.slPct) : fillPrice * (1 + this.cfg.slPct),
+      filters.tickSize,
+    );
+    const tp = roundPrice(
+      order.side === "BUY" ? fillPrice * (1 + this.cfg.tpPct) : fillPrice * (1 - this.cfg.tpPct),
+      filters.tickSize,
+    );
+
+    // Slippage cost vs a frictionless fill at the signal price.
+    const slipCost = Math.abs(fillPrice - order.signalPrice) * size;
 
     const pos: Position = {
-      id: `${proposal.symbol}-${proposal.time}`,
-      symbol: proposal.symbol,
-      side: proposal.direction,
-      entryPrice: proposal.price,
+      id: order.id,
+      symbol: order.symbol,
+      side: order.side,
+      entryPrice: fillPrice,
       size,
       notional,
       stopLoss: sl,
       takeProfit: tp,
-      openedAt: proposal.time,
-      confidence: proposal.confidence,
-      regime: meta.regime,
-      agents: proposal.contributions,
+      openedAt: now,
+      confidence: order.confidence,
+      regime: order.regime,
+      agents: order.agents,
       entryFee,
       fundingPaid: 0,
-      lastFundingAt: lastFundingBoundary(proposal.time),
+      lastFundingAt: lastFundingBoundary(now),
       leverage,
       initialMargin,
       maintenanceMarginRate: tier.mmr,
       maintenanceMargin: notional * tier.mmr,
-      liquidationPrice: liquidationPriceFor(
-        proposal.price,
-        proposal.direction,
-        leverage,
-        tier.mmr,
-        this.cfg.takerFeeRate,
-      ),
-      bankruptcyPrice: bankruptcyPriceFor(proposal.price, proposal.direction, leverage),
+      liquidationPrice: liquidationPriceFor(fillPrice, order.side, leverage, tier.mmr, this.cfg.takerFeeRate),
+      bankruptcyPrice: bankruptcyPriceFor(fillPrice, order.side, leverage),
+      signalPrice: order.signalPrice,
+      entrySlipBps: entrySlip,
+      spreadAtEntryBps: book?.spreadBps ?? this.cfg.fallbackSpreadBps,
+      requestedSize: requested,
+      latencyMs: now - order.createdAt,
+      entryLevels: levelsUsed,
+      bookPriced,
     };
-    this.realizedPnl -= pos.entryFee;
-    this.totalFees += pos.entryFee;
-    this.positions.set(proposal.symbol, pos);
+
+    this.fills += 1;
+    this.entrySlipSum += entrySlip;
+    if (entrySlip > this.worstSlipBps) this.worstSlipBps = entrySlip;
+    this.spreadSum += pos.spreadAtEntryBps;
+    this.spreadCount += 1;
+    this.latencySum += pos.latencyMs;
+    this.fillRatioSum += requested > 0 ? Math.min(size / requested, 1) : 1;
+    this.slipCostUsd += slipCost;
+
+    this.realizedPnl -= entryFee;
+    this.totalFees += entryFee;
+    this.positions.set(order.symbol, pos);
     this.events.onOpen?.(pos);
   }
 
-  // Called with the latest mark for a symbol; may close position on SL/TP.
+  /**
+   * Latest LAST-traded price for a symbol. Bybit triggers TP/SL on last price
+   * by default, and liquidations on MARK price — both are checked here.
+   */
   markPrice(symbol: string, price: number, time: number) {
+    this.lastMark.set(symbol, price);
     const p = this.positions.get(symbol);
     if (!p) return;
-    let reason: "TP" | "SL" | "LIQ" | null = null;
-    let exit = price;
-    // Liquidation is checked first: the exchange closes the position the moment
-    // the mark crosses the liquidation price, regardless of where SL/TP sit.
+
+    // 1. Liquidation, on MARK price, always evaluated first.
+    const mark = this.market.mark(symbol) ?? price;
     if (
-      (p.side === "BUY" && price <= p.liquidationPrice) ||
-      (p.side === "SELL" && price >= p.liquidationPrice)
+      (p.side === "BUY" && mark <= p.liquidationPrice) ||
+      (p.side === "SELL" && mark >= p.liquidationPrice)
     ) {
       this.closePosition(p, p.liquidationPrice, time, "LIQ");
       return;
     }
+
+    // 2. TP/SL, triggered on LAST price (Bybit default trigger source).
+    let reason: "TP" | "SL" | null = null;
+    let trigger = price;
     if (p.side === "BUY") {
       if (price <= p.stopLoss) {
         reason = "SL";
-        exit = p.stopLoss;
+        trigger = p.stopLoss;
       } else if (price >= p.takeProfit) {
         reason = "TP";
-        exit = p.takeProfit;
+        trigger = p.takeProfit;
       }
     } else {
       if (price >= p.stopLoss) {
         reason = "SL";
-        exit = p.stopLoss;
+        trigger = p.stopLoss;
       } else if (price <= p.takeProfit) {
         reason = "TP";
-        exit = p.takeProfit;
+        trigger = p.takeProfit;
       }
     }
-    if (reason) this.closePosition(p, exit, time, reason);
+    if (reason) this.closePosition(p, trigger, time, reason);
   }
 
-  private closePosition(
+  /**
+   * Resolve the actual exit price for a triggered stop/target. Triggered
+   * orders execute as market orders, so they cross the spread and walk the
+   * book exactly like the entry did — stops in particular fill worse than
+   * their trigger.
+   */
+  private resolveExitPrice(
     p: Position,
-    exitPrice: number,
-    time: number,
-    reason: "TP" | "SL" | "MANUAL" | "LIQ",
-  ) {
+    triggerPrice: number,
+  ): { price: number; slipBps: number; spreadBps: number; bookPriced: boolean } {
+    const exitSide: "BUY" | "SELL" = p.side === "BUY" ? "SELL" : "BUY";
+    const book = this.market.book(p.symbol);
+    const filters = this.market.filter(p.symbol);
+    if (book) {
+      const walk = walkBook(book, exitSide, p.size);
+      if (walk.filled > 0) {
+        // The stop triggers at `triggerPrice`; the fill happens against the
+        // book, but never better than the trigger for a stop-out.
+        const raw = walk.avgPrice;
+        const price = filters ? roundPrice(raw, filters.tickSize) : raw;
+        return {
+          price,
+          slipBps: slippageBps(triggerPrice, price, exitSide),
+          spreadBps: book.spreadBps,
+          bookPriced: true,
+        };
+      }
+    }
+    const modelled = modelledFillPrice(
+      triggerPrice,
+      exitSide,
+      p.size * triggerPrice,
+      this.cfg.fallbackSpreadBps,
+    );
+    const price = filters ? roundPrice(modelled, filters.tickSize) : modelled;
+    return {
+      price,
+      slipBps: slippageBps(triggerPrice, price, exitSide),
+      spreadBps: this.cfg.fallbackSpreadBps,
+      bookPriced: false,
+    };
+  }
+
+  private closePosition(p: Position, triggerPrice: number, time: number, reason: ExitReason) {
+    let exitPrice = triggerPrice;
+    let exitSlipBps = 0;
+    let spreadAtExitBps = 0;
+    let exitBookPriced = false;
+
+    if (reason === "LIQ") {
+      // Liquidation is executed by the exchange's liquidation engine at the
+      // bankruptcy price; the trader's loss is the posted margin regardless.
+      exitPrice = p.liquidationPrice;
+    } else {
+      const res = this.resolveExitPrice(p, triggerPrice);
+      exitPrice = res.price;
+      exitSlipBps = res.slipBps;
+      spreadAtExitBps = res.spreadBps;
+      exitBookPriced = res.bookPriced;
+      this.exitSlipSum += exitSlipBps;
+      this.exitSlipCount += 1;
+      if (exitSlipBps > this.worstSlipBps) this.worstSlipBps = exitSlipBps;
+    }
+
     const grossPnl =
-      p.side === "BUY"
-        ? (exitPrice - p.entryPrice) * p.size
-        : (p.entryPrice - exitPrice) * p.size;
-    // Taker fee on the way out, same rate as entry.
+      p.side === "BUY" ? (exitPrice - p.entryPrice) * p.size : (p.entryPrice - exitPrice) * p.size;
     const exitFee = exitPrice * p.size * this.cfg.takerFeeRate;
     const fees = p.entryFee + exitFee;
     let pnl = grossPnl - exitFee - p.fundingPaid;
     if (reason === "LIQ") {
-      // Isolated margin: the loss is capped at the margin posted for the
-      // position (fees and funding already came out of that margin).
       pnl = -p.initialMargin;
       this.liquidations += 1;
     }
     const pnlPct = (pnl / (p.entryPrice * p.size)) * 100;
+
+    const exitSlipCost = Math.abs(exitPrice - triggerPrice) * p.size;
+    const entrySlipCost = Math.abs(p.entryPrice - p.signalPrice) * p.size;
+    if (reason !== "LIQ") this.slipCostUsd += exitSlipCost;
+
     // entryFee and fundingPaid were already deducted from realizedPnl.
     this.realizedPnl +=
       reason === "LIQ" ? -p.initialMargin + p.entryFee + p.fundingPaid : grossPnl - exitFee;
     this.totalFees += exitFee;
+
     const trade: ClosedTrade = {
       id: p.id,
       symbol: p.symbol,
@@ -506,6 +963,15 @@ export class PaperBroker {
       confidence: p.confidence,
       regime: p.regime,
       agents: p.agents,
+      signalPrice: p.signalPrice,
+      entrySlipBps: p.entrySlipBps,
+      exitSlipBps,
+      triggerPrice,
+      spreadAtEntryBps: p.spreadAtEntryBps,
+      spreadAtExitBps,
+      latencyMs: p.latencyMs,
+      slipCostUsd: entrySlipCost + (reason === "LIQ" ? 0 : exitSlipCost),
+      bookPriced: p.bookPriced && exitBookPriced,
     };
     this.closed = [trade, ...this.closed].slice(0, 200);
     this.positions.delete(p.symbol);
@@ -515,15 +981,13 @@ export class PaperBroker {
     const dd = this.realizedPnl / this.cfg.startingBalance;
     if (dd <= -this.cfg.maxDailyDrawdown && !this.halted) {
       this.halted = true;
-      this.events.onHalt?.(
-        `Daily drawdown limit hit (${(dd * 100).toFixed(2)}%). New entries paused.`,
-      );
+      this.events.onHalt?.(`Daily drawdown limit hit (${(dd * 100).toFixed(2)}%). New entries paused.`);
     }
   }
 
   closeAll(marks: Map<string, number>, time: number) {
     for (const p of Array.from(this.positions.values())) {
-      const exit = marks.get(p.symbol) ?? p.entryPrice;
+      const exit = this.markFor(p.symbol, marks) ?? p.entryPrice;
       this.closePosition(p, exit, time, "MANUAL");
     }
   }
@@ -536,5 +1000,23 @@ export class PaperBroker {
     this.totalFees = 0;
     this.totalFunding = 0;
     this.liquidations = 0;
+    this.pending.clear();
+    this.rejects = [];
+    this.submitted = 0;
+    this.fills = 0;
+    this.partialFills = 0;
+    this.rejected = 0;
+    this.rejectsByReason = {};
+    this.entrySlipSum = 0;
+    this.exitSlipSum = 0;
+    this.exitSlipCount = 0;
+    this.worstSlipBps = 0;
+    this.spreadSum = 0;
+    this.spreadCount = 0;
+    this.latencySum = 0;
+    this.fillRatioSum = 0;
+    this.slipCostUsd = 0;
+    this.bookPricedFills = 0;
+    this.modelPricedFills = 0;
   }
 }

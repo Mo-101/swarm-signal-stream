@@ -14,7 +14,16 @@ import {
   type Position,
   type MarginSummary,
   type ClosedTrade,
+  type ExecutionStats,
+  type PendingOrder,
+  type RejectRecord,
 } from "@/lib/paper-broker";
+import {
+  MicrostructureFeed,
+  fetchInstrumentFilters,
+  type MicroMetrics,
+} from "@/lib/microstructure";
+
 import {
   getLiveStatus,
   getLivePositions,
@@ -29,6 +38,8 @@ import {
 } from "@/lib/bybit-trader.functions";
 import { SystemPanel, type DiscoveryHealth } from "@/components/SystemPanel";
 import { EdgePanel } from "@/components/EdgePanel";
+import { ExecutionPanel } from "@/components/ExecutionPanel";
+
 import { supabase } from "@/integrations/supabase/client";
 import { useNavigate } from "@tanstack/react-router";
 import { setAgentWeights } from "@/lib/swarm";
@@ -139,7 +150,34 @@ function formatTime(ms: number): string {
   return new Date(ms).toLocaleTimeString([], { hour12: false });
 }
 
-type Tab = "signals" | "positions" | "history" | "board" | "edge" | "live" | "system";
+type Tab =
+  | "signals"
+  | "positions"
+  | "history"
+  | "board"
+  | "execution"
+  | "edge"
+  | "live"
+  | "system";
+
+const EMPTY_EXEC_STATS: ExecutionStats = {
+  submitted: 0,
+  filled: 0,
+  partialFills: 0,
+  rejected: 0,
+  pending: 0,
+  rejectsByReason: {},
+  avgEntrySlipBps: 0,
+  avgExitSlipBps: 0,
+  worstSlipBps: 0,
+  avgSpreadBps: 0,
+  avgFillLatencyMs: 0,
+  avgFillRatio: 0,
+  slipCostUsd: 0,
+  bookPricedFills: 0,
+  modelPricedFills: 0,
+};
+
 
 function SwarmDashboard() {
   const [symbols, setSymbols] = useState<string[]>([]);
@@ -192,6 +230,13 @@ function SwarmDashboard() {
     atRisk: 0,
   });
   const [liquidations, setLiquidations] = useState(0);
+  const [execStats, setExecStats] = useState<ExecutionStats>(EMPTY_EXEC_STATS);
+  const [pendingOrders, setPendingOrders] = useState<PendingOrder[]>([]);
+  const [rejects, setRejects] = useState<RejectRecord[]>([]);
+  const [microMetrics, setMicroMetrics] = useState<MicroMetrics | null>(null);
+  const microRef = useRef<MicrostructureFeed | null>(null);
+
+
 
   const navigate = useNavigate();
   const loadState = useServerFn(loadEngineState);
@@ -403,8 +448,13 @@ function SwarmDashboard() {
   useEffect(() => {
     if (symbols.length === 0 || !boot) return;
 
+    // Depth / mark-price feed for the hot symbol set — the execution realism layer.
+    const micro = new MicrostructureFeed();
+    microRef.current = micro;
+
     const broker = new PaperBroker(DEFAULT_PAPER_CONFIG, {
       onHalt: (msg) => setHalted(msg),
+      onReject: (r) => setRejects((prev) => [r, ...prev].slice(0, 60)),
       onOpen: (pos) => {
         setPaperOpens((n) => n + 1);
         setLastPaperEventAt(Date.now());
@@ -425,6 +475,13 @@ function SwarmDashboard() {
             hourUtc: new Date(pos.openedAt).getUTCHours(),
             agents: pos.agents,
             openedAt: pos.openedAt,
+            signalPrice: pos.signalPrice,
+            entrySlipBps: pos.entrySlipBps,
+            spreadEntryBps: pos.spreadAtEntryBps,
+            latencyMs: pos.latencyMs,
+            leverage: pos.leverage,
+            liqPrice: pos.liquidationPrice,
+            bookPriced: pos.bookPriced,
           },
         }).catch((e) =>
           setPersistError(e instanceof Error ? e.message : "Trade save failed"),
@@ -442,6 +499,13 @@ function SwarmDashboard() {
             closedAt: trade.closedAt,
             realizedPnl: broker.getRealizedPnl(),
             halted: broker.isHalted(),
+            triggerPrice: trade.triggerPrice,
+            exitSlipBps: trade.exitSlipBps,
+            spreadExitBps: trade.spreadAtExitBps,
+            slipCostUsd: trade.slipCostUsd,
+            grossPnl: trade.grossPnl,
+            fees: trade.fees,
+            funding: trade.funding,
           },
         })
           .then((res) => setEdgeReport(res.report ?? EMPTY_EDGE_REPORT))
@@ -450,6 +514,12 @@ function SwarmDashboard() {
           );
       },
     });
+    broker.setMarket({
+      book: (s) => micro.getBook(s),
+      mark: (s) => micro.getMark(s),
+      filter: (s) => micro.filter(s),
+    });
+
     broker.setMinConfidence(learnedRef.current.minConfidence);
     broker.hydrate({
       positions: boot.open.map((t) => ({
@@ -489,6 +559,12 @@ function SwarmDashboard() {
     });
     brokerRef.current = broker;
 
+    // Exchange instrument filters (tick / lot / min-notional) then depth feed.
+    void fetchInstrumentFilters()
+      .then((f) => micro.setFilters(f))
+      .catch(() => setPersistError("Instrument filters unavailable — fills will be rejected"));
+    micro.start();
+
     const engine = new SwarmEngine(symbols, {
       onTick: (t) => {
         tickCounter.current += 1;
@@ -498,10 +574,13 @@ function SwarmDashboard() {
       onProposal: (p) => {
         setProposals((prev) => [p, ...prev].slice(0, 80));
         const regime = regimeRef.current.get(p.symbol) ?? "unknown";
-        const suppressed = learnedRef.current.suppressedSymbols.includes(p.symbol);
-        const before = broker.getPositions().length;
+        const edge = learnedRef.current;
+        const suppressed =
+          edge.suppressedSymbols.includes(p.symbol) ||
+          edge.costSuppressedSymbols.includes(p.symbol);
+        const before = broker.getPositions().length + broker.getPending().length;
         if (!suppressed) broker.onProposal(p, { regime });
-        const executed = broker.getPositions().length > before;
+        const executed = broker.getPositions().length + broker.getPending().length > before;
         signalBufferRef.current.push({
           symbol: p.symbol,
           side: p.direction,
@@ -545,6 +624,23 @@ function SwarmDashboard() {
     void loadFunding();
     const fundingIv = setInterval(loadFunding, 5 * 60 * 1000);
 
+    // Matching engine tick: fill in-flight orders as soon as their latency
+    // elapses, using whatever the book looks like at that moment.
+    const matchIv = setInterval(() => broker.processPending(Date.now()), 100);
+
+    // Keep full depth on what matters: open positions, orders in flight, then
+    // the hottest movers (the symbols most likely to produce the next signal).
+    const trackIv = setInterval(() => {
+      const hot = new Set<string>();
+      for (const p of broker.getPositions()) hot.add(p.symbol);
+      for (const o of broker.getPending()) hot.add(o.symbol);
+      const movers = [...engine.getState()]
+        .sort((a, b) => Math.abs(b.change1m) - Math.abs(a.change1m))
+        .slice(0, 50);
+      for (const m of movers) hot.add(m.symbol);
+      micro.track([...hot]);
+    }, 2000);
+
     let lastTickCount = 0;
     let lastSample = Date.now();
     const iv = setInterval(() => {
@@ -572,16 +668,24 @@ function SwarmDashboard() {
       setRealized(broker.getRealizedPnl());
       setUnrealized(broker.getUnrealizedPnl(marksRef.current));
       setMetrics(engine.getMetrics());
+      setExecStats(broker.getExecutionStats());
+      setPendingOrders(broker.getPending());
+      setMicroMetrics(micro.getMetrics());
     }, 500);
 
     return () => {
       clearInterval(iv);
       clearInterval(fundingIv);
+      clearInterval(matchIv);
+      clearInterval(trackIv);
       engine.stop();
+      micro.stop();
+      microRef.current = null;
       engineRef.current = null;
       brokerRef.current = null;
     };
   }, [symbols, boot, saveOpen, saveClose]);
+
 
   const equity = DEFAULT_PAPER_CONFIG.startingBalance + realized + unrealized;
   const equityPct = ((equity - DEFAULT_PAPER_CONFIG.startingBalance) /
@@ -760,7 +864,19 @@ function SwarmDashboard() {
       <div className="mx-auto max-w-[1600px] px-6 py-6">
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
           <div className="flex gap-1 rounded-lg border border-border bg-card p-1">
-            {(["signals", "positions", "history", "board", "edge", "live", "system"] as Tab[]).map((t) => (
+            {(
+              [
+                "signals",
+                "positions",
+                "history",
+                "board",
+                "execution",
+                "edge",
+                "live",
+                "system",
+              ] as Tab[]
+            ).map((t) => (
+
               <button
                 key={t}
                 onClick={() => setTab(t)}
@@ -815,6 +931,16 @@ function SwarmDashboard() {
           {tab === "board" && (
             <BoardPanel rows={filteredBoard} query={query} setQuery={setQuery} />
           )}
+          {tab === "execution" && (
+            <ExecutionPanel
+              stats={execStats}
+              micro={microMetrics}
+              pending={pendingOrders}
+              rejects={rejects}
+              closed={closed}
+            />
+          )}
+
           {tab === "edge" && (
             <div className="p-3">
               <EdgePanel
