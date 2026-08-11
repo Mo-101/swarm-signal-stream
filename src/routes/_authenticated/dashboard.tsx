@@ -121,6 +121,18 @@ const LIVE_LEVERAGE = 5;
 const LIVE_COOLDOWN_MS = 60_000;
 /** Consecutive live-order failures before live mode disarms itself. */
 const LIVE_FAILURE_LIMIT = 3;
+/** Closed paper trades required before live arming unlocks for review. */
+const REVIEW_TRADE_TARGET = 100;
+
+function formatDuration(ms: number): string {
+  if (ms <= 0) return "0m";
+  const mins = Math.floor(ms / 60000);
+  const h = Math.floor(mins / 60);
+  const d = Math.floor(h / 24);
+  if (d > 0) return `${d}d ${h % 24}h`;
+  if (h > 0) return `${h}h ${mins % 60}m`;
+  return `${mins}m`;
+}
 
 
 export const Route = createFileRoute("/_authenticated/dashboard")({
@@ -622,12 +634,21 @@ function SwarmDashboard() {
       .catch(() => setPersistError("Instrument filters unavailable — fills will be rejected"));
     micro.start();
 
+    let lastPendingSweep = 0;
     const engine = new SwarmEngine(symbols, {
       onTick: (t) => {
         tickCounter.current += 1;
         marksRef.current.set(t.symbol, t.price);
         broker.markPrice(t.symbol, t.price, t.time);
+        // Tick-driven matching: a backgrounded tab throttles setInterval to
+        // ~1Hz, but socket frames keep arriving, so drive fills from them too.
+        const now = Date.now();
+        if (now - lastPendingSweep > 50) {
+          lastPendingSweep = now;
+          broker.processPending(now);
+        }
       },
+
       onProposal: (p) => {
         setProposals((prev) => [p, ...prev].slice(0, 80));
         const regime = regimeRef.current.get(p.symbol) ?? "unknown";
@@ -793,8 +814,48 @@ function SwarmDashboard() {
     [closeLive, fetchLivePositions, pushLog],
   );
 
-  // Venue is armable only when a live account probe has actually succeeded.
-  const liveArmed = !!liveStatus?.configured && !liveStatus?.error;
+  // Hold a screen wake lock so an unattended run isn't killed by display sleep.
+  useEffect(() => {
+    type WakeLock = { release: () => Promise<void> };
+    const nav = navigator as Navigator & {
+      wakeLock?: { request: (t: "screen") => Promise<WakeLock> };
+    };
+    if (!nav.wakeLock) return;
+    let lock: WakeLock | null = null;
+    let cancelled = false;
+    const acquire = async () => {
+      if (document.visibilityState !== "visible") return;
+      try {
+        const next = await nav.wakeLock!.request("screen");
+        if (cancelled) void next.release();
+        else lock = next;
+      } catch {
+        // Denied (unsupported browser / no user gesture) — run without it.
+      }
+    };
+    void acquire();
+    const onVis = () => {
+      if (document.visibilityState === "visible") void acquire();
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      cancelled = true;
+      document.removeEventListener("visibilitychange", onVis);
+      void lock?.release().catch(() => {});
+    };
+  }, []);
+
+  // Venue is armable only when a live account probe has actually succeeded AND
+
+  // the paper run has produced the agreed review sample of closed trades.
+  const sampleReady = closed.length >= REVIEW_TRADE_TARGET;
+  const liveArmed = !!liveStatus?.configured && !liveStatus?.error && sampleReady;
+  const runProgress = Math.min(1, closed.length / REVIEW_TRADE_TARGET);
+  const uptimeMs = metrics?.startedAt ? Date.now() - metrics.startedAt : 0;
+  const lastTickAgo = metrics?.lastMessageAt
+    ? Math.round((Date.now() - metrics.lastMessageAt) / 1000)
+    : null;
+
 
   return (
 
@@ -812,9 +873,36 @@ function SwarmDashboard() {
                   ? `LIVE TESTNET · orders placed at conf ≥ ${LIVE_CONFIDENCE_THRESHOLD} · $${LIVE_NOTIONAL_USD} @ ${LIVE_LEVERAGE}× · SL ${(LIVE_SL_PCT * 100).toFixed(1)}% / TP ${(LIVE_TP_PCT * 100).toFixed(1)}%`
                   : `Paper execution · SL ${(DEFAULT_PAPER_CONFIG.slPct * 100).toFixed(1)}% / TP ${(DEFAULT_PAPER_CONFIG.tpPct * 100).toFixed(1)}%`}
               </p>
+              <p className="mt-0.5 font-mono text-[10px] text-muted-foreground">
+                up {formatDuration(uptimeMs)} · last tick{" "}
+                <span className={lastTickAgo !== null && lastTickAgo > 30 ? "text-bear" : "text-bull"}>
+                  {lastTickAgo === null ? "—" : `${lastTickAgo}s ago`}
+                </span>
+                {metrics && metrics.watchdogRestarts > 0
+                  ? ` · ${metrics.watchdogRestarts} feed recoveries`
+                  : ""}
+                {metrics && metrics.stalledFeeds > 0
+                  ? ` · ${metrics.stalledFeeds} stalled`
+                  : ""}
+              </p>
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            <div className="min-w-[150px]">
+              <div className="flex items-baseline justify-between font-mono text-[10px] text-muted-foreground">
+                <span>REVIEW SAMPLE</span>
+                <span className={sampleReady ? "text-bull" : "text-foreground"}>
+                  {closed.length}/{REVIEW_TRADE_TARGET}
+                </span>
+              </div>
+              <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-border">
+                <div
+                  className={`h-full rounded-full transition-all ${sampleReady ? "bg-bull" : "bg-accent"}`}
+                  style={{ width: `${runProgress * 100}%` }}
+                />
+              </div>
+            </div>
+
             <div className="flex overflow-hidden rounded-md border border-border text-[11px] font-semibold">
               {(["bybit", "binance"] as LiveProvider[]).map((p) => (
                 <button
@@ -860,15 +948,20 @@ function SwarmDashboard() {
                   ? "Disarm live trading"
                   : liveArmed
                     ? `Arm ${liveProvider} ${liveStatus?.env ?? "testnet"} live trading`
-                    : `${liveProvider} is not reachable — see the Live tab`
+                    : !sampleReady
+                      ? `Locked until ${REVIEW_TRADE_TARGET} closed paper trades (${closed.length} so far)`
+                      : `${liveProvider} is not reachable — see the Live tab`
               }
             >
               {liveMode
                 ? `● LIVE ${(liveStatus?.env ?? "testnet").toUpperCase()}`
                 : liveArmed
                   ? "○ Paper mode · ready"
-                  : "○ Paper mode · live blocked"}
+                  : !sampleReady
+                    ? `○ Paper mode · ${REVIEW_TRADE_TARGET - closed.length} trades to review`
+                    : "○ Paper mode · live blocked"}
             </button>
+
 
             <Stat
               label="Equity"

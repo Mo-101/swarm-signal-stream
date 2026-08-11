@@ -285,13 +285,23 @@ export interface SwarmMetrics {
   lastEvalMs: number;
   maxEvalMs: number;
   trackedSymbols: number;
+  /** Wall-clock start of this run, for uptime display. */
+  startedAt: number | null;
+  /** Feeds the watchdog recycled because they went silent while "open". */
+  watchdogRestarts: number;
+  /** Feeds currently open but silent past the stall threshold. */
+  stalledFeeds: number;
 }
 
 const STREAMS_PER_CONN = 150;
 const SUB_BATCH = 10; // Bybit accepts up to 10 topics per subscribe frame
 const EVAL_INTERVAL_MS = 1500;
 const PING_INTERVAL_MS = 20_000;
+/** An "open" socket with no frame for this long is treated as dead. */
+const STALL_MS = 60_000;
+const WATCHDOG_INTERVAL_MS = 15_000;
 const WS_URL = "wss://stream.bybit.com/v5/public/linear";
+
 
 export class SwarmEngine {
   private sockets: WebSocket[] = [];
@@ -310,6 +320,13 @@ export class SwarmEngine {
   private evalMsTotal = 0;
   private lastEvalMs = 0;
   private maxEvalMs = 0;
+  /** Symbol chunks kept so the watchdog can rebuild an individual feed. */
+  private chunks: string[][] = [];
+  private chunkSockets = new Map<number, WebSocket>();
+  private watchdogTimer: ReturnType<typeof setInterval> | null = null;
+  private startedAt: number | null = null;
+  private watchdogRestarts = 0;
+  private onWake = () => this.sweep();
 
   constructor(
     private symbols: string[],
@@ -323,11 +340,15 @@ export class SwarmEngine {
     let totalMessages = 0;
     let totalTrades = 0;
     let lastMessageAt: number | null = null;
+    let stalledFeeds = 0;
+    const now = Date.now();
     for (const f of feeds) {
       totalMessages += f.messages;
       totalTrades += f.trades;
       if (f.lastMessageAt && (!lastMessageAt || f.lastMessageAt > lastMessageAt))
         lastMessageAt = f.lastMessageAt;
+      if (f.state === "open" && now - (f.lastMessageAt ?? f.openedAt ?? now) > STALL_MS)
+        stalledFeeds++;
     }
     return {
       exchange: "Bybit",
@@ -344,8 +365,12 @@ export class SwarmEngine {
       lastEvalMs: this.lastEvalMs,
       maxEvalMs: this.maxEvalMs,
       trackedSymbols: this.state.size,
+      startedAt: this.startedAt,
+      watchdogRestarts: this.watchdogRestarts,
+      stalledFeeds,
     };
   }
+
 
 
   getState(): SymbolState[] {
@@ -354,18 +379,73 @@ export class SwarmEngine {
 
   start() {
     this.stopped = false;
+    this.startedAt = Date.now();
     const chunks: string[][] = [];
     for (let i = 0; i < this.symbols.length; i += STREAMS_PER_CONN) {
       chunks.push(this.symbols.slice(i, i + STREAMS_PER_CONN));
     }
+    this.chunks = chunks;
     this.totalChunks = chunks.length;
     for (let chunkId = 0; chunkId < chunks.length; chunkId++) {
       this.openSocket(chunks[chunkId], chunkId);
+    }
+    // A backgrounded tab throttles timers and a suspended laptop kills sockets
+    // without firing onclose promptly, so sweep on every wake signal too.
+    this.watchdogTimer = setInterval(() => this.sweep(), WATCHDOG_INTERVAL_MS);
+    if (typeof document !== "undefined")
+      document.addEventListener("visibilitychange", this.onWake);
+    if (typeof window !== "undefined") {
+      window.addEventListener("online", this.onWake);
+      window.addEventListener("focus", this.onWake);
+    }
+  }
+
+  /**
+   * Rebuild any feed that is missing, closed, or "open" but silent past the
+   * stall threshold. Cheap and idempotent — safe to call on any wake event.
+   */
+  private sweep() {
+    if (this.stopped) return;
+    const now = Date.now();
+    for (let chunkId = 0; chunkId < this.chunks.length; chunkId++) {
+      const st = this.feedStats.get(chunkId);
+      const ws = this.chunkSockets.get(chunkId);
+      const socketDead =
+        !ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING;
+      const silent =
+        st?.state === "open" &&
+        now - (st.lastMessageAt ?? st.openedAt ?? now) > STALL_MS;
+      if (!socketDead && !silent) continue;
+      // A pending reconnect timer already owns this chunk.
+      if (this.reconnectTimers.has(chunkId)) continue;
+      if (silent && ws) {
+        this.watchdogRestarts++;
+        try {
+          ws.close();
+        } catch {
+          /* onclose schedules the reconnect */
+        }
+        continue;
+      }
+      if (socketDead && st?.state !== "connecting") {
+        this.watchdogRestarts++;
+        this.openSocket(this.chunks[chunkId], chunkId);
+      }
     }
   }
 
   stop() {
     this.stopped = true;
+    if (this.watchdogTimer !== null) {
+      clearInterval(this.watchdogTimer);
+      this.watchdogTimer = null;
+    }
+    if (typeof document !== "undefined")
+      document.removeEventListener("visibilitychange", this.onWake);
+    if (typeof window !== "undefined") {
+      window.removeEventListener("online", this.onWake);
+      window.removeEventListener("focus", this.onWake);
+    }
     for (const timer of this.reconnectTimers.values()) clearTimeout(timer);
     this.reconnectTimers.clear();
     for (const t of this.pingTimers.values()) clearInterval(t);
@@ -378,9 +458,11 @@ export class SwarmEngine {
       }
     }
     this.sockets = [];
+    this.chunkSockets.clear();
     this.connected = 0;
     this.events.onStatus?.({ connected: 0, total: 0 });
   }
+
 
   private emitStatus() {
     this.events.onStatus?.({
@@ -402,6 +484,8 @@ export class SwarmEngine {
       reconnects: existing ? existing.reconnects + 1 : 0,
     });
     const ws = new WebSocket(WS_URL);
+    this.chunkSockets.set(chunkId, ws);
+
 
     ws.onopen = () => {
       if (this.stopped) {
@@ -444,7 +528,9 @@ export class SwarmEngine {
       }
       const st = this.feedStats.get(chunkId);
       if (st) st.state = "closed";
+      if (this.chunkSockets.get(chunkId) === ws) this.chunkSockets.delete(chunkId);
       if (this.stopped) return;
+
 
       this.connected = Math.max(0, this.connected - 1);
       this.sockets = this.sockets.filter((s) => s !== ws);
