@@ -1,4 +1,13 @@
-import { winRate, type EdgeReport, type EdgeRow, type LearnedEdge } from "@/lib/edge-model";
+import {
+  winRate,
+  rollingEdge,
+  edgeDrift,
+  type EdgeReport,
+  type EdgeRow,
+  type LearnedEdge,
+  type RollingTrade,
+  type TrustLevel,
+} from "@/lib/edge-model";
 
 function pct(v: number) {
   return `${(v * 100).toFixed(1)}%`;
@@ -7,6 +16,24 @@ function usd(v: number) {
   const sign = v < 0 ? "-" : "";
   return `${sign}$${Math.abs(v).toFixed(2)}`;
 }
+
+const TRUST_CLASS: Record<TrustLevel, string> = {
+  none: "border-border text-muted-foreground",
+  low: "border-accent/50 text-accent",
+  medium: "border-emerald-500/40 text-emerald-400",
+  high: "border-emerald-500/70 text-emerald-400",
+};
+
+function TrustBadge({ level, sample }: { level: TrustLevel; sample: number }) {
+  return (
+    <span
+      className={`rounded border px-1.5 py-0.5 font-mono text-[10px] uppercase ${TRUST_CLASS[level]}`}
+    >
+      {level} · n={sample}
+    </span>
+  );
+}
+
 
 function EdgeTable({
   title,
