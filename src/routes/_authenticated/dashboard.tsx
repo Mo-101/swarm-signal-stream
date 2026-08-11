@@ -831,9 +831,36 @@ function SwarmDashboard() {
                   ? `LIVE TESTNET · orders placed at conf ≥ ${LIVE_CONFIDENCE_THRESHOLD} · $${LIVE_NOTIONAL_USD} @ ${LIVE_LEVERAGE}× · SL ${(LIVE_SL_PCT * 100).toFixed(1)}% / TP ${(LIVE_TP_PCT * 100).toFixed(1)}%`
                   : `Paper execution · SL ${(DEFAULT_PAPER_CONFIG.slPct * 100).toFixed(1)}% / TP ${(DEFAULT_PAPER_CONFIG.tpPct * 100).toFixed(1)}%`}
               </p>
+              <p className="mt-0.5 font-mono text-[10px] text-muted-foreground">
+                up {formatDuration(uptimeMs)} · last tick{" "}
+                <span className={lastTickAgo !== null && lastTickAgo > 30 ? "text-bear" : "text-bull"}>
+                  {lastTickAgo === null ? "—" : `${lastTickAgo}s ago`}
+                </span>
+                {metrics && metrics.watchdogRestarts > 0
+                  ? ` · ${metrics.watchdogRestarts} feed recoveries`
+                  : ""}
+                {metrics && metrics.stalledFeeds > 0
+                  ? ` · ${metrics.stalledFeeds} stalled`
+                  : ""}
+              </p>
             </div>
           </div>
           <div className="flex flex-wrap items-center gap-2">
+            <div className="min-w-[150px]">
+              <div className="flex items-baseline justify-between font-mono text-[10px] text-muted-foreground">
+                <span>REVIEW SAMPLE</span>
+                <span className={sampleReady ? "text-bull" : "text-foreground"}>
+                  {closed.length}/{REVIEW_TRADE_TARGET}
+                </span>
+              </div>
+              <div className="mt-1 h-1.5 overflow-hidden rounded-full bg-border">
+                <div
+                  className={`h-full rounded-full transition-all ${sampleReady ? "bg-bull" : "bg-accent"}`}
+                  style={{ width: `${runProgress * 100}%` }}
+                />
+              </div>
+            </div>
+
             <div className="flex overflow-hidden rounded-md border border-border text-[11px] font-semibold">
               {(["bybit", "binance"] as LiveProvider[]).map((p) => (
                 <button
