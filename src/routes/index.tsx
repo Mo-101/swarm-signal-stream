@@ -270,6 +270,11 @@ function SwarmDashboard() {
 
     const broker = new PaperBroker(DEFAULT_PAPER_CONFIG, {
       onHalt: (msg) => setHalted(msg),
+      onOpen: () => {
+        setPaperOpens((n) => n + 1);
+        setLastPaperEventAt(Date.now());
+      },
+      onClose: () => setLastPaperEventAt(Date.now()),
     });
     brokerRef.current = broker;
 
