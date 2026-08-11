@@ -291,13 +291,27 @@ function SwarmDashboard() {
     engineRef.current = engine;
     engine.start();
 
+    let lastTickCount = 0;
+    let lastSample = Date.now();
     const iv = setInterval(() => {
+      const now = Date.now();
+      const dt = (now - lastSample) / 1000;
+      const delta = tickCounter.current - lastTickCount;
+      if (dt > 0) {
+        const rate = delta / dt;
+        setTickRate(rate);
+        setPeakTickRate((p) => (rate > p ? rate : p));
+      }
+      lastTickCount = tickCounter.current;
+      lastSample = now;
+
       setTicks(tickCounter.current);
       setBoard(engine.getState());
       setPositions(broker.getPositions());
       setClosed(broker.getClosed());
       setRealized(broker.getRealizedPnl());
       setUnrealized(broker.getUnrealizedPnl(marksRef.current));
+      setMetrics(engine.getMetrics());
     }, 500);
 
     return () => {
