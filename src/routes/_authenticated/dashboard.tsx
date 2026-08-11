@@ -271,6 +271,10 @@ function SwarmDashboard() {
   const liveProviderRef = useRef(liveProvider);
   const liveCooldownRef = useRef<Map<string, number>>(new Map());
   const liveInFlightRef = useRef<Set<string>>(new Set());
+  /** Proven-armed: credentials present AND an account probe succeeded. */
+  const liveReadyRef = useRef(false);
+  const liveFailStreakRef = useRef(0);
+
 
   const placeBinance = useServerFn(placeLiveTrade);
   const fetchBinanceStatus = useServerFn(getLiveStatus);
