@@ -128,7 +128,16 @@ export interface LearnedEdge {
   /** Extra edge (bps) a signal must clear beyond measured execution cost. */
   requiredEdgeBps: number;
   sample: number;
+  /** Closed trades observed per agent, and whether that is enough to act on. */
+  agentSamples: Record<string, number>;
+  agentTrust: Record<string, TrustLevel>;
+  /** Agents whose weight is currently locked to the base value (low sample). */
+  pendingAgents: string[];
+  /** Overall trust in the learned parameters, from total closed trades. */
+  trust: TrustLevel;
+  minBucketSample: number;
 }
+
 
 export const BASE_AGENT_WEIGHTS: Record<string, number> = {
   Trend: 1.0,
