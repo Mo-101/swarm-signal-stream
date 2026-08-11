@@ -1,4 +1,4 @@
-# Let paper run to 100 trades, then prep a $5 live account
+# Keep paper running to 100 trades
 
 ## The one thing to know first
 
@@ -32,20 +32,15 @@ A one-screen summary you can judge in a minute, on the Edge tab:
 - Per-symbol net edge, highlighting cost-suppressed symbols.
 - The verdict line: whether the net edge clears the round-trip cost hurdle with enough samples to be trusted.
 
-### 4. Prep for a $5 live account (built now, armed later)
-A $5 account cannot use the current fixed $100 notional, and Bybit rejects orders under about 5 USDT notional.
+## Live connection
 
-- Replace the fixed live notional with equity-derived sizing: risk a fixed fraction of the real wallet balance per trade, floor it at the venue minimum, and refuse the trade if the minimum notional would exceed the risk budget rather than silently oversizing.
-- Fetch the real per-symbol lot size, tick size and minimum notional from Bybit before sizing, and skip symbols whose minimum order is too large for a $5 account.
-- Add a hard daily loss cap: after a set loss in a day, live mode disarms until you re-arm manually.
-- Pre-flight panel on the Live tab showing, for the top current signals, the exact quantity, notional, margin and whether the symbol is tradable at your balance.
+Left alone. Live mode stays disarmed and untouched — no sizing work, no venue changes. The only live-related change is the 100-trade lock in section 2, which keeps it from being armed by accident during the run.
 
 ## Technical notes
 
 - Reconnect/watchdog logic goes in `src/lib/swarm.ts` alongside the existing `SwarmMetrics`; the dashboard already renders the connection state in the System tab.
 - The 100-trade gate reads the closed-trade count that already flows into the Edge model, and combines with the existing `liveArmed` probe flag in `src/routes/_authenticated/dashboard.tsx`.
 - The review pack extends `src/components/EdgePanel.tsx` and reuses the rolling-window and trust-level values already computed in `src/lib/edge-model.ts`.
-- Sizing changes touch `src/lib/bybit-trader.functions.ts` (instrument filters, quantity rounding) and the live constants block in the dashboard.
 - No change to the paper engine's mechanics — fees, funding, margin and liquidation stay as they are so the 100 trades are measured consistently.
 
 ## Order of work
@@ -54,4 +49,3 @@ A $5 account cannot use the current fixed $100 notional, and Bybit rejects order
 2. Run-to-100 progress and the live lock.
 3. Publish so the run can live on a spare device.
 4. Review pack on the Edge tab.
-5. $5 sizing, instrument filters and daily loss cap — built and visible, but unusable until the 100-trade gate clears and you arm it.
