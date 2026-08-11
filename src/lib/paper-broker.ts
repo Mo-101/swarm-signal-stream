@@ -21,6 +21,18 @@ export interface Position {
   fundingPaid: number;
   /** Last 8h funding boundary already settled for this position. */
   lastFundingAt: number;
+  /** Leverage applied to this position (isolated margin). */
+  leverage: number;
+  /** Initial margin locked for this position: notional / leverage. */
+  initialMargin: number;
+  /** Maintenance margin rate from the Bybit risk-limit tier for this notional. */
+  maintenanceMarginRate: number;
+  /** Maintenance margin requirement at entry notional. */
+  maintenanceMargin: number;
+  /** Price at which isolated margin is exhausted and the position is liquidated. */
+  liquidationPrice: number;
+  /** Bankruptcy price — where equity of the position hits zero. */
+  bankruptcyPrice: number;
 }
 
 export interface ClosedTrade {
@@ -32,13 +44,17 @@ export interface ClosedTrade {
   size: number;
   pnl: number;
   pnlPct: number;
-  reason: "TP" | "SL" | "MANUAL";
+  reason: "TP" | "SL" | "MANUAL" | "LIQ";
   /** Gross price PnL before costs. */
   grossPnl: number;
   /** Entry + exit taker fees. */
   fees: number;
   /** Net funding paid over the holding period. */
   funding: number;
+  /** Initial margin that was locked for the position. */
+  initialMargin: number;
+  leverage: number;
+  liquidationPrice: number;
   openedAt: number;
   closedAt: number;
   confidence: number;
@@ -58,6 +74,10 @@ export interface PaperConfig {
   takerFeeRate: number;
   /** Assumed funding rate per 8h interval when the live rate is unknown. */
   defaultFundingRate: number;
+  /** Isolated-margin leverage used for every paper position. */
+  leverage: number;
+  /** Maximum fraction of equity that may be locked as initial margin. */
+  maxMarginUsage: number;
 }
 
 /** Bybit settles funding at 00:00, 08:00 and 16:00 UTC. */
@@ -79,12 +99,74 @@ export const DEFAULT_PAPER_CONFIG: PaperConfig = {
   takerFeeRate: 0.00055,
   // Interest rate component: 0.03%/day = 0.01% per 8h interval.
   defaultFundingRate: 0.0001,
+  leverage: 10,
+  maxMarginUsage: 0.8,
 };
+
+/**
+ * Simplified Bybit USDT-perp risk-limit ladder: maintenance margin rate steps
+ * up with position notional, which also caps effective leverage.
+ */
+export const RISK_LIMIT_TIERS: Array<{ maxNotional: number; mmr: number; maxLeverage: number }> = [
+  { maxNotional: 50_000, mmr: 0.005, maxLeverage: 100 },
+  { maxNotional: 250_000, mmr: 0.01, maxLeverage: 50 },
+  { maxNotional: 1_000_000, mmr: 0.025, maxLeverage: 20 },
+  { maxNotional: 5_000_000, mmr: 0.05, maxLeverage: 10 },
+  { maxNotional: Number.POSITIVE_INFINITY, mmr: 0.1, maxLeverage: 5 },
+];
+
+export function riskLimitTier(notional: number) {
+  return RISK_LIMIT_TIERS.find((t) => notional <= t.maxNotional) ?? RISK_LIMIT_TIERS[RISK_LIMIT_TIERS.length - 1];
+}
+
+/**
+ * Isolated-margin liquidation price (Bybit USDT perp, one-way mode).
+ * Long:  entry * (1 - IMR + MMR + taker)
+ * Short: entry * (1 + IMR - MMR - taker)
+ * where IMR = 1 / leverage. The taker term reserves the closing fee.
+ */
+export function liquidationPriceFor(
+  entryPrice: number,
+  side: "BUY" | "SELL",
+  leverage: number,
+  mmr: number,
+  takerFeeRate: number,
+): number {
+  const imr = 1 / leverage;
+  const buffer = imr - mmr - takerFeeRate;
+  const price = side === "BUY" ? entryPrice * (1 - buffer) : entryPrice * (1 + buffer);
+  return Math.max(price, 0);
+}
+
+export function bankruptcyPriceFor(
+  entryPrice: number,
+  side: "BUY" | "SELL",
+  leverage: number,
+): number {
+  const imr = 1 / leverage;
+  return Math.max(side === "BUY" ? entryPrice * (1 - imr) : entryPrice * (1 + imr), 0);
+}
+
+export interface MarginSummary {
+  /** Sum of initial margin locked across open positions. */
+  usedMargin: number;
+  /** Sum of maintenance margin requirements at current marks. */
+  maintenanceMargin: number;
+  /** Wallet balance available for new positions. */
+  availableMargin: number;
+  /** Account equity including unrealized PnL. */
+  equity: number;
+  /** maintenanceMargin / equity — liquidation risk approaches 1. */
+  marginRatio: number;
+  /** Number of positions currently within 2% of their liquidation price. */
+  atRisk: number;
+}
 
 export interface PaperEvents {
   onOpen?: (p: Position) => void;
   onClose?: (t: ClosedTrade) => void;
   onHalt?: (reason: string) => void;
+  onLiquidate?: (t: ClosedTrade) => void;
 }
 
 export class PaperBroker {
@@ -96,6 +178,7 @@ export class PaperBroker {
   private fundingRates = new Map<string, number>();
   private totalFees = 0;
   private totalFunding = 0;
+  private liquidations = 0;
 
   constructor(
     private cfg: PaperConfig = DEFAULT_PAPER_CONFIG,
@@ -113,6 +196,35 @@ export class PaperBroker {
   }
   getCosts() {
     return { fees: this.totalFees, funding: this.totalFunding };
+  }
+  getLiquidations() {
+    return this.liquidations;
+  }
+  getLeverage() {
+    return this.cfg.leverage;
+  }
+  /** Margin usage / liquidation-risk snapshot for the whole account. */
+  getMarginSummary(marks: Map<string, number>): MarginSummary {
+    let usedMargin = 0;
+    let maintenanceMargin = 0;
+    let atRisk = 0;
+    for (const p of this.positions.values()) {
+      const mark = marks.get(p.symbol) ?? p.entryPrice;
+      usedMargin += p.initialMargin;
+      maintenanceMargin += mark * p.size * p.maintenanceMarginRate;
+      const distance = Math.abs(mark - p.liquidationPrice) / (mark || 1);
+      if (distance <= 0.02) atRisk += 1;
+    }
+    const equity = this.getEquity(marks);
+    const walletBalance = this.cfg.startingBalance + this.realizedPnl;
+    return {
+      usedMargin,
+      maintenanceMargin,
+      availableMargin: Math.max(walletBalance - usedMargin, 0),
+      equity,
+      marginRatio: equity > 0 ? maintenanceMargin / equity : 1,
+      atRisk,
+    };
   }
   /** Feed in Bybit's live funding rate (per interval) for accurate carry. */
   setFundingRate(symbol: string, rate: number) {
@@ -162,23 +274,48 @@ export class PaperBroker {
   /** Restore a persisted account so the engine survives reloads. */
   hydrate(state: {
     positions: Array<
-      Omit<Position, "entryFee" | "fundingPaid" | "lastFundingAt"> &
-        Partial<Pick<Position, "entryFee" | "fundingPaid" | "lastFundingAt">>
+      Omit<
+        Position,
+        | "entryFee"
+        | "fundingPaid"
+        | "lastFundingAt"
+        | "leverage"
+        | "initialMargin"
+        | "maintenanceMarginRate"
+        | "maintenanceMargin"
+        | "liquidationPrice"
+        | "bankruptcyPrice"
+      > &
+        Partial<Position>
     >;
     closed: Array<
-      Omit<ClosedTrade, "grossPnl" | "fees" | "funding"> &
-        Partial<Pick<ClosedTrade, "grossPnl" | "fees" | "funding">>
+      Omit<
+        ClosedTrade,
+        "grossPnl" | "fees" | "funding" | "initialMargin" | "leverage" | "liquidationPrice"
+      > &
+        Partial<ClosedTrade>
     >;
     realizedPnl: number;
     halted: boolean;
   }) {
     this.positions.clear();
     for (const p of state.positions) {
+      const leverage = p.leverage ?? this.cfg.leverage;
+      const tier = riskLimitTier(p.notional);
+      const mmr = p.maintenanceMarginRate ?? tier.mmr;
       this.positions.set(p.symbol, {
         ...p,
         entryFee: p.entryFee ?? p.notional * this.cfg.takerFeeRate,
         fundingPaid: p.fundingPaid ?? 0,
         lastFundingAt: p.lastFundingAt ?? lastFundingBoundary(p.openedAt),
+        leverage,
+        initialMargin: p.initialMargin ?? p.notional / leverage,
+        maintenanceMarginRate: mmr,
+        maintenanceMargin: p.maintenanceMargin ?? p.notional * mmr,
+        liquidationPrice:
+          p.liquidationPrice ??
+          liquidationPriceFor(p.entryPrice, p.side, leverage, mmr, this.cfg.takerFeeRate),
+        bankruptcyPrice: p.bankruptcyPrice ?? bankruptcyPriceFor(p.entryPrice, p.side, leverage),
       });
     }
     this.closed = state.closed.map((t) => ({
@@ -186,6 +323,17 @@ export class PaperBroker {
       grossPnl: t.grossPnl ?? t.pnl,
       fees: t.fees ?? 0,
       funding: t.funding ?? 0,
+      initialMargin: t.initialMargin ?? (t.entryPrice * t.size) / this.cfg.leverage,
+      leverage: t.leverage ?? this.cfg.leverage,
+      liquidationPrice:
+        t.liquidationPrice ??
+        liquidationPriceFor(
+          t.entryPrice,
+          t.side,
+          t.leverage ?? this.cfg.leverage,
+          riskLimitTier(t.entryPrice * t.size).mmr,
+          this.cfg.takerFeeRate,
+        ),
     }));
     this.realizedPnl = state.realizedPnl;
     this.halted = state.halted;
@@ -209,10 +357,29 @@ export class PaperBroker {
     const riskAmount = equity * this.cfg.riskPerTrade * proposal.confidence;
     const stopDistance = proposal.price * this.cfg.slPct;
     if (stopDistance <= 0) return;
-    // Cap notional per position so total exposure stays within the account.
-    const maxNotional = equity / this.cfg.maxPositions;
+
+    // Free margin: wallet balance minus initial margin already locked, capped
+    // by the account-level margin usage limit.
+    let usedMargin = 0;
+    for (const open of this.positions.values()) usedMargin += open.initialMargin;
+    const marginBudget = Math.max(equity * this.cfg.maxMarginUsage - usedMargin, 0);
+    if (marginBudget <= 0) return;
+
+    // Cap notional per position so total exposure stays within the account,
+    // then translate the remaining margin budget into a notional ceiling.
+    const perPositionNotional = (equity / this.cfg.maxPositions) * this.cfg.leverage;
+    const marginNotional = marginBudget * this.cfg.leverage;
+    const maxNotional = Math.min(perPositionNotional, marginNotional);
     const size = Math.min(riskAmount / stopDistance, maxNotional / proposal.price);
     if (!Number.isFinite(size) || size <= 0) return;
+
+    const notional = proposal.price * size;
+    const tier = riskLimitTier(notional);
+    // Risk-limit tiers cap effective leverage as notional grows.
+    const leverage = Math.min(this.cfg.leverage, tier.maxLeverage);
+    const initialMargin = notional / leverage;
+    const entryFee = notional * this.cfg.takerFeeRate;
+    if (initialMargin + entryFee > marginBudget) return;
 
     const sl =
       proposal.direction === "BUY"
@@ -229,16 +396,28 @@ export class PaperBroker {
       side: proposal.direction,
       entryPrice: proposal.price,
       size,
-      notional: proposal.price * size,
+      notional,
       stopLoss: sl,
       takeProfit: tp,
       openedAt: proposal.time,
       confidence: proposal.confidence,
       regime: meta.regime,
       agents: proposal.contributions,
-      entryFee: proposal.price * size * this.cfg.takerFeeRate,
+      entryFee,
       fundingPaid: 0,
       lastFundingAt: lastFundingBoundary(proposal.time),
+      leverage,
+      initialMargin,
+      maintenanceMarginRate: tier.mmr,
+      maintenanceMargin: notional * tier.mmr,
+      liquidationPrice: liquidationPriceFor(
+        proposal.price,
+        proposal.direction,
+        leverage,
+        tier.mmr,
+        this.cfg.takerFeeRate,
+      ),
+      bankruptcyPrice: bankruptcyPriceFor(proposal.price, proposal.direction, leverage),
     };
     this.realizedPnl -= pos.entryFee;
     this.totalFees += pos.entryFee;
@@ -250,8 +429,17 @@ export class PaperBroker {
   markPrice(symbol: string, price: number, time: number) {
     const p = this.positions.get(symbol);
     if (!p) return;
-    let reason: "TP" | "SL" | null = null;
+    let reason: "TP" | "SL" | "LIQ" | null = null;
     let exit = price;
+    // Liquidation is checked first: the exchange closes the position the moment
+    // the mark crosses the liquidation price, regardless of where SL/TP sit.
+    if (
+      (p.side === "BUY" && price <= p.liquidationPrice) ||
+      (p.side === "SELL" && price >= p.liquidationPrice)
+    ) {
+      this.closePosition(p, p.liquidationPrice, time, "LIQ");
+      return;
+    }
     if (p.side === "BUY") {
       if (price <= p.stopLoss) {
         reason = "SL";
@@ -276,7 +464,7 @@ export class PaperBroker {
     p: Position,
     exitPrice: number,
     time: number,
-    reason: "TP" | "SL" | "MANUAL",
+    reason: "TP" | "SL" | "MANUAL" | "LIQ",
   ) {
     const grossPnl =
       p.side === "BUY"
@@ -285,10 +473,17 @@ export class PaperBroker {
     // Taker fee on the way out, same rate as entry.
     const exitFee = exitPrice * p.size * this.cfg.takerFeeRate;
     const fees = p.entryFee + exitFee;
-    const pnl = grossPnl - exitFee - p.fundingPaid;
+    let pnl = grossPnl - exitFee - p.fundingPaid;
+    if (reason === "LIQ") {
+      // Isolated margin: the loss is capped at the margin posted for the
+      // position (fees and funding already came out of that margin).
+      pnl = -p.initialMargin;
+      this.liquidations += 1;
+    }
     const pnlPct = (pnl / (p.entryPrice * p.size)) * 100;
     // entryFee and fundingPaid were already deducted from realizedPnl.
-    this.realizedPnl += grossPnl - exitFee;
+    this.realizedPnl +=
+      reason === "LIQ" ? -p.initialMargin + p.entryFee + p.fundingPaid : grossPnl - exitFee;
     this.totalFees += exitFee;
     const trade: ClosedTrade = {
       id: p.id,
@@ -303,6 +498,9 @@ export class PaperBroker {
       grossPnl,
       fees,
       funding: p.fundingPaid,
+      initialMargin: p.initialMargin,
+      leverage: p.leverage,
+      liquidationPrice: p.liquidationPrice,
       openedAt: p.openedAt,
       closedAt: time,
       confidence: p.confidence,
@@ -312,6 +510,7 @@ export class PaperBroker {
     this.closed = [trade, ...this.closed].slice(0, 200);
     this.positions.delete(p.symbol);
     this.events.onClose?.(trade);
+    if (reason === "LIQ") this.events.onLiquidate?.(trade);
 
     const dd = this.realizedPnl / this.cfg.startingBalance;
     if (dd <= -this.cfg.maxDailyDrawdown && !this.halted) {
@@ -336,5 +535,6 @@ export class PaperBroker {
     this.halted = false;
     this.totalFees = 0;
     this.totalFunding = 0;
+    this.liquidations = 0;
   }
 }

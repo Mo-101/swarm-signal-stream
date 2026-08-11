@@ -12,6 +12,7 @@ import {
   PaperBroker,
   DEFAULT_PAPER_CONFIG,
   type Position,
+  type MarginSummary,
   type ClosedTrade,
 } from "@/lib/paper-broker";
 import {
@@ -182,6 +183,15 @@ function SwarmDashboard() {
   const [storedTrades, setStoredTrades] = useState(0);
   const [persistError, setPersistError] = useState<string | null>(null);
   const [costs, setCosts] = useState({ fees: 0, funding: 0 });
+  const [margin, setMargin] = useState<MarginSummary>({
+    usedMargin: 0,
+    maintenanceMargin: 0,
+    availableMargin: DEFAULT_PAPER_CONFIG.startingBalance,
+    equity: DEFAULT_PAPER_CONFIG.startingBalance,
+    marginRatio: 0,
+    atRisk: 0,
+  });
+  const [liquidations, setLiquidations] = useState(0);
 
   const navigate = useNavigate();
   const loadState = useServerFn(loadEngineState);
@@ -551,6 +561,8 @@ function SwarmDashboard() {
 
       broker.accrueFunding(now, marksRef.current);
       setCosts(broker.getCosts());
+      setMargin(broker.getMarginSummary(marksRef.current));
+      setLiquidations(broker.getLiquidations());
       setTicks(tickCounter.current);
       const state = engine.getState();
       for (const row of state) regimeRef.current.set(row.symbol, regimeOf(row.change1m));
@@ -686,6 +698,24 @@ function SwarmDashboard() {
               tone={unrealized >= 0 ? "bull" : "bear"}
             />
             <Stat label="Open" value={`${positions.length}/${DEFAULT_PAPER_CONFIG.maxPositions}`} />
+            <Stat
+              label="Margin used"
+              value={formatUsd(margin.usedMargin)}
+              sub={`${formatUsd(margin.availableMargin)} free · ${DEFAULT_PAPER_CONFIG.leverage}x`}
+              tone={margin.availableMargin > 0 ? "neutral" : "bear"}
+            />
+            <Stat
+              label="Margin ratio"
+              value={`${(margin.marginRatio * 100).toFixed(1)}%`}
+              sub={`MM ${formatUsd(margin.maintenanceMargin)}`}
+              tone={margin.marginRatio >= 0.8 ? "bear" : margin.marginRatio >= 0.5 ? "neutral" : "bull"}
+            />
+            <Stat
+              label="Liq risk"
+              value={`${margin.atRisk}`}
+              sub={`${liquidations} liquidated`}
+              tone={margin.atRisk > 0 || liquidations > 0 ? "bear" : "bull"}
+            />
             <Stat label="Trades" value={closed.length.toString()} />
             <Stat
               label="Win%"
@@ -775,7 +805,11 @@ function SwarmDashboard() {
         <section className="rounded-lg border border-border bg-card">
           {tab === "signals" && <SignalsPanel proposals={proposals} />}
           {tab === "positions" && (
-            <PositionsPanel positions={positions} marks={marksRef.current} />
+            <PositionsPanel
+              positions={positions}
+              marks={marksRef.current}
+              margin={margin}
+            />
           )}
           {tab === "history" && <HistoryPanel closed={closed} />}
           {tab === "board" && (
@@ -843,7 +877,11 @@ function SwarmDashboard() {
           Costs modelled on Bybit USDT perpetuals: 0.055% taker fee on entry and
           exit, plus funding settled every 8h (00:00 / 08:00 / 16:00 UTC) at the
           live Bybit funding rate — longs pay when positive, shorts pay when
-          negative. Session costs so far: {formatUsd(costs.fees)} fees ·{" "}
+          negative. Positions use isolated margin at{" "}
+          {DEFAULT_PAPER_CONFIG.leverage}x (capped by Bybit risk-limit tiers, which
+          raise the maintenance margin rate as notional grows); liquidation fires
+          when the mark crosses entry × (1 ∓ 1/leverage ± MMR ± taker fee) and
+          caps the loss at the position's initial margin. Session costs so far: {formatUsd(costs.fees)} fees ·{" "}
           {formatUsd(costs.funding)} funding. New entries pause if
           realized PnL drops by{" "}
           {(DEFAULT_PAPER_CONFIG.maxDailyDrawdown * 100).toFixed(0)}%. No real
@@ -922,15 +960,19 @@ function SignalsPanel({ proposals }: { proposals: TradeProposal[] }) {
 function PositionsPanel({
   positions,
   marks,
+  margin,
 }: {
   positions: Position[];
   marks: Map<string, number>;
+  margin: MarginSummary;
 }) {
   return (
     <>
       <PanelHeader
         title="Open Positions"
-        subtitle="Live mark-to-market with SL/TP simulation"
+        subtitle={`Isolated margin · IM ${formatUsd(margin.usedMargin)} · MM ${formatUsd(
+          margin.maintenanceMargin,
+        )} · margin ratio ${(margin.marginRatio * 100).toFixed(1)}% · liquidation simulated on mark`}
       />
       <div className="max-h-[70vh] overflow-y-auto">
         {positions.length === 0 ? (
@@ -944,6 +986,9 @@ function PositionsPanel({
                 <th className="px-4 py-2 text-right font-medium">Entry</th>
                 <th className="px-4 py-2 text-right font-medium">Mark</th>
                 <th className="px-4 py-2 text-right font-medium">Size</th>
+                <th className="px-4 py-2 text-right font-medium">Lev</th>
+                <th className="px-4 py-2 text-right font-medium">IM / MM</th>
+                <th className="px-4 py-2 text-right font-medium">Liq</th>
                 <th className="px-4 py-2 text-right font-medium">SL</th>
                 <th className="px-4 py-2 text-right font-medium">TP</th>
                 <th className="px-4 py-2 text-right font-medium">uPnL</th>
@@ -956,8 +1001,16 @@ function PositionsPanel({
                   p.side === "BUY"
                     ? (mark - p.entryPrice) * p.size
                     : (p.entryPrice - mark) * p.size;
-                const pnlPct = (pnl / (p.entryPrice * p.size)) * 100;
+                const pnlPct = (pnl / p.initialMargin) * 100;
                 const tone = pnl >= 0 ? "text-bull" : "text-bear";
+                const liqDistance =
+                  mark > 0 ? (Math.abs(mark - p.liquidationPrice) / mark) * 100 : 0;
+                const liqTone =
+                  liqDistance <= 2
+                    ? "text-bear font-semibold"
+                    : liqDistance <= 10
+                      ? "text-accent"
+                      : "text-muted-foreground";
                 return (
                   <tr key={p.id} className="border-b border-border/50">
                     <td className="px-4 py-1.5 font-mono text-xs">{p.symbol}</td>
@@ -980,6 +1033,17 @@ function PositionsPanel({
                     </td>
                     <td className="px-4 py-1.5 text-right font-mono text-xs tabular text-muted-foreground">
                       {p.size.toFixed(4)}
+                    </td>
+                    <td className="px-4 py-1.5 text-right font-mono text-xs tabular text-muted-foreground">
+                      {p.leverage}x
+                    </td>
+                    <td className="px-4 py-1.5 text-right font-mono text-xs tabular text-muted-foreground">
+                      {formatUsd(p.initialMargin)} /{" "}
+                      {formatUsd(mark * p.size * p.maintenanceMarginRate)}
+                    </td>
+                    <td className={`px-4 py-1.5 text-right font-mono text-xs tabular ${liqTone}`}>
+                      {formatPrice(p.liquidationPrice)}
+                      <span className="ml-1 text-[10px]">({liqDistance.toFixed(1)}%)</span>
                     </td>
                     <td className="px-4 py-1.5 text-right font-mono text-xs tabular text-bear">
                       {formatPrice(p.stopLoss)}
@@ -1032,6 +1096,8 @@ function HistoryPanel({ closed }: { closed: ClosedTrade[] }) {
                     ? "bg-bull/15 text-bull"
                     : t.reason === "SL"
                       ? "bg-bear/15 text-bear"
+                      : t.reason === "LIQ"
+                        ? "bg-bear/30 text-bear font-semibold"
                       : "bg-muted text-muted-foreground";
                 return (
                   <tr key={t.id + t.closedAt} className="border-b border-border/50">
