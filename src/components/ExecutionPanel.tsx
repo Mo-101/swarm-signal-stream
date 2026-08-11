@@ -114,6 +114,10 @@ export function ExecutionPanel({
         />
       </div>
 
+      <AlphaVsFills closed={closed} stats={stats} />
+
+
+
       <div className="grid gap-3 lg:grid-cols-2">
         <section className="rounded-lg border border-border">
           <Header
