@@ -379,18 +379,73 @@ export class SwarmEngine {
 
   start() {
     this.stopped = false;
+    this.startedAt = Date.now();
     const chunks: string[][] = [];
     for (let i = 0; i < this.symbols.length; i += STREAMS_PER_CONN) {
       chunks.push(this.symbols.slice(i, i + STREAMS_PER_CONN));
     }
+    this.chunks = chunks;
     this.totalChunks = chunks.length;
     for (let chunkId = 0; chunkId < chunks.length; chunkId++) {
       this.openSocket(chunks[chunkId], chunkId);
+    }
+    // A backgrounded tab throttles timers and a suspended laptop kills sockets
+    // without firing onclose promptly, so sweep on every wake signal too.
+    this.watchdogTimer = setInterval(() => this.sweep(), WATCHDOG_INTERVAL_MS);
+    if (typeof document !== "undefined")
+      document.addEventListener("visibilitychange", this.onWake);
+    if (typeof window !== "undefined") {
+      window.addEventListener("online", this.onWake);
+      window.addEventListener("focus", this.onWake);
+    }
+  }
+
+  /**
+   * Rebuild any feed that is missing, closed, or "open" but silent past the
+   * stall threshold. Cheap and idempotent — safe to call on any wake event.
+   */
+  private sweep() {
+    if (this.stopped) return;
+    const now = Date.now();
+    for (let chunkId = 0; chunkId < this.chunks.length; chunkId++) {
+      const st = this.feedStats.get(chunkId);
+      const ws = this.chunkSockets.get(chunkId);
+      const socketDead =
+        !ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING;
+      const silent =
+        st?.state === "open" &&
+        now - (st.lastMessageAt ?? st.openedAt ?? now) > STALL_MS;
+      if (!socketDead && !silent) continue;
+      // A pending reconnect timer already owns this chunk.
+      if (this.reconnectTimers.has(chunkId)) continue;
+      if (silent && ws) {
+        this.watchdogRestarts++;
+        try {
+          ws.close();
+        } catch {
+          /* onclose schedules the reconnect */
+        }
+        continue;
+      }
+      if (socketDead && st?.state !== "connecting") {
+        this.watchdogRestarts++;
+        this.openSocket(this.chunks[chunkId], chunkId);
+      }
     }
   }
 
   stop() {
     this.stopped = true;
+    if (this.watchdogTimer !== null) {
+      clearInterval(this.watchdogTimer);
+      this.watchdogTimer = null;
+    }
+    if (typeof document !== "undefined")
+      document.removeEventListener("visibilitychange", this.onWake);
+    if (typeof window !== "undefined") {
+      window.removeEventListener("online", this.onWake);
+      window.removeEventListener("focus", this.onWake);
+    }
     for (const timer of this.reconnectTimers.values()) clearTimeout(timer);
     this.reconnectTimers.clear();
     for (const t of this.pingTimers.values()) clearInterval(t);
@@ -403,9 +458,11 @@ export class SwarmEngine {
       }
     }
     this.sockets = [];
+    this.chunkSockets.clear();
     this.connected = 0;
     this.events.onStatus?.({ connected: 0, total: 0 });
   }
+
 
   private emitStatus() {
     this.events.onStatus?.({
