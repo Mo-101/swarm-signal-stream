@@ -802,8 +802,16 @@ function SwarmDashboard() {
     [closeLive, fetchLivePositions, pushLog],
   );
 
-  // Venue is armable only when a live account probe has actually succeeded.
-  const liveArmed = !!liveStatus?.configured && !liveStatus?.error;
+  // Venue is armable only when a live account probe has actually succeeded AND
+  // the paper run has produced the agreed review sample of closed trades.
+  const sampleReady = closed.length >= REVIEW_TRADE_TARGET;
+  const liveArmed = !!liveStatus?.configured && !liveStatus?.error && sampleReady;
+  const runProgress = Math.min(1, closed.length / REVIEW_TRADE_TARGET);
+  const uptimeMs = metrics?.startedAt ? Date.now() - metrics.startedAt : 0;
+  const lastTickAgo = metrics?.lastMessageAt
+    ? Math.round((Date.now() - metrics.lastMessageAt) / 1000)
+    : null;
+
 
   return (
 
