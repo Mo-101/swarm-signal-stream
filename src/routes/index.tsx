@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   SwarmEngine,
   fetchPerpetualSymbols,
+  type SwarmMetrics,
   type SymbolState,
   type TradeProposal,
 } from "@/lib/swarm";
