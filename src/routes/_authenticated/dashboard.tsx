@@ -211,6 +211,9 @@ function SwarmDashboard() {
   const [liveStatus, setLiveStatus] = useState<LiveStatus | null>(null);
   const [livePositions, setLivePositions] = useState<LivePosition[]>([]);
   const [liveLog, setLiveLog] = useState<LiveLogEntry[]>([]);
+  /** Non-null when the circuit breaker disarmed live mode; holds the reason. */
+  const [liveTripped, setLiveTripped] = useState<string | null>(null);
+
   const [metrics, setMetrics] = useState<SwarmMetrics | null>(null);
   const [tickRate, setTickRate] = useState(0);
   const [peakTickRate, setPeakTickRate] = useState(0);
