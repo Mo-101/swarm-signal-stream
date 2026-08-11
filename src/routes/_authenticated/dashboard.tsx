@@ -446,8 +446,13 @@ function SwarmDashboard() {
   useEffect(() => {
     if (symbols.length === 0 || !boot) return;
 
+    // Depth / mark-price feed for the hot symbol set — the execution realism layer.
+    const micro = new MicrostructureFeed();
+    microRef.current = micro;
+
     const broker = new PaperBroker(DEFAULT_PAPER_CONFIG, {
       onHalt: (msg) => setHalted(msg),
+      onReject: (r) => setRejects((prev) => [r, ...prev].slice(0, 60)),
       onOpen: (pos) => {
         setPaperOpens((n) => n + 1);
         setLastPaperEventAt(Date.now());
@@ -468,6 +473,13 @@ function SwarmDashboard() {
             hourUtc: new Date(pos.openedAt).getUTCHours(),
             agents: pos.agents,
             openedAt: pos.openedAt,
+            signalPrice: pos.signalPrice,
+            entrySlipBps: pos.entrySlipBps,
+            spreadEntryBps: pos.spreadAtEntryBps,
+            latencyMs: pos.latencyMs,
+            leverage: pos.leverage,
+            liqPrice: pos.liquidationPrice,
+            bookPriced: pos.bookPriced,
           },
         }).catch((e) =>
           setPersistError(e instanceof Error ? e.message : "Trade save failed"),
@@ -485,6 +497,13 @@ function SwarmDashboard() {
             closedAt: trade.closedAt,
             realizedPnl: broker.getRealizedPnl(),
             halted: broker.isHalted(),
+            triggerPrice: trade.triggerPrice,
+            exitSlipBps: trade.exitSlipBps,
+            spreadExitBps: trade.spreadAtExitBps,
+            slipCostUsd: trade.slipCostUsd,
+            grossPnl: trade.grossPnl,
+            fees: trade.fees,
+            funding: trade.funding,
           },
         })
           .then((res) => setEdgeReport(res.report ?? EMPTY_EDGE_REPORT))
@@ -493,6 +512,12 @@ function SwarmDashboard() {
           );
       },
     });
+    broker.setMarket({
+      book: (s) => micro.getBook(s),
+      mark: (s) => micro.getMark(s),
+      filter: (s) => micro.filter(s),
+    });
+
     broker.setMinConfidence(learnedRef.current.minConfidence);
     broker.hydrate({
       positions: boot.open.map((t) => ({
