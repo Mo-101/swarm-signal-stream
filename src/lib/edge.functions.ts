@@ -158,6 +158,13 @@ export interface OpenTradeInput {
   hourUtc: number;
   agents: Record<string, { direction: string; confidence: number }>;
   openedAt: number;
+  signalPrice?: number;
+  entrySlipBps?: number;
+  spreadEntryBps?: number;
+  latencyMs?: number;
+  leverage?: number;
+  liqPrice?: number;
+  bookPriced?: boolean;
 }
 
 export const persistOpenTrade = createServerFn({ method: "POST" })
@@ -182,6 +189,13 @@ export const persistOpenTrade = createServerFn({ method: "POST" })
         agents: data.agents,
         status: "open",
         opened_at: new Date(data.openedAt).toISOString(),
+        signal_price: data.signalPrice ?? data.entryPrice,
+        entry_slip_bps: data.entrySlipBps ?? 0,
+        spread_entry_bps: data.spreadEntryBps ?? 0,
+        latency_ms: data.latencyMs ?? 0,
+        leverage: data.leverage ?? null,
+        liq_price: data.liqPrice ?? null,
+        book_priced: data.bookPriced ?? false,
       },
       { onConflict: "user_id,client_id" },
     );
@@ -198,6 +212,13 @@ export interface CloseTradeInput {
   closedAt: number;
   realizedPnl: number;
   halted: boolean;
+  triggerPrice?: number;
+  exitSlipBps?: number;
+  spreadExitBps?: number;
+  slipCostUsd?: number;
+  grossPnl?: number;
+  fees?: number;
+  funding?: number;
 }
 
 export const persistCloseTrade = createServerFn({ method: "POST" })
@@ -214,10 +235,18 @@ export const persistCloseTrade = createServerFn({ method: "POST" })
         reason: data.reason,
         status: "closed",
         closed_at: new Date(data.closedAt).toISOString(),
+        trigger_price: data.triggerPrice ?? data.exitPrice,
+        exit_slip_bps: data.exitSlipBps ?? 0,
+        spread_exit_bps: data.spreadExitBps ?? 0,
+        slip_cost_usd: data.slipCostUsd ?? 0,
+        gross_pnl: data.grossPnl ?? data.pnl,
+        fees: data.fees ?? 0,
+        funding: data.funding ?? 0,
       })
       .eq("user_id", userId)
       .eq("client_id", data.clientId);
     if (error) throw new Error(error.message);
+
 
     await supabase
       .from("paper_accounts")

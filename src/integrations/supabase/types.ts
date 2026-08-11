@@ -44,14 +44,23 @@ export type Database = {
       paper_trades: {
         Row: {
           agents: Json
+          book_priced: boolean | null
           client_id: string
           closed_at: string | null
           conf_bucket: string
           confidence: number
           entry_price: number
+          entry_slip_bps: number | null
           exit_price: number | null
+          exit_slip_bps: number | null
+          fees: number | null
+          funding: number | null
+          gross_pnl: number | null
           hour_utc: number
           id: string
+          latency_ms: number | null
+          leverage: number | null
+          liq_price: number | null
           notional: number
           opened_at: string
           pnl: number | null
@@ -59,23 +68,37 @@ export type Database = {
           reason: string | null
           regime: string
           side: string
+          signal_price: number | null
           size: number
+          slip_cost_usd: number | null
+          spread_entry_bps: number | null
+          spread_exit_bps: number | null
           status: string
           stop_loss: number
           symbol: string
           take_profit: number
+          trigger_price: number | null
           user_id: string
         }
         Insert: {
           agents?: Json
+          book_priced?: boolean | null
           client_id: string
           closed_at?: string | null
           conf_bucket: string
           confidence: number
           entry_price: number
+          entry_slip_bps?: number | null
           exit_price?: number | null
+          exit_slip_bps?: number | null
+          fees?: number | null
+          funding?: number | null
+          gross_pnl?: number | null
           hour_utc?: number
           id?: string
+          latency_ms?: number | null
+          leverage?: number | null
+          liq_price?: number | null
           notional: number
           opened_at?: string
           pnl?: number | null
@@ -83,23 +106,37 @@ export type Database = {
           reason?: string | null
           regime?: string
           side: string
+          signal_price?: number | null
           size: number
+          slip_cost_usd?: number | null
+          spread_entry_bps?: number | null
+          spread_exit_bps?: number | null
           status?: string
           stop_loss: number
           symbol: string
           take_profit: number
+          trigger_price?: number | null
           user_id: string
         }
         Update: {
           agents?: Json
+          book_priced?: boolean | null
           client_id?: string
           closed_at?: string | null
           conf_bucket?: string
           confidence?: number
           entry_price?: number
+          entry_slip_bps?: number | null
           exit_price?: number | null
+          exit_slip_bps?: number | null
+          fees?: number | null
+          funding?: number | null
+          gross_pnl?: number | null
           hour_utc?: number
           id?: string
+          latency_ms?: number | null
+          leverage?: number | null
+          liq_price?: number | null
           notional?: number
           opened_at?: string
           pnl?: number | null
@@ -107,11 +144,16 @@ export type Database = {
           reason?: string | null
           regime?: string
           side?: string
+          signal_price?: number | null
           size?: number
+          slip_cost_usd?: number | null
+          spread_entry_bps?: number | null
+          spread_exit_bps?: number | null
           status?: string
           stop_loss?: number
           symbol?: string
           take_profit?: number
+          trigger_price?: number | null
           user_id?: string
         }
         Relationships: []
