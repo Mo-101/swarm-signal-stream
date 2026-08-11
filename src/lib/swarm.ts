@@ -523,8 +523,17 @@ export class SwarmEngine {
     if (time - lastE < EVAL_INTERVAL_MS) return;
     this.lastEval.set(symbol, time);
 
+    const t0 = performance.now();
     const proposal = combine(symbol, price, time, pb.toArray(), vb.toArray());
-    if (proposal) this.events.onProposal?.(proposal);
+    const dt = performance.now() - t0;
+    this.evaluations += 1;
+    this.evalMsTotal += dt;
+    this.lastEvalMs = dt;
+    if (dt > this.maxEvalMs) this.maxEvalMs = dt;
+    if (proposal) {
+      this.proposalCount += 1;
+      this.events.onProposal?.(proposal);
+    }
   }
 }
 
