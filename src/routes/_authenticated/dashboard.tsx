@@ -200,6 +200,11 @@ const EMPTY_EXEC_STATS: ExecutionStats = {
   modelPricedFills: 0,
 };
 
+/** Max signals retained in memory for review. */
+const SIGNAL_BUFFER = 10_000;
+/** Rows rendered per page so the feed stays responsive. */
+const SIGNAL_PAGE = 150;
+
 
 function SwarmDashboard() {
   const [symbols, setSymbols] = useState<string[]>([]);
@@ -650,7 +655,7 @@ function SwarmDashboard() {
       },
 
       onProposal: (p) => {
-        setProposals((prev) => [p, ...prev].slice(0, 80));
+        setProposals((prev) => [p, ...prev].slice(0, SIGNAL_BUFFER));
         const regime = regimeRef.current.get(p.symbol) ?? "unknown";
         const edge = learnedRef.current;
         const suppressed =
@@ -1243,22 +1248,36 @@ function EmptyState({ label }: { label: string }) {
 }
 
 function SignalsPanel({ proposals }: { proposals: TradeProposal[] }) {
+  const [visible, setVisible] = useState(SIGNAL_PAGE);
+  const shown = proposals.slice(0, visible);
   return (
     <>
       <PanelHeader
         title="Trade Signals"
         subtitle="Weighted consensus of Trend, MeanRev, Breakout, Meme agents"
-        badge="threshold 0.60"
+        badge={`${proposals.length.toLocaleString()} / ${SIGNAL_BUFFER.toLocaleString()} buffered`}
       />
       <div className="max-h-[70vh] overflow-y-auto">
         {proposals.length === 0 ? (
           <EmptyState label="Waiting for consensus signals…" />
         ) : (
-          <ul className="divide-y divide-border">
-            {proposals.map((p) => (
-              <SignalRow key={p.id} proposal={p} />
-            ))}
-          </ul>
+          <>
+            <ul className="divide-y divide-border">
+              {shown.map((p) => (
+                <SignalRow key={p.id} proposal={p} />
+              ))}
+            </ul>
+            {visible < proposals.length && (
+              <button
+                type="button"
+                onClick={() => setVisible((v) => v + SIGNAL_PAGE)}
+                className="w-full px-3 py-2 text-[11px] font-mono uppercase tracking-wider text-muted-foreground hover:text-foreground hover:bg-muted/40 transition-colors"
+              >
+                Load {Math.min(SIGNAL_PAGE, proposals.length - visible)} more ·{" "}
+                {(proposals.length - visible).toLocaleString()} older signals
+              </button>
+            )}
+          </>
         )}
       </div>
     </>
