@@ -200,6 +200,11 @@ const EMPTY_EXEC_STATS: ExecutionStats = {
   modelPricedFills: 0,
 };
 
+/** Max signals retained in memory for review. */
+const SIGNAL_BUFFER = 10_000;
+/** Rows rendered per page so the feed stays responsive. */
+const SIGNAL_PAGE = 150;
+
 
 function SwarmDashboard() {
   const [symbols, setSymbols] = useState<string[]>([]);
