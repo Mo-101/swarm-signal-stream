@@ -4,11 +4,16 @@ import { supabase } from "@/integrations/supabase/client";
 import { lovable } from "@/integrations/lovable/index";
 
 export const Route = createFileRoute("/auth")({
-  validateSearch: (search: Record<string, unknown>) => ({
-    next: typeof search.next === "string" && search.next.startsWith("/") && !search.next.startsWith("//")
-      ? search.next
-      : undefined,
-  }),
+  validateSearch: (search: Record<string, unknown>): { next?: string } => {
+    const next =
+      typeof search.next === "string" &&
+      search.next.startsWith("/") &&
+      !search.next.startsWith("//")
+        ? search.next
+        : undefined;
+    return next ? { next } : {};
+  },
+
   head: () => ({
     meta: [
       { title: "Sign in — Alpha Swarm Edge Engine" },
