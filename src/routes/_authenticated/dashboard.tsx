@@ -110,11 +110,15 @@ interface LiveLogEntry {
 const LIVE_CONFIDENCE_THRESHOLD = 0.75;
 const LIVE_NOTIONAL_USD = 100;
 const LIVE_SL_PCT = 0.008;
+/** Sent to the server as tpPct — no longer a fixed take-profit, it now sizes
+ *  the trailing-stop activation/retracement distances (see *-trader.functions.ts). */
 const LIVE_TP_PCT = 0.016;
 const LIVE_LEVERAGE = 5;
 const LIVE_COOLDOWN_MS = 60_000;
 /** Consecutive live-order failures before live mode disarms itself. */
 const LIVE_FAILURE_LIMIT = 3;
+/** Hard cap on simultaneous live positions — the "all in one basket" guard. */
+const LIVE_MAX_POSITIONS = 3;
 /** Closed paper trades required before live arming unlocks for review. */
 const REVIEW_TRADE_TARGET = 100;
 
@@ -211,6 +215,7 @@ function SwarmDashboard() {
   const [liveProvider, setLiveProvider] = useState<LiveProvider>("bybit");
   const [liveStatus, setLiveStatus] = useState<LiveStatus | null>(null);
   const [livePositions, setLivePositions] = useState<LivePosition[]>([]);
+  const livePositionsRef = useRef<LivePosition[]>([]);
   const [liveLog, setLiveLog] = useState<LiveLogEntry[]>([]);
   /** Non-null when the circuit breaker disarmed live mode; holds the reason. */
   const [liveTripped, setLiveTripped] = useState<string | null>(null);
@@ -312,6 +317,7 @@ function SwarmDashboard() {
     // Reset status/positions when switching providers.
     setLiveStatus(null);
     setLivePositions([]);
+    livePositionsRef.current = [];
   }, [liveProvider]);
 
   useEffect(() => {
@@ -340,6 +346,8 @@ function SwarmDashboard() {
     async (p: TradeProposal) => {
       // Readiness gate: never fire an order at a venue we know isn't armed.
       if (!liveReadyRef.current) return;
+      // Exposure cap: never let correlated signals pile the account into one basket.
+      if (livePositionsRef.current.length >= LIVE_MAX_POSITIONS) return;
       const now = Date.now();
       const cd = liveCooldownRef.current.get(p.symbol) ?? 0;
       if (now < cd) return;
@@ -359,6 +367,21 @@ function SwarmDashboard() {
           },
         });
         liveFailStreakRef.current = 0;
+        // Optimistic bump so a burst of proposals in one tick can't blow past
+        // the cap before the next positions poll catches up.
+        livePositionsRef.current = [
+          ...livePositionsRef.current,
+          {
+            symbol: p.symbol,
+            side: p.direction,
+            size: parseFloat(res.quantity),
+            entryPrice: res.entryPrice,
+            markPrice: res.entryPrice,
+            unrealized: 0,
+            liquidation: 0,
+            leverage: LIVE_LEVERAGE,
+          },
+        ];
         pushLog({
           ok: true,
           symbol: p.symbol,
@@ -442,6 +465,7 @@ function SwarmDashboard() {
           setLiveTripped(status.error ?? status.message ?? "Venue is not reachable.");
         }
         setLivePositions(ps as LivePosition[]);
+        livePositionsRef.current = ps as LivePosition[];
         setLiveUpdatedAt(Date.now());
       } catch (e) {
         if (cancelled) return;
@@ -663,6 +687,7 @@ function SwarmDashboard() {
         pushLog({ ok: true, symbol, message: "Position closed via market order." });
         const ps = (await fetchLivePositions().catch(() => [])) as LivePosition[];
         setLivePositions(ps);
+        livePositionsRef.current = ps;
       } catch (e) {
         pushLog({
           ok: false,

@@ -344,6 +344,18 @@ export const placeLiveTrade = createServerFn({ method: "POST" })
         : data.refPrice * (1 - data.tpPct);
     const slStr = roundStep(slPrice, filter.tickSize, filter.pricePrecision);
     const tpStr = roundStep(tpPrice, filter.tickSize, filter.pricePrecision);
+    // Exit is a trailing stop, not a fixed TP: it arms once price has moved
+    // halfway to the old fixed-TP distance, then follows the peak, closing
+    // only on a real retracement — lets a winner keep running instead of
+    // capping every trade at the same target.
+    const activationDistance = data.refPrice * data.tpPct * 0.5;
+    const activationPrice =
+      data.side === "BUY"
+        ? data.refPrice + activationDistance
+        : data.refPrice - activationDistance;
+    const activationStr = roundStep(activationPrice, filter.tickSize, filter.pricePrecision);
+    // Binance's trailing stop is a percentage callback rate, clamped to its allowed 0.1–5 range.
+    const callbackRate = Math.min(5, Math.max(0.1, data.tpPct * 0.4 * 100)).toFixed(1);
 
     interface OrderResp {
       orderId: number;
@@ -371,17 +383,19 @@ export const placeLiveTrade = createServerFn({ method: "POST" })
         workingType: "MARK_PRICE",
         timeInForce: "GTE_GTC",
       });
-      const tp = await signedRequest<OrderResp>("POST", "/fapi/v1/order", {
+      const trail = await signedRequest<OrderResp>("POST", "/fapi/v1/order", {
         symbol: data.symbol,
         side: stopSide,
-        type: "TAKE_PROFIT_MARKET",
-        stopPrice: tpStr,
+        type: "TRAILING_STOP_MARKET",
+        callbackRate,
+        activationPrice: activationStr,
         closePosition: "true",
         workingType: "MARK_PRICE",
         timeInForce: "GTE_GTC",
       });
 
       const entryPrice = parseFloat(entry.avgPrice ?? entry.price ?? "0") || data.refPrice;
+      const trailingDistanceVal = data.refPrice * (parseFloat(callbackRate) / 100);
       const { persistLiveOpenTrade } = await import("@/lib/db/live-store.server");
       const { clientId } = await persistLiveOpenTrade(context.supabase, context.userId, {
         provider: "binance",
@@ -392,10 +406,12 @@ export const placeLiveTrade = createServerFn({ method: "POST" })
         notional: data.notionalUsd,
         stopLoss: parseFloat(slStr),
         takeProfit: parseFloat(tpStr),
+        trailingActivePrice: parseFloat(activationStr),
+        trailingDistance: trailingDistanceVal,
         leverage: data.leverage,
         entryOrderId: String(entry.orderId),
         slOrderId: String(sl.orderId),
-        tpOrderId: String(tp.orderId),
+        tpOrderId: String(trail.orderId),
       });
 
       return {
@@ -407,7 +423,9 @@ export const placeLiveTrade = createServerFn({ method: "POST" })
         entryOrderId: entry.orderId,
         entryPrice,
         slOrderId: sl.orderId,
-        tpOrderId: tp.orderId,
+        tpOrderId: trail.orderId,
+        activePrice: activationStr,
+        callbackRate,
         slPrice: slStr,
         tpPrice: tpStr,
         placedAt: Date.now(),

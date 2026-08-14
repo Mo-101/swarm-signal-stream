@@ -398,12 +398,25 @@ export const placeBybitTrade = createServerFn({ method: "POST" })
       data.side === "BUY"
         ? data.refPrice * (1 - data.slPct)
         : data.refPrice * (1 + data.slPct);
+    // Exit is a trailing stop, not a fixed TP: it arms once price has moved
+    // halfway to the old fixed-TP distance, then follows the peak, closing
+    // only on a real retracement — lets a winner keep running instead of
+    // capping every trade at the same target. tpPct still sizes both
+    // distances so the caller's SL/TP ratio config carries over unchanged.
+    const activationDistance = data.refPrice * data.tpPct * 0.5;
+    const trailingDistanceVal = data.refPrice * data.tpPct * 0.4;
+    const activePrice =
+      data.side === "BUY"
+        ? data.refPrice + activationDistance
+        : data.refPrice - activationDistance;
     const tpPrice =
       data.side === "BUY"
         ? data.refPrice * (1 + data.tpPct)
         : data.refPrice * (1 - data.tpPct);
     const slStr = roundStep(slPrice, filter.tickSize, filter.pricePrecision);
     const tpStr = roundStep(tpPrice, filter.tickSize, filter.pricePrecision);
+    const activeStr = roundStep(activePrice, filter.tickSize, filter.pricePrecision);
+    const trailStr = roundStep(trailingDistanceVal, filter.tickSize, filter.pricePrecision);
     const lev = String(data.leverage ?? 5);
 
     // Best-effort leverage set.
@@ -428,13 +441,25 @@ export const placeBybitTrade = createServerFn({ method: "POST" })
       side: data.side === "BUY" ? "Buy" : "Sell",
       orderType: "Market",
       qty: quantity,
-      takeProfit: tpStr,
       stopLoss: slStr,
-      tpTriggerBy: "MarkPrice",
       slTriggerBy: "MarkPrice",
       tpslMode: "Full",
       positionIdx: 0,
     });
+
+    // Arm the trailing-stop exit — Bybit's own engine tracks the peak price
+    // and moves the stop server-side, so this needs no polling from us.
+    try {
+      await signedRequest("POST", "/v5/position/trading-stop", {
+        category: "linear",
+        symbol: data.symbol,
+        trailingStop: trailStr,
+        activePrice: activeStr,
+        positionIdx: 0,
+      });
+    } catch (e) {
+      console.error(`[bybit] failed to arm trailing stop for ${data.symbol}:`, e);
+    }
 
     const { persistLiveOpenTrade } = await import("@/lib/db/live-store.server");
     const { clientId } = await persistLiveOpenTrade(context.supabase, context.userId, {
@@ -446,10 +471,11 @@ export const placeBybitTrade = createServerFn({ method: "POST" })
       notional: data.notionalUsd,
       stopLoss: parseFloat(slStr),
       takeProfit: parseFloat(tpStr),
+      trailingActivePrice: parseFloat(activeStr),
+      trailingDistance: parseFloat(trailStr),
       leverage: data.leverage,
       entryOrderId: entry.orderId,
       slOrderId: entry.orderId,
-      tpOrderId: entry.orderId,
     });
 
     return {
@@ -461,9 +487,10 @@ export const placeBybitTrade = createServerFn({ method: "POST" })
       entryOrderId: entry.orderId,
       entryPrice: data.refPrice,
       slOrderId: entry.orderId,
-      tpOrderId: entry.orderId,
       slPrice: slStr,
       tpPrice: tpStr,
+      activePrice: activeStr,
+      trailingDistance: trailStr,
       placedAt: Date.now(),
     };
   });

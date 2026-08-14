@@ -21,6 +21,9 @@ export interface LiveTradeRow {
   stopLoss: number | null;
   takeProfit: number | null;
   leverage: number | null;
+  /** Trailing-stop exit, not a fixed TP — where the trail arms and how far it can retrace. */
+  trailingActivePrice: number | null;
+  trailingDistance: number | null;
   status: "open" | "closed";
   pnl: number | null;
   pnlPct: number | null;
@@ -47,6 +50,8 @@ function mapRow(row: any): LiveTradeRow {
     stopLoss: row.stop_loss === null ? null : Number(row.stop_loss),
     takeProfit: row.take_profit === null ? null : Number(row.take_profit),
     leverage: row.leverage === null ? null : Number(row.leverage),
+    trailingActivePrice: row.trailing_active_price === null ? null : Number(row.trailing_active_price),
+    trailingDistance: row.trailing_distance === null ? null : Number(row.trailing_distance),
     status: row.status,
     pnl: row.pnl === null ? null : Number(row.pnl),
     pnlPct: row.pnl_pct === null ? null : Number(row.pnl_pct),
@@ -74,6 +79,8 @@ export interface OpenLiveTradeInput {
   stopLoss?: number;
   takeProfit?: number;
   leverage?: number;
+  trailingActivePrice?: number;
+  trailingDistance?: number;
   entryOrderId?: string;
   slOrderId?: string;
   tpOrderId?: string;
@@ -97,11 +104,13 @@ export async function persistLiveOpenTrade(
   await sql`
     INSERT INTO live_trades (
       user_id, provider, client_id, symbol, side, entry_price, size, notional,
-      stop_loss, take_profit, leverage, status, entry_order_id, sl_order_id, tp_order_id, opened_at
+      stop_loss, take_profit, leverage, trailing_active_price, trailing_distance,
+      status, entry_order_id, sl_order_id, tp_order_id, opened_at
     ) VALUES (
       ${userId}, ${data.provider}, ${clientId}, ${data.symbol}, ${data.side}, ${data.entryPrice},
       ${data.size}, ${data.notional}, ${data.stopLoss ?? null}, ${data.takeProfit ?? null},
-      ${data.leverage ?? null}, 'open', ${data.entryOrderId ?? null}, ${data.slOrderId ?? null},
+      ${data.leverage ?? null}, ${data.trailingActivePrice ?? null}, ${data.trailingDistance ?? null},
+      'open', ${data.entryOrderId ?? null}, ${data.slOrderId ?? null},
       ${data.tpOrderId ?? null}, to_timestamp(${openedAt / 1000})
     )`;
 
@@ -123,6 +132,8 @@ export async function persistLiveOpenTrade(
       stop_loss: data.stopLoss ?? null,
       take_profit: data.takeProfit ?? null,
       leverage: data.leverage ?? null,
+      trailing_active_price: data.trailingActivePrice ?? null,
+      trailing_distance: data.trailingDistance ?? null,
       status: "open",
       entry_order_id: data.entryOrderId ?? null,
       sl_order_id: data.slOrderId ?? null,

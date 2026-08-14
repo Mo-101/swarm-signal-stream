@@ -31,6 +31,12 @@ CREATE TABLE public.live_trades (
   stop_loss numeric,
   take_profit numeric,
   leverage numeric,
+  -- Exit is a trailing stop, not a fixed TP: trailing_active_price is where
+  -- the trail arms, trailing_distance is how far price can retrace from its
+  -- peak before the exchange closes the position. take_profit above is kept
+  -- only as an informational reference, never sent as a hard TP order.
+  trailing_active_price numeric,
+  trailing_distance numeric,
   status text NOT NULL DEFAULT 'open',
   pnl numeric,
   pnl_pct numeric,
