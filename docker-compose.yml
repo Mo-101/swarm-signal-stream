@@ -1,0 +1,13 @@
+services:
+  alpha-swarm:
+    image: ghcr.io/mo-101/swarm-signal-stream:latest
+    container_name: alpha-swarm
+    restart: always
+    ports:
+      - "8085:8080"
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - PORT=8080
+      - HOST=0.0.0.0
