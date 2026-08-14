@@ -39,6 +39,8 @@ import {
 import { SystemPanel, type DiscoveryHealth } from "@/components/SystemPanel";
 import { EdgePanel } from "@/components/EdgePanel";
 import { ExecutionPanel } from "@/components/ExecutionPanel";
+import { ReviewProgress } from "@/components/ReviewProgress";
+
 
 import { supabase } from "@/integrations/supabase/client";
 import { useNavigate } from "@tanstack/react-router";
