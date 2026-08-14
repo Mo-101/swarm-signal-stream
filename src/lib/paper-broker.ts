@@ -590,6 +590,12 @@ export class PaperBroker {
     }));
     this.realizedPnl = state.realizedPnl;
     this.halted = state.halted;
+
+    // Execution counters are session-local by default; without this, "N filled"
+    // resets to 0 on every reload even though the DB already has these trades.
+    const historicalFills = this.positions.size + this.closed.length;
+    this.fills = historicalFills;
+    this.submitted = Math.max(this.submitted, historicalFills);
   }
 
   /** Confidence calibration learned from realized outcomes. */

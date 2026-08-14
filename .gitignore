@@ -20,6 +20,10 @@ dist-ssr
 .wrangler/
 .dev.vars
 
+# Secrets
+.env
+runner/.env
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
@@ -30,6 +34,3 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
-
-# Secrets
-.env

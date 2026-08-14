@@ -1,0 +1,12 @@
+services:
+  alpha-swarm-runner:
+    build:
+      context: .
+      dockerfile: Dockerfile.runner
+    image: alpha-swarm-runner:latest
+    container_name: alpha-swarm-runner
+    restart: always
+    ports:
+      - "8090:8090"
+    env_file:
+      - runner/.env

@@ -18,11 +18,8 @@ import {
   type PendingOrder,
   type RejectRecord,
 } from "@/lib/paper-broker";
-import {
-  MicrostructureFeed,
-  fetchInstrumentFilters,
-  type MicroMetrics,
-} from "@/lib/microstructure";
+import { MicrostructureFeed, type MicroMetrics } from "@/lib/microstructure";
+import { createEngineRuntime } from "@/lib/engine-runtime";
 
 import {
   getLiveStatus,
@@ -45,9 +42,7 @@ import { supabase } from "@/integrations/supabase/client";
 import { useNavigate } from "@tanstack/react-router";
 import { setAgentWeights } from "@/lib/swarm";
 import {
-  confBucket,
   deriveEdge,
-  regimeOf,
   EMPTY_EDGE_REPORT,
   type EdgeReport,
   type LearnedEdge,
@@ -58,8 +53,6 @@ import {
   persistOpenTrade,
   persistCloseTrade,
   resetPaperAccount,
-  type SignalInput,
-  type StoredTrade,
 } from "@/lib/edge.functions";
 
 type LiveProvider = "binance" | "bybit";
@@ -256,6 +249,14 @@ function SwarmDashboard() {
   const [rejects, setRejects] = useState<RejectRecord[]>([]);
   const [microMetrics, setMicroMetrics] = useState<MicroMetrics | null>(null);
   const microRef = useRef<MicrostructureFeed | null>(null);
+  const [runnerHeartbeat, setRunnerHeartbeat] = useState<{
+    status: string;
+    equity: number;
+    closedTrades: number;
+    ticksPerSec: number;
+    startedAt: number;
+    lastSeenAt: number;
+  } | null>(null);
 
   const navigate = useNavigate();
   const handleSignOut = async () => {
@@ -280,13 +281,10 @@ function SwarmDashboard() {
     [edgeReport],
   );
   const learnedRef = useRef(learned);
-  const regimeRef = useRef<Map<string, string>>(new Map());
-  const signalBufferRef = useRef<SignalInput[]>([]);
 
   const engineRef = useRef<SwarmEngine | null>(null);
   const brokerRef = useRef<PaperBroker | null>(null);
   const marksRef = useRef<Map<string, number>>(new Map());
-  const tickCounter = useRef(0);
   const liveModeRef = useRef(liveMode);
   const liveProviderRef = useRef(liveProvider);
   const liveCooldownRef = useRef<Map<string, number>>(new Map());
@@ -495,6 +493,60 @@ function SwarmDashboard() {
     };
   }, [loadState]);
 
+  // Detect a headless runner (see runner/) trading this same account — when
+  // its heartbeat is fresh, this tab stops opening/closing paper trades
+  // itself so the two never race on the same positions.
+  useEffect(() => {
+    let cancelled = false;
+    const poll = async () => {
+      const { data } = await supabase.from("runner_state").select("*").maybeSingle();
+      if (cancelled) return;
+      if (!data) {
+        setRunnerHeartbeat(null);
+        return;
+      }
+      setRunnerHeartbeat({
+        status: data.status,
+        equity: Number(data.equity),
+        closedTrades: data.closed_trades,
+        ticksPerSec: Number(data.ticks_per_sec),
+        startedAt: new Date(data.started_at).getTime(),
+        lastSeenAt: new Date(data.last_seen_at).getTime(),
+      });
+    };
+    void poll();
+    const iv = setInterval(poll, 10_000);
+    return () => {
+      cancelled = true;
+      clearInterval(iv);
+    };
+  }, []);
+
+  const runnerActive =
+    runnerHeartbeat !== null &&
+    runnerHeartbeat.status === "running" &&
+    Date.now() - runnerHeartbeat.lastSeenAt < 60_000;
+
+  // While observing, re-hydrate from the DB periodically so the board
+  // reflects what the runner is actually doing, instead of a local broker
+  // frozen at whatever it looked like when this tab took over.
+  useEffect(() => {
+    if (!runnerActive) return;
+    const iv = setInterval(() => {
+      loadState()
+        .then((state) => {
+          setBoot(state);
+          setEdgeReport(state.report ?? EMPTY_EDGE_REPORT);
+          setStoredSignals(state.signalCount ?? 0);
+          setStoredTrades(state.open.length + state.closed.length);
+        })
+        .catch((e: unknown) =>
+          setPersistError(e instanceof Error ? e.message : "Could not refresh runner state"),
+        );
+    }, 15_000);
+    return () => clearInterval(iv);
+  }, [runnerActive, loadState]);
+
   // Feed learned edge back into the running swarm.
   useEffect(() => {
     learnedRef.current = learned;
@@ -502,274 +554,71 @@ function SwarmDashboard() {
     brokerRef.current?.setMinConfidence(learned.minConfidence);
   }, [learned]);
 
-  // Flush buffered signals to storage.
-  useEffect(() => {
-    if (!boot) return;
-    const iv = setInterval(() => {
-      const batch = signalBufferRef.current.splice(0, 200);
-      if (batch.length === 0) return;
-      void sendSignals({ data: { signals: batch } })
-        .then(() => setStoredSignals((n: any) => n + batch.length))
-        .catch((e: { message: any }) =>
-          setPersistError(e instanceof Error ? e.message : "Signal ingest failed"),
-        );
-    }, 8000);
-    return () => clearInterval(iv);
-  }, [boot, sendSignals]);
-
   useEffect(() => {
     if (symbols.length === 0 || !boot) return;
 
-    // Depth / mark-price feed for the hot symbol set — the execution realism layer.
-    const micro = new MicrostructureFeed();
-    microRef.current = micro;
-
-    const broker = new PaperBroker(DEFAULT_PAPER_CONFIG, {
-      onHalt: (msg) => setHalted(msg),
-      onReject: (r) => setRejects((prev: any) => [r, ...prev].slice(0, 60)),
-      onOpen: (pos) => {
-        setPaperOpens((n: number) => n + 1);
-        setLastPaperEventAt(Date.now());
-        setStoredTrades((n: number) => n + 1);
-        void saveOpen({
-          data: {
-            clientId: pos.id,
-            symbol: pos.symbol,
-            side: pos.side,
-            entryPrice: pos.entryPrice,
-            size: pos.size,
-            notional: pos.notional,
-            stopLoss: pos.stopLoss,
-            takeProfit: pos.takeProfit,
-            confidence: pos.confidence,
-            confBucket: confBucket(pos.confidence),
-            regime: pos.regime,
-            hourUtc: new Date(pos.openedAt).getUTCHours(),
-            agents: pos.agents,
-            openedAt: pos.openedAt,
-            signalPrice: pos.signalPrice,
-            entrySlipBps: pos.entrySlipBps,
-            spreadEntryBps: pos.spreadAtEntryBps,
-            latencyMs: pos.latencyMs,
-            leverage: pos.leverage,
-            liqPrice: pos.liquidationPrice,
-            bookPriced: pos.bookPriced,
-          },
-        }).catch((e: { message: any }) =>
-          setPersistError(e instanceof Error ? e.message : "Trade save failed"),
-        );
-      },
-      onClose: (trade) => {
-        setLastPaperEventAt(Date.now());
-        void saveClose({
-          data: {
-            clientId: trade.id,
-            exitPrice: trade.exitPrice,
-            pnl: trade.pnl,
-            pnlPct: trade.pnlPct,
-            reason: trade.reason,
-            closedAt: trade.closedAt,
-            realizedPnl: broker.getRealizedPnl(),
-            halted: broker.isHalted(),
-            triggerPrice: trade.triggerPrice,
-            exitSlipBps: trade.exitSlipBps,
-            spreadExitBps: trade.spreadAtExitBps,
-            slipCostUsd: trade.slipCostUsd,
-            grossPnl: trade.grossPnl,
-            fees: trade.fees,
-            funding: trade.funding,
-          },
-        })
-          .then((res: { report: any }) => setEdgeReport(res.report ?? EMPTY_EDGE_REPORT))
-          .catch((e: { message: any }) =>
-            setPersistError(e instanceof Error ? e.message : "Trade close save failed"),
-          );
-      },
-    });
-    broker.setMarket({
-      book: (s) => micro.getBook(s),
-      mark: (s) => micro.getMark(s),
-      filter: (s) => micro.filter(s),
-    });
-
-    broker.setMinConfidence(learnedRef.current.minConfidence);
-    broker.hydrate({
-      positions: boot.open.map(
-        (t: StoredTrade) => ({
-          id: t.clientId,
-          symbol: t.symbol,
-          side: t.side,
-          entryPrice: t.entryPrice,
-          size: t.size,
-          notional: t.notional,
-          stopLoss: t.stopLoss,
-          takeProfit: t.takeProfit,
-          openedAt: t.openedAt,
-          confidence: t.confidence,
-          regime: t.regime,
-          agents: t.agents as Position["agents"],
+    const runtime = createEngineRuntime({
+      symbols,
+      boot,
+      readOnly: runnerActive,
+      getLearned: () => learnedRef.current,
+      persistence: {
+        saveOpenTrade: (data) => saveOpen({ data }),
+        saveCloseTrade: (data) => saveClose({ data }),
+        sendSignals: (signals) => sendSignals({ data: { signals } }).then(() => {
+          setStoredSignals((n: number) => n + signals.length);
         }),
-      ),
-      closed: boot.closed
-        .filter(
-          (t: StoredTrade) => t.exitPrice !== null && t.closedAt !== null,
-        )
-        .map(
-          (t: StoredTrade) => ({
-            id: t.clientId,
-            symbol: t.symbol,
-            side: t.side,
-            entryPrice: t.entryPrice,
-            exitPrice: t.exitPrice as number,
-            size: t.size,
-            pnl: t.pnl ?? 0,
-            pnlPct: t.pnlPct ?? 0,
-            reason: (t.reason as ClosedTrade["reason"]) ?? "MANUAL",
-            openedAt: t.openedAt,
-            closedAt: t.closedAt as number,
-            confidence: t.confidence,
-            regime: t.regime,
-            agents: t.agents as Position["agents"],
-          }),
-        ),
-      realizedPnl: boot.account.realizedPnl,
-      halted: boot.account.halted,
-    });
-    brokerRef.current = broker;
-
-    // Exchange instrument filters (tick / lot / min-notional) then depth feed.
-    void fetchInstrumentFilters()
-      .then((f) => micro.setFilters(f))
-      .catch(() => setPersistError("Instrument filters unavailable — fills will be rejected"));
-    micro.start();
-
-    let lastPendingSweep = 0;
-    const engine = new SwarmEngine(symbols, {
-      onTick: (t) => {
-        tickCounter.current += 1;
-        marksRef.current.set(t.symbol, t.price);
-        broker.markPrice(t.symbol, t.price, t.time);
-        // Tick-driven matching: a backgrounded tab throttles setInterval to
-        // ~1Hz, but socket frames keep arriving, so drive fills from them too.
-        const now = Date.now();
-        if (now - lastPendingSweep > 50) {
-          lastPendingSweep = now;
-          broker.processPending(now);
-        }
+        onPersistError: (message) => setPersistError(message),
       },
-
-      onProposal: (p) => {
-        setProposals((prev: any) => [p, ...prev].slice(0, SIGNAL_BUFFER));
-        const regime = regimeRef.current.get(p.symbol) ?? "unknown";
-        const edge = learnedRef.current;
-        const suppressed =
-          edge.suppressedSymbols.includes(p.symbol) ||
-          edge.costSuppressedSymbols.includes(p.symbol);
-        const before = broker.getPositions().length + broker.getPending().length;
-        if (!suppressed) broker.onProposal(p, { regime });
-        const executed = broker.getPositions().length + broker.getPending().length > before;
-        signalBufferRef.current.push({
-          symbol: p.symbol,
-          side: p.direction,
-          price: p.price,
-          confidence: p.confidence,
-          confBucket: confBucket(p.confidence),
-          regime,
-          hourUtc: new Date(p.time).getUTCHours(),
-          agents: p.contributions,
-          executed,
-        });
-        if (signalBufferRef.current.length > 400) {
-          signalBufferRef.current.splice(0, signalBufferRef.current.length - 400);
-        }
-        if (liveModeRef.current && p.confidence >= LIVE_CONFIDENCE_THRESHOLD) {
-          void submitLiveTrade(p);
-        }
+      hooks: {
+        onTick: (t) => marksRef.current.set(t.symbol, t.price),
+        onHalt: (msg) => setHalted(msg),
+        onReject: (r) => setRejects((prev: any) => [r, ...prev].slice(0, 60)),
+        onOpen: () => {
+          setPaperOpens((n: number) => n + 1);
+          setLastPaperEventAt(Date.now());
+          setStoredTrades((n: number) => n + 1);
+        },
+        onClose: () => setLastPaperEventAt(Date.now()),
+        onReportUpdate: (report) => setEdgeReport(report ?? EMPTY_EDGE_REPORT),
+        onProposal: (p) => {
+          setProposals((prev: any) => [p, ...prev].slice(0, SIGNAL_BUFFER));
+          if (liveModeRef.current && p.confidence >= LIVE_CONFIDENCE_THRESHOLD) {
+            void submitLiveTrade(p);
+          }
+        },
+        onStatus: (s) => setStatus(s),
+        onSnapshot: (s) => {
+          setTickRate(s.tickRate);
+          setPeakTickRate((p: number) => (s.tickRate > p ? s.tickRate : p));
+          setCosts(s.costs);
+          setMargin(s.margin);
+          setLiquidations(s.liquidations);
+          setTicks(s.ticks);
+          setBoard(s.board);
+          setPositions(s.positions);
+          setClosed(s.closed);
+          setRealized(s.realizedPnl);
+          setUnrealized(s.unrealizedPnl);
+          setMetrics(s.metrics);
+          setExecStats(s.execStats);
+          setPendingOrders(s.pendingOrders);
+          setMicroMetrics(s.microMetrics);
+        },
       },
-      onStatus: (s) => setStatus(s),
     });
-    engineRef.current = engine;
-    engine.start();
 
-    // Pull Bybit's live funding rates so paper carry matches the real book.
-    const loadFunding = async () => {
-      try {
-        const res = await fetch("https://api.bybit.com/v5/market/tickers?category=linear");
-        const json = (await res.json()) as {
-          result?: { list?: Array<{ symbol: string; fundingRate: string }> };
-        };
-        for (const t of json.result?.list ?? []) {
-          const rate = Number(t.fundingRate);
-          if (Number.isFinite(rate)) broker.setFundingRate(t.symbol, rate);
-        }
-      } catch {
-        // Keep the default 0.01%/8h assumption when the REST call fails.
-      }
-    };
-    void loadFunding();
-    const fundingIv = setInterval(loadFunding, 5 * 60 * 1000);
-
-    // Matching engine tick: fill in-flight orders as soon as their latency
-    // elapses, using whatever the book looks like at that moment.
-    const matchIv = setInterval(() => broker.processPending(Date.now()), 100);
-
-    // Keep full depth on what matters: open positions, orders in flight, then
-    // the hottest movers (the symbols most likely to produce the next signal).
-    const trackIv = setInterval(() => {
-      const hot = new Set<string>();
-      for (const p of broker.getPositions()) hot.add(p.symbol);
-      for (const o of broker.getPending()) hot.add(o.symbol);
-      const movers = [...engine.getState()]
-        .sort((a, b) => Math.abs(b.change1m) - Math.abs(a.change1m))
-        .slice(0, 50);
-      for (const m of movers) hot.add(m.symbol);
-      micro.track([...hot]);
-    }, 2000);
-
-    let lastTickCount = 0;
-    let lastSample = Date.now();
-    const iv = setInterval(() => {
-      const now = Date.now();
-      const dt = (now - lastSample) / 1000;
-      const delta = tickCounter.current - lastTickCount;
-      if (dt > 0) {
-        const rate = delta / dt;
-        setTickRate(rate);
-        setPeakTickRate((p: number) => (rate > p ? rate : p));
-      }
-      lastTickCount = tickCounter.current;
-      lastSample = now;
-
-      broker.accrueFunding(now, marksRef.current);
-      setCosts(broker.getCosts());
-      setMargin(broker.getMarginSummary(marksRef.current));
-      setLiquidations(broker.getLiquidations());
-      setTicks(tickCounter.current);
-      const state = engine.getState();
-      for (const row of state) regimeRef.current.set(row.symbol, regimeOf(row.change1m));
-      setBoard(state);
-      setPositions(broker.getPositions());
-      setClosed(broker.getClosed());
-      setRealized(broker.getRealizedPnl());
-      setUnrealized(broker.getUnrealizedPnl(marksRef.current));
-      setMetrics(engine.getMetrics());
-      setExecStats(broker.getExecutionStats());
-      setPendingOrders(broker.getPending());
-      setMicroMetrics(micro.getMetrics());
-    }, 500);
+    brokerRef.current = runtime.getBroker();
+    engineRef.current = runtime.getEngine();
+    runtime.start();
 
     return () => {
-      clearInterval(iv);
-      clearInterval(fundingIv);
-      clearInterval(matchIv);
-      clearInterval(trackIv);
-      engine.stop();
-      micro.stop();
+      runtime.stop();
       microRef.current = null;
       engineRef.current = null;
       brokerRef.current = null;
     };
-  }, [symbols, boot, saveOpen, saveClose]);
+  }, [symbols, boot, runnerActive, saveOpen, saveClose, sendSignals]);
 
   const equity = DEFAULT_PAPER_CONFIG.startingBalance + realized + unrealized;
   const equityPct =
@@ -785,9 +634,15 @@ function SwarmDashboard() {
   }, [board, query]);
 
   const closeAll = () => {
+    // Runner owns these positions while observing — closing them locally
+    // would just be undone by the next 15s DB refresh, or worse, race it.
+    if (runnerActive) return;
     brokerRef.current?.closeAll(marksRef.current, Date.now());
   };
   const resetBroker = () => {
+    // resetAccount deletes open trades server-side — never fire that while
+    // a runner is actively trading this same account.
+    if (runnerActive) return;
     brokerRef.current?.reset();
     setHalted(null);
     void resetAccount({ data: { wipeHistory: false } })
@@ -1036,6 +891,23 @@ function SwarmDashboard() {
           </div>
         </div>
       </header>
+
+      {runnerActive && runnerHeartbeat && (
+        <div className="mx-auto max-w-[1600px] px-6 pt-4">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-1 rounded-md border border-accent/40 bg-accent/10 px-4 py-2 text-xs text-accent">
+            <span className="font-semibold">Runner active on VPS · observing</span>
+            <span className="text-muted-foreground">
+              up {formatDuration(Date.now() - runnerHeartbeat.startedAt)}
+            </span>
+            <span className="text-muted-foreground">
+              last seen {Math.max(0, Math.round((Date.now() - runnerHeartbeat.lastSeenAt) / 1000))}s ago
+            </span>
+            <span className="text-muted-foreground">
+              equity {formatUsd(runnerHeartbeat.equity)} · {runnerHeartbeat.closedTrades} closed
+            </span>
+          </div>
+        </div>
+      )}
 
       {(error || halted) && (
         <div className="mx-auto max-w-[1600px] space-y-2 px-6 pt-4">
