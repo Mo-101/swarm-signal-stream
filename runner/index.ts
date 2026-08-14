@@ -55,6 +55,7 @@ const STATUS_LOG_INTERVAL_MS = 60_000;
 const HEALTH_PORT = Number(process.env.HEALTH_PORT ?? 8090);
 
 async function main() {
+  requireEnv("DATABASE_URL"); // read directly by src/lib/db/neon.ts
   const SUPABASE_URL = requireEnv("SUPABASE_URL");
   const SUPABASE_PUBLISHABLE_KEY = requireEnv("SUPABASE_PUBLISHABLE_KEY");
   const RUNNER_EMAIL = requireEnv("RUNNER_EMAIL");
