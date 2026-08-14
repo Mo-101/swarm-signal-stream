@@ -39,6 +39,8 @@ import {
 import { SystemPanel, type DiscoveryHealth } from "@/components/SystemPanel";
 import { EdgePanel } from "@/components/EdgePanel";
 import { ExecutionPanel } from "@/components/ExecutionPanel";
+import { ReviewProgress } from "@/components/ReviewProgress";
+
 
 import { supabase } from "@/integrations/supabase/client";
 import { useNavigate } from "@tanstack/react-router";
@@ -1045,6 +1047,16 @@ function SwarmDashboard() {
       )}
 
       <div className="mx-auto max-w-[1600px] px-6 py-6">
+        <div className="mb-4">
+          <ReviewProgress
+            closed={closed}
+            target={REVIEW_TRADE_TARGET}
+            realized={realized}
+            unrealized={unrealized}
+            runStartedAt={metrics?.startedAt ?? null}
+          />
+        </div>
+
         <div className="mb-4 flex flex-wrap items-center justify-between gap-3">
           <div className="flex gap-1 rounded-lg border border-border bg-card p-1">
             {(
