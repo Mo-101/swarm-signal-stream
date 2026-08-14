@@ -41,7 +41,6 @@ import { EdgePanel } from "@/components/EdgePanel";
 import { ExecutionPanel } from "@/components/ExecutionPanel";
 import { ReviewProgress } from "@/components/ReviewProgress";
 
-
 import { supabase } from "@/integrations/supabase/client";
 import { useNavigate } from "@tanstack/react-router";
 import { setAgentWeights } from "@/lib/swarm";
@@ -60,6 +59,7 @@ import {
   persistCloseTrade,
   resetPaperAccount,
   type SignalInput,
+  type StoredTrade,
 } from "@/lib/edge.functions";
 
 type LiveProvider = "binance" | "bybit";
@@ -76,13 +76,13 @@ interface LiveStatus {
   errorCode?: number;
   wrongVenue?: "testnet" | "mainnet" | null;
   errorReason?:
-    | "key-invalid"
-    | "signature-invalid"
-    | "timestamp"
-    | "permissions"
-    | "ip"
-    | "network-blocked"
-    | "other";
+  | "key-invalid"
+  | "signature-invalid"
+  | "timestamp"
+  | "permissions"
+  | "ip"
+  | "network-blocked"
+  | "other";
   hint?: string;
   diagnostics?: {
     keyPresent: boolean;
@@ -94,7 +94,6 @@ interface LiveStatus {
   };
 }
 interface LivePosition {
-
   symbol: string;
   side: "BUY" | "SELL";
   size: number;
@@ -136,7 +135,6 @@ function formatDuration(ms: number): string {
   return `${mins}m`;
 }
 
-
 export const Route = createFileRoute("/_authenticated/dashboard")({
   head: () => ({
     meta: [
@@ -174,15 +172,7 @@ function formatTime(ms: number): string {
   return new Date(ms).toLocaleTimeString([], { hour12: false });
 }
 
-type Tab =
-  | "signals"
-  | "positions"
-  | "history"
-  | "board"
-  | "execution"
-  | "edge"
-  | "live"
-  | "system";
+type Tab = "signals" | "positions" | "history" | "board" | "execution" | "edge" | "live" | "system";
 
 const EMPTY_EXEC_STATS: ExecutionStats = {
   submitted: 0,
@@ -206,7 +196,6 @@ const EMPTY_EXEC_STATS: ExecutionStats = {
 const SIGNAL_BUFFER = 10_000;
 /** Rows rendered per page so the feed stays responsive. */
 const SIGNAL_PAGE = 150;
-
 
 function SwarmDashboard() {
   const [symbols, setSymbols] = useState<string[]>([]);
@@ -268,9 +257,18 @@ function SwarmDashboard() {
   const [microMetrics, setMicroMetrics] = useState<MicroMetrics | null>(null);
   const microRef = useRef<MicrostructureFeed | null>(null);
 
-
-
   const navigate = useNavigate();
+  const handleSignOut = async () => {
+    if (typeof window !== "undefined") {
+      localStorage.removeItem("alpha_swarm_guest");
+    }
+    try {
+      await supabase.auth.signOut();
+    } catch {
+      // ignore
+    }
+    navigate({ to: "/auth" });
+  };
   const loadState = useServerFn(loadEngineState);
   const sendSignals = useServerFn(ingestSignals);
   const saveOpen = useServerFn(persistOpenTrade);
@@ -297,7 +295,6 @@ function SwarmDashboard() {
   const liveReadyRef = useRef(false);
   const liveFailStreakRef = useRef(0);
 
-
   const placeBinance = useServerFn(placeLiveTrade);
   const fetchBinanceStatus = useServerFn(getLiveStatus);
   const fetchBinancePositions = useServerFn(getLivePositions);
@@ -309,8 +306,7 @@ function SwarmDashboard() {
 
   const placeLive = liveProvider === "bybit" ? placeBybit : placeBinance;
   const fetchLiveStatus = liveProvider === "bybit" ? fetchBybitStatus : fetchBinanceStatus;
-  const fetchLivePositions =
-    liveProvider === "bybit" ? fetchBybitPositions : fetchBinancePositions;
+  const fetchLivePositions = liveProvider === "bybit" ? fetchBybitPositions : fetchBinancePositions;
   const closeLive = liveProvider === "bybit" ? closeBybit : closeBinance;
 
   useEffect(() => {
@@ -325,7 +321,7 @@ function SwarmDashboard() {
   }, [liveMode]);
 
   const pushLog = useCallback((entry: Omit<LiveLogEntry, "id" | "time">) => {
-    setLiveLog((prev) => {
+    setLiveLog((prev: LiveLogEntry[]) => {
       // Collapse an identical repeat of the newest row into a counter instead
       // of flooding the feed with one line per rejected signal.
       const head = prev[0];
@@ -338,10 +334,7 @@ function SwarmDashboard() {
         };
         return [merged, ...prev.slice(1)];
       }
-      return [
-        { ...entry, id: crypto.randomUUID(), time: Date.now() },
-        ...prev,
-      ].slice(0, 40);
+      return [{ ...entry, id: crypto.randomUUID(), time: Date.now() }, ...prev].slice(0, 40);
     });
   }, []);
 
@@ -397,11 +390,10 @@ function SwarmDashboard() {
     [placeLive, pushLog],
   );
 
-
   useEffect(() => {
     const ac = new AbortController();
     const t0 = performance.now();
-    setDiscovery((d) => ({ ...d, state: "loading", error: null }));
+    setDiscovery((d: DiscoveryHealth) => ({ ...d, state: "loading", error: null }));
     fetchPerpetualSymbols(ac.signal)
       .then((list) => {
         setSymbols(list);
@@ -428,7 +420,6 @@ function SwarmDashboard() {
         });
       });
     return () => ac.abort(new DOMException("dashboard unmounted", "AbortError"));
-
   }, []);
 
   // Probe the venue continuously — readiness must be proven before arming,
@@ -471,23 +462,28 @@ function SwarmDashboard() {
     };
   }, [liveMode, fetchLiveStatus, fetchLivePositions]);
 
-
   // Load the persisted account, open positions, history and edge report.
   useEffect(() => {
     let cancelled = false;
     loadState()
-      .then((state) => {
-        if (cancelled) return;
-        setBoot(state);
-        setEdgeReport(state.report ?? EMPTY_EDGE_REPORT);
-        setStoredSignals(state.signalCount ?? 0);
-        setStoredTrades(state.open.length + state.closed.length);
-      })
-      .catch((e) => {
+      .then(
+        (state) => {
+          if (cancelled) return;
+          setBoot(state);
+          setEdgeReport(state.report ?? EMPTY_EDGE_REPORT);
+          setStoredSignals(state.signalCount ?? 0);
+          setStoredTrades(state.open.length + state.closed.length);
+        },
+      )
+      .catch((e: unknown) => {
         if (cancelled) return;
         setPersistError(e instanceof Error ? e.message : "Could not load stored state");
         setBoot({
-          account: { startingBalance: DEFAULT_PAPER_CONFIG.startingBalance, realizedPnl: 0, halted: false },
+          account: {
+            startingBalance: DEFAULT_PAPER_CONFIG.startingBalance,
+            realizedPnl: 0,
+            halted: false,
+          },
           open: [],
           closed: [],
           report: EMPTY_EDGE_REPORT,
@@ -513,8 +509,8 @@ function SwarmDashboard() {
       const batch = signalBufferRef.current.splice(0, 200);
       if (batch.length === 0) return;
       void sendSignals({ data: { signals: batch } })
-        .then(() => setStoredSignals((n) => n + batch.length))
-        .catch((e) =>
+        .then(() => setStoredSignals((n: any) => n + batch.length))
+        .catch((e: { message: any }) =>
           setPersistError(e instanceof Error ? e.message : "Signal ingest failed"),
         );
     }, 8000);
@@ -530,11 +526,11 @@ function SwarmDashboard() {
 
     const broker = new PaperBroker(DEFAULT_PAPER_CONFIG, {
       onHalt: (msg) => setHalted(msg),
-      onReject: (r) => setRejects((prev) => [r, ...prev].slice(0, 60)),
+      onReject: (r) => setRejects((prev: any) => [r, ...prev].slice(0, 60)),
       onOpen: (pos) => {
-        setPaperOpens((n) => n + 1);
+        setPaperOpens((n: number) => n + 1);
         setLastPaperEventAt(Date.now());
-        setStoredTrades((n) => n + 1);
+        setStoredTrades((n: number) => n + 1);
         void saveOpen({
           data: {
             clientId: pos.id,
@@ -559,7 +555,7 @@ function SwarmDashboard() {
             liqPrice: pos.liquidationPrice,
             bookPriced: pos.bookPriced,
           },
-        }).catch((e) =>
+        }).catch((e: { message: any }) =>
           setPersistError(e instanceof Error ? e.message : "Trade save failed"),
         );
       },
@@ -584,8 +580,8 @@ function SwarmDashboard() {
             funding: trade.funding,
           },
         })
-          .then((res) => setEdgeReport(res.report ?? EMPTY_EDGE_REPORT))
-          .catch((e) =>
+          .then((res: { report: any }) => setEdgeReport(res.report ?? EMPTY_EDGE_REPORT))
+          .catch((e: { message: any }) =>
             setPersistError(e instanceof Error ? e.message : "Trade close save failed"),
           );
       },
@@ -598,38 +594,44 @@ function SwarmDashboard() {
 
     broker.setMinConfidence(learnedRef.current.minConfidence);
     broker.hydrate({
-      positions: boot.open.map((t) => ({
-        id: t.clientId,
-        symbol: t.symbol,
-        side: t.side,
-        entryPrice: t.entryPrice,
-        size: t.size,
-        notional: t.notional,
-        stopLoss: t.stopLoss,
-        takeProfit: t.takeProfit,
-        openedAt: t.openedAt,
-        confidence: t.confidence,
-        regime: t.regime,
-        agents: t.agents as Position["agents"],
-      })),
-      closed: boot.closed
-        .filter((t) => t.exitPrice !== null && t.closedAt !== null)
-        .map((t) => ({
+      positions: boot.open.map(
+        (t: StoredTrade) => ({
           id: t.clientId,
           symbol: t.symbol,
           side: t.side,
           entryPrice: t.entryPrice,
-          exitPrice: t.exitPrice as number,
           size: t.size,
-          pnl: t.pnl ?? 0,
-          pnlPct: t.pnlPct ?? 0,
-          reason: (t.reason as ClosedTrade["reason"]) ?? "MANUAL",
+          notional: t.notional,
+          stopLoss: t.stopLoss,
+          takeProfit: t.takeProfit,
           openedAt: t.openedAt,
-          closedAt: t.closedAt as number,
           confidence: t.confidence,
           regime: t.regime,
           agents: t.agents as Position["agents"],
-        })),
+        }),
+      ),
+      closed: boot.closed
+        .filter(
+          (t: StoredTrade) => t.exitPrice !== null && t.closedAt !== null,
+        )
+        .map(
+          (t: StoredTrade) => ({
+            id: t.clientId,
+            symbol: t.symbol,
+            side: t.side,
+            entryPrice: t.entryPrice,
+            exitPrice: t.exitPrice as number,
+            size: t.size,
+            pnl: t.pnl ?? 0,
+            pnlPct: t.pnlPct ?? 0,
+            reason: (t.reason as ClosedTrade["reason"]) ?? "MANUAL",
+            openedAt: t.openedAt,
+            closedAt: t.closedAt as number,
+            confidence: t.confidence,
+            regime: t.regime,
+            agents: t.agents as Position["agents"],
+          }),
+        ),
       realizedPnl: boot.account.realizedPnl,
       halted: boot.account.halted,
     });
@@ -657,7 +659,7 @@ function SwarmDashboard() {
       },
 
       onProposal: (p) => {
-        setProposals((prev) => [p, ...prev].slice(0, SIGNAL_BUFFER));
+        setProposals((prev: any) => [p, ...prev].slice(0, SIGNAL_BUFFER));
         const regime = regimeRef.current.get(p.symbol) ?? "unknown";
         const edge = learnedRef.current;
         const suppressed =
@@ -692,9 +694,7 @@ function SwarmDashboard() {
     // Pull Bybit's live funding rates so paper carry matches the real book.
     const loadFunding = async () => {
       try {
-        const res = await fetch(
-          "https://api.bybit.com/v5/market/tickers?category=linear",
-        );
+        const res = await fetch("https://api.bybit.com/v5/market/tickers?category=linear");
         const json = (await res.json()) as {
           result?: { list?: Array<{ symbol: string; fundingRate: string }> };
         };
@@ -735,7 +735,7 @@ function SwarmDashboard() {
       if (dt > 0) {
         const rate = delta / dt;
         setTickRate(rate);
-        setPeakTickRate((p) => (rate > p ? rate : p));
+        setPeakTickRate((p: number) => (rate > p ? rate : p));
       }
       lastTickCount = tickCounter.current;
       lastSample = now;
@@ -771,21 +771,17 @@ function SwarmDashboard() {
     };
   }, [symbols, boot, saveOpen, saveClose]);
 
-
   const equity = DEFAULT_PAPER_CONFIG.startingBalance + realized + unrealized;
-  const equityPct = ((equity - DEFAULT_PAPER_CONFIG.startingBalance) /
-    DEFAULT_PAPER_CONFIG.startingBalance) *
-    100;
+  const equityPct =
+    ((equity - DEFAULT_PAPER_CONFIG.startingBalance) / DEFAULT_PAPER_CONFIG.startingBalance) * 100;
 
-  const wins = closed.filter((t) => t.pnl > 0).length;
+  const wins = closed.filter((t: { pnl: number }) => t.pnl > 0).length;
   const winRate = closed.length ? (wins / closed.length) * 100 : 0;
 
   const filteredBoard = useMemo(() => {
     const q = query.trim().toUpperCase();
-    const rows = q ? board.filter((r) => r.symbol.includes(q)) : board;
-    return [...rows]
-      .sort((a, b) => Math.abs(b.change1m) - Math.abs(a.change1m))
-      .slice(0, 60);
+    const rows = q ? board.filter((r: { symbol: string | any[] }) => r.symbol.includes(q)) : board;
+    return [...rows].sort((a, b) => Math.abs(b.change1m) - Math.abs(a.change1m)).slice(0, 60);
   }, [board, query]);
 
   const closeAll = () => {
@@ -795,8 +791,10 @@ function SwarmDashboard() {
     brokerRef.current?.reset();
     setHalted(null);
     void resetAccount({ data: { wipeHistory: false } })
-      .then((res) => setEdgeReport(res.report ?? EMPTY_EDGE_REPORT))
-      .catch((e) => setPersistError(e instanceof Error ? e.message : "Reset failed"));
+      .then((res: { report: any }) => setEdgeReport(res.report ?? EMPTY_EDGE_REPORT))
+      .catch((e: { message: any }) =>
+        setPersistError(e instanceof Error ? e.message : "Reset failed"),
+      );
   };
   const signOut = async () => {
     await supabase.auth.signOut();
@@ -848,7 +846,7 @@ function SwarmDashboard() {
     return () => {
       cancelled = true;
       document.removeEventListener("visibilitychange", onVis);
-      void lock?.release().catch(() => {});
+      void lock?.release().catch(() => { });
     };
   }, []);
 
@@ -863,18 +861,29 @@ function SwarmDashboard() {
     ? Math.round((Date.now() - metrics.lastMessageAt) / 1000)
     : null;
 
-
   return (
-
     <main className="min-h-screen bg-background text-foreground">
-      <header className="border-b border-border">
-        <div className="mx-auto flex max-w-[1600px] flex-wrap items-center justify-between gap-4 px-6 py-4">
-          <div className="flex items-center gap-3">
-            <div className={`live-dot h-2.5 w-2.5 rounded-full ${liveMode ? "bg-accent" : "bg-bull"}`} />
+      <header className="border-b border-border bg-card/40 backdrop-blur-sm">
+        <div className="mx-auto flex max-w-[1600px] flex-wrap items-center justify-between gap-4 px-6 py-3.5">
+          <div className="flex items-center gap-3.5">
+            <div className="relative group flex-shrink-0">
+              <div className="absolute -inset-0.5 rounded-xl bg-gradient-to-r from-emerald-500/40 via-cyan-500/40 to-teal-500/40 blur-xs opacity-75 group-hover:opacity-100 transition duration-300" />
+              <img
+                src="/alpha-sword-logo.png"
+                alt="Alpha Swarm"
+                className="relative h-14 w-14 sm:h-16 sm:w-16 rounded-xl object-cover border border-primary/50 bg-black/70 p-1 shadow-lg"
+              />
+            </div>
+            <div
+              className={`live-dot h-2.5 w-2.5 rounded-full ${liveMode ? "bg-accent" : "bg-bull"}`}
+            />
             <div>
-              <h1 className="text-lg font-semibold tracking-tight">
-                Swarm Terminal
-              </h1>
+              <div className="flex items-center gap-2">
+                <h1 className="text-xl font-bold tracking-tight text-foreground">Swarm Terminal</h1>
+                <span className="rounded-full bg-primary/20 border border-primary/40 px-2 py-0.5 font-mono text-[10px] uppercase tracking-widest text-primary font-bold shadow-xs">
+                  Alpha Swarm
+                </span>
+              </div>
               <p className="text-xs text-muted-foreground">
                 {liveMode
                   ? `LIVE TESTNET · orders placed at conf ≥ ${LIVE_CONFIDENCE_THRESHOLD} · $${LIVE_NOTIONAL_USD} @ ${LIVE_LEVERAGE}× · SL ${(LIVE_SL_PCT * 100).toFixed(1)}% / TP ${(LIVE_TP_PCT * 100).toFixed(1)}%`
@@ -882,15 +891,15 @@ function SwarmDashboard() {
               </p>
               <p className="mt-0.5 font-mono text-[10px] text-muted-foreground">
                 up {formatDuration(uptimeMs)} · last tick{" "}
-                <span className={lastTickAgo !== null && lastTickAgo > 30 ? "text-bear" : "text-bull"}>
+                <span
+                  className={lastTickAgo !== null && lastTickAgo > 30 ? "text-bear" : "text-bull"}
+                >
                   {lastTickAgo === null ? "—" : `${lastTickAgo}s ago`}
                 </span>
                 {metrics && metrics.watchdogRestarts > 0
                   ? ` · ${metrics.watchdogRestarts} feed recoveries`
                   : ""}
-                {metrics && metrics.stalledFeeds > 0
-                  ? ` · ${metrics.stalledFeeds} stalled`
-                  : ""}
+                {metrics && metrics.stalledFeeds > 0 ? ` · ${metrics.stalledFeeds} stalled` : ""}
               </p>
             </div>
           </div>
@@ -916,11 +925,10 @@ function SwarmDashboard() {
                   key={p}
                   onClick={() => setLiveProvider(p)}
                   disabled={liveMode}
-                  className={`px-2 py-1.5 transition-colors ${
-                    liveProvider === p
+                  className={`px-2 py-1.5 transition-colors ${liveProvider === p
                       ? "bg-accent/20 text-accent"
                       : "bg-card text-muted-foreground hover:text-foreground"
-                  } ${liveMode ? "cursor-not-allowed opacity-60" : ""}`}
+                    } ${liveMode ? "cursor-not-allowed opacity-60" : ""}`}
                   title={liveMode ? "Turn off live mode to switch provider" : `Use ${p} testnet`}
                 >
                   {p === "bybit" ? "Bybit" : "Binance"}
@@ -943,13 +951,12 @@ function SwarmDashboard() {
                 }
               }}
               disabled={!liveMode && !liveArmed}
-              className={`rounded-md border px-3 py-1.5 text-xs font-semibold transition-colors ${
-                liveMode
+              className={`rounded-md border px-3 py-1.5 text-xs font-semibold transition-colors ${liveMode
                   ? "border-accent bg-accent/20 text-accent"
                   : liveArmed
                     ? "border-border bg-card text-muted-foreground hover:text-foreground"
                     : "cursor-not-allowed border-border bg-card text-muted-foreground opacity-50"
-              }`}
+                }`}
               title={
                 liveMode
                   ? "Disarm live trading"
@@ -969,6 +976,13 @@ function SwarmDashboard() {
                     : "○ Paper mode · live blocked"}
             </button>
 
+            <button
+              onClick={handleSignOut}
+              className="rounded-md border border-border bg-card px-2.5 py-1.5 text-xs text-muted-foreground hover:text-foreground hover:bg-muted transition"
+              title="Sign out / Switch account"
+            >
+              Sign out
+            </button>
 
             <Stat
               label="Equity"
@@ -997,7 +1011,9 @@ function SwarmDashboard() {
               label="Margin ratio"
               value={`${(margin.marginRatio * 100).toFixed(1)}%`}
               sub={`MM ${formatUsd(margin.maintenanceMargin)}`}
-              tone={margin.marginRatio >= 0.8 ? "bear" : margin.marginRatio >= 0.5 ? "neutral" : "bull"}
+              tone={
+                margin.marginRatio >= 0.8 ? "bear" : margin.marginRatio >= 0.5 ? "neutral" : "bull"
+              }
             />
             <Stat
               label="Liq risk"
@@ -1014,11 +1030,7 @@ function SwarmDashboard() {
             <Stat
               label="WS"
               value={`${status.connected}/${status.total}`}
-              tone={
-                status.connected === status.total && status.total > 0
-                  ? "bull"
-                  : "neutral"
-              }
+              tone={status.connected === status.total && status.total > 0 ? "bull" : "neutral"}
             />
             <Stat label="Ticks" value={ticks.toLocaleString()} />
           </div>
@@ -1071,15 +1083,13 @@ function SwarmDashboard() {
                 "system",
               ] as Tab[]
             ).map((t) => (
-
               <button
                 key={t}
                 onClick={() => setTab(t)}
-                className={`rounded-md px-3 py-1.5 text-xs font-medium capitalize transition-colors ${
-                  tab === t
+                className={`rounded-md px-3 py-1.5 text-xs font-medium capitalize transition-colors ${tab === t
                     ? "bg-primary text-primary-foreground"
                     : "text-muted-foreground hover:text-foreground"
-                }`}
+                  }`}
               >
                 {t}
                 {t === "signals" && ` (${proposals.length})`}
@@ -1116,16 +1126,10 @@ function SwarmDashboard() {
         <section className="rounded-lg border border-border bg-card">
           {tab === "signals" && <SignalsPanel proposals={proposals} />}
           {tab === "positions" && (
-            <PositionsPanel
-              positions={positions}
-              marks={marksRef.current}
-              margin={margin}
-            />
+            <PositionsPanel positions={positions} marks={marksRef.current} margin={margin} />
           )}
           {tab === "history" && <HistoryPanel closed={closed} />}
-          {tab === "board" && (
-            <BoardPanel rows={filteredBoard} query={query} setQuery={setQuery} />
-          )}
+          {tab === "board" && <BoardPanel rows={filteredBoard} query={query} setQuery={setQuery} />}
           {tab === "execution" && (
             <ExecutionPanel
               stats={execStats}
@@ -1146,7 +1150,6 @@ function SwarmDashboard() {
                 persistError={persistError}
                 closedTrades={closed}
               />
-
             </div>
           )}
           {tab === "system" && (
@@ -1187,30 +1190,24 @@ function SwarmDashboard() {
               tripped={liveTripped}
               onClose={handleCloseLive}
             />
-
           )}
         </section>
       </div>
 
-
       <footer className="mx-auto max-w-[1600px] px-6 pb-8">
         <p className="text-[11px] leading-relaxed text-muted-foreground">
-          Paper trading against live Bybit USDT perpetual trade streams. Position
-          sizing = (equity × {(DEFAULT_PAPER_CONFIG.riskPerTrade * 100).toFixed(1)}%
-          × confidence) / stop distance. SL/TP simulated against the live mark;
-          fills assumed at signal price. New entries pause automatically if
-          Costs modelled on Bybit USDT perpetuals: 0.055% taker fee on entry and
-          exit, plus funding settled every 8h (00:00 / 08:00 / 16:00 UTC) at the
-          live Bybit funding rate — longs pay when positive, shorts pay when
-          negative. Positions use isolated margin at{" "}
-          {DEFAULT_PAPER_CONFIG.leverage}x (capped by Bybit risk-limit tiers, which
-          raise the maintenance margin rate as notional grows); liquidation fires
-          when the mark crosses entry × (1 ∓ 1/leverage ± MMR ± taker fee) and
-          caps the loss at the position's initial margin. Session costs so far: {formatUsd(costs.fees)} fees ·{" "}
-          {formatUsd(costs.funding)} funding. New entries pause if
-          realized PnL drops by{" "}
-          {(DEFAULT_PAPER_CONFIG.maxDailyDrawdown * 100).toFixed(0)}%. No real
-          orders are placed.
+          Paper trading against live Bybit USDT perpetual trade streams. Position sizing = (equity ×{" "}
+          {(DEFAULT_PAPER_CONFIG.riskPerTrade * 100).toFixed(1)}% × confidence) / stop distance.
+          SL/TP simulated against the live mark; fills assumed at signal price. New entries pause
+          automatically if Costs modelled on Bybit USDT perpetuals: 0.055% taker fee on entry and
+          exit, plus funding settled every 8h (00:00 / 08:00 / 16:00 UTC) at the live Bybit funding
+          rate — longs pay when positive, shorts pay when negative. Positions use isolated margin at{" "}
+          {DEFAULT_PAPER_CONFIG.leverage}x (capped by Bybit risk-limit tiers, which raise the
+          maintenance margin rate as notional grows); liquidation fires when the mark crosses entry
+          × (1 ∓ 1/leverage ± MMR ± taker fee) and caps the loss at the position's initial margin.
+          Session costs so far: {formatUsd(costs.fees)} fees · {formatUsd(costs.funding)} funding.
+          New entries pause if realized PnL drops by{" "}
+          {(DEFAULT_PAPER_CONFIG.maxDailyDrawdown * 100).toFixed(0)}%. No real orders are placed.
         </p>
       </footer>
     </main>
@@ -1238,14 +1235,10 @@ function Stat({
           : "text-foreground";
   return (
     <div className="rounded-md border border-border bg-card px-3 py-1.5">
-      <div className="text-[10px] uppercase tracking-wide text-muted-foreground">
-        {label}
-      </div>
+      <div className="text-[10px] uppercase tracking-wide text-muted-foreground">{label}</div>
       <div className={`font-mono text-sm tabular ${toneClass}`}>
         {value}
-        {sub && (
-          <span className="ml-1.5 text-[10px] text-muted-foreground">{sub}</span>
-        )}
+        {sub && <span className="ml-1.5 text-[10px] text-muted-foreground">{sub}</span>}
       </div>
     </div>
   );
@@ -1282,7 +1275,7 @@ function SignalsPanel({ proposals }: { proposals: TradeProposal[] }) {
             {visible < proposals.length && (
               <button
                 type="button"
-                onClick={() => setVisible((v) => v + SIGNAL_PAGE)}
+                onClick={() => setVisible((v: number) => v + SIGNAL_PAGE)}
                 className="w-full px-3 py-2 text-[11px] font-mono uppercase tracking-wider text-muted-foreground hover:text-foreground hover:bg-muted/40 transition-colors"
               >
                 Load {Math.min(SIGNAL_PAGE, proposals.length - visible)} more ·{" "}
@@ -1355,11 +1348,8 @@ function PositionsPanel({
                     <td className="px-4 py-1.5 font-mono text-xs">{p.symbol}</td>
                     <td className="px-4 py-1.5">
                       <span
-                        className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold ${
-                          p.side === "BUY"
-                            ? "bg-bull/15 text-bull"
-                            : "bg-bear/15 text-bear"
-                        }`}
+                        className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold ${p.side === "BUY" ? "bg-bull/15 text-bull" : "bg-bear/15 text-bear"
+                          }`}
                       >
                         {p.side}
                       </span>
@@ -1437,7 +1427,7 @@ function HistoryPanel({ closed }: { closed: ClosedTrade[] }) {
                       ? "bg-bear/15 text-bear"
                       : t.reason === "LIQ"
                         ? "bg-bear/30 text-bear font-semibold"
-                      : "bg-muted text-muted-foreground";
+                        : "bg-muted text-muted-foreground";
                 return (
                   <tr key={t.id + t.closedAt} className="border-b border-border/50">
                     <td className="px-4 py-1.5 font-mono text-[11px] text-muted-foreground">
@@ -1446,11 +1436,8 @@ function HistoryPanel({ closed }: { closed: ClosedTrade[] }) {
                     <td className="px-4 py-1.5 font-mono text-xs">{t.symbol}</td>
                     <td className="px-4 py-1.5">
                       <span
-                        className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold ${
-                          t.side === "BUY"
-                            ? "bg-bull/15 text-bull"
-                            : "bg-bear/15 text-bear"
-                        }`}
+                        className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold ${t.side === "BUY" ? "bg-bull/15 text-bull" : "bg-bear/15 text-bear"
+                          }`}
                       >
                         {t.side}
                       </span>
@@ -1460,9 +1447,7 @@ function HistoryPanel({ closed }: { closed: ClosedTrade[] }) {
                       <span className="text-foreground">{formatPrice(t.exitPrice)}</span>
                     </td>
                     <td className="px-4 py-1.5">
-                      <span
-                        className={`rounded px-1.5 py-0.5 font-mono text-[10px] ${reasonTone}`}
-                      >
+                      <span className={`rounded px-1.5 py-0.5 font-mono text-[10px] ${reasonTone}`}>
                         {t.reason}
                       </span>
                     </td>
@@ -1498,13 +1483,11 @@ function BoardPanel({
       <div className="flex items-center justify-between gap-3 border-b border-border px-4 py-3">
         <div>
           <h2 className="text-sm font-semibold">Market Board</h2>
-          <p className="text-xs text-muted-foreground">
-            Top movers by |1m change|
-          </p>
+          <p className="text-xs text-muted-foreground">Top movers by |1m change|</p>
         </div>
         <input
           value={query}
-          onChange={(e) => setQuery(e.target.value)}
+          onChange={(e: { target: { value: string } }) => setQuery(e.target.value)}
           placeholder="Filter…"
           className="w-32 rounded-md border border-border bg-background px-2 py-1 font-mono text-xs outline-none focus:border-primary"
         />
@@ -1542,7 +1525,9 @@ function BoardPanel({
                     <td className="px-4 py-1.5 text-right font-mono text-xs tabular">
                       {formatPrice(row.lastPrice)}
                     </td>
-                    <td className={`px-4 py-1.5 text-right font-mono text-xs tabular ${changeClass}`}>
+                    <td
+                      className={`px-4 py-1.5 text-right font-mono text-xs tabular ${changeClass}`}
+                    >
                       {row.change1m >= 0 ? "+" : ""}
                       {row.change1m.toFixed(2)}%
                     </td>
@@ -1576,9 +1561,7 @@ function PanelHeader({
     <div className="flex items-center justify-between border-b border-border px-4 py-3">
       <div>
         <h2 className="text-sm font-semibold">{title}</h2>
-        {subtitle && (
-          <p className="text-xs text-muted-foreground">{subtitle}</p>
-        )}
+        {subtitle && <p className="text-xs text-muted-foreground">{subtitle}</p>}
       </div>
       {badge && (
         <span className="rounded-md bg-muted px-2 py-1 font-mono text-[10px] text-muted-foreground">
@@ -1597,20 +1580,15 @@ function SignalRow({ proposal }: { proposal: TradeProposal }) {
   return (
     <li className="flex items-start gap-3 px-4 py-3">
       <div
-        className={`mt-0.5 rounded px-2 py-0.5 font-mono text-[11px] font-semibold ${
-          isBuy ? "bg-bull/15 text-bull" : "bg-bear/15 text-bear"
-        }`}
+        className={`mt-0.5 rounded px-2 py-0.5 font-mono text-[11px] font-semibold ${isBuy ? "bg-bull/15 text-bull" : "bg-bear/15 text-bear"
+          }`}
       >
         {proposal.direction}
       </div>
       <div className="min-w-0 flex-1">
         <div className="flex items-baseline justify-between gap-2">
-          <div className="truncate font-mono text-sm font-semibold">
-            {proposal.symbol}
-          </div>
-          <div className="font-mono text-xs text-muted-foreground">
-            {formatTime(proposal.time)}
-          </div>
+          <div className="truncate font-mono text-sm font-semibold">{proposal.symbol}</div>
+          <div className="font-mono text-xs text-muted-foreground">{formatTime(proposal.time)}</div>
         </div>
         <div className="mt-0.5 flex items-baseline gap-3 text-xs text-muted-foreground">
           <span className="font-mono tabular">@ {formatPrice(proposal.price)}</span>
@@ -1626,11 +1604,8 @@ function SignalRow({ proposal }: { proposal: TradeProposal }) {
             {contribs.map(([name, sig]) => (
               <span
                 key={name}
-                className={`rounded border px-1.5 py-0.5 font-mono text-[10px] ${
-                  sig.direction === "BUY"
-                    ? "border-bull/40 text-bull"
-                    : "border-bear/40 text-bear"
-                }`}
+                className={`rounded border px-1.5 py-0.5 font-mono text-[10px] ${sig.direction === "BUY" ? "border-bull/40 text-bull" : "border-bear/40 text-bear"
+                  }`}
               >
                 {name} {sig.direction === "BUY" ? "▲" : "▼"} {sig.confidence.toFixed(2)}
               </span>
@@ -1700,23 +1675,16 @@ function LiveErrorPanel({ status }: { status: LiveStatus }) {
           API secret: <span className="font-mono">{secretState}</span>
         </span>
         <span
-          className={`rounded border px-2 py-1 ${
-            pairVerdict === "saved"
-              ? "border-bull/40 text-bull"
-              : "border-bear/40 text-bear"
-          }`}
+          className={`rounded border px-2 py-1 ${pairVerdict === "saved" ? "border-bull/40 text-bull" : "border-bear/40 text-bear"
+            }`}
         >
           Pair: <span className="font-mono">{pairVerdict}</span>
         </span>
       </div>
-      {status.hint && (
-        <p className="text-[11px] text-muted-foreground">{status.hint}</p>
-      )}
+      {status.hint && <p className="text-[11px] text-muted-foreground">{status.hint}</p>}
     </div>
   );
 }
-
-
 
 function LivePanel({
   enabled,
@@ -1760,8 +1728,8 @@ function LivePanel({
         {!enabled ? (
           <>
             <p className="text-xs text-muted-foreground">
-              Live mode is off. The venue is probed continuously below; the header
-              button only arms once {providerLabel} answers a real account query.
+              Live mode is off. The venue is probed continuously below; the header button only arms
+              once {providerLabel} answers a real account query.
             </p>
             {status && (status.error || status.message) && (
               <div className="mt-3">
@@ -1773,9 +1741,6 @@ function LivePanel({
           <p className="text-xs text-muted-foreground">Loading account…</p>
         ) : status.error || status.message ? (
           <LiveErrorPanel status={status} />
-
-
-
         ) : (
           <div className="flex flex-wrap gap-2">
             <Stat label="Wallet" value={formatUsd(status.wallet ?? 0)} />
@@ -1819,18 +1784,13 @@ function LivePanel({
                     <td className="px-4 py-1.5 font-mono text-xs">{p.symbol}</td>
                     <td className="px-4 py-1.5">
                       <span
-                        className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold ${
-                          p.side === "BUY"
-                            ? "bg-bull/15 text-bull"
-                            : "bg-bear/15 text-bear"
-                        }`}
+                        className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold ${p.side === "BUY" ? "bg-bull/15 text-bull" : "bg-bear/15 text-bear"
+                          }`}
                       >
                         {p.side}
                       </span>
                     </td>
-                    <td className="px-4 py-1.5 text-right font-mono text-xs tabular">
-                      {p.size}
-                    </td>
+                    <td className="px-4 py-1.5 text-right font-mono text-xs tabular">{p.size}</td>
                     <td className="px-4 py-1.5 text-right font-mono text-xs tabular">
                       {formatPrice(p.entryPrice)}
                     </td>
@@ -1863,9 +1823,7 @@ function LivePanel({
       </div>
 
       <div>
-        <div className="px-4 py-2 text-xs font-semibold text-muted-foreground">
-          Order activity
-        </div>
+        <div className="px-4 py-2 text-xs font-semibold text-muted-foreground">Order activity</div>
         {log.length === 0 ? (
           <EmptyState label="No live orders yet." />
         ) : (
@@ -1876,11 +1834,8 @@ function LivePanel({
                   {formatTime(e.time)}
                 </span>
                 <span
-                  className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold ${
-                    e.ok
-                      ? "bg-bull/15 text-bull"
-                      : "bg-bear/15 text-bear"
-                  }`}
+                  className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold ${e.ok ? "bg-bull/15 text-bull" : "bg-bear/15 text-bear"
+                    }`}
                 >
                   {e.ok ? "OK" : "ERR"}
                 </span>
@@ -1893,11 +1848,8 @@ function LivePanel({
 
                 {e.side && (
                   <span
-                    className={`rounded px-1.5 py-0.5 font-mono text-[10px] ${
-                      e.side === "BUY"
-                        ? "bg-bull/15 text-bull"
-                        : "bg-bear/15 text-bear"
-                    }`}
+                    className={`rounded px-1.5 py-0.5 font-mono text-[10px] ${e.side === "BUY" ? "bg-bull/15 text-bull" : "bg-bear/15 text-bear"
+                      }`}
                   >
                     {e.side}
                   </span>
@@ -1913,4 +1865,3 @@ function LivePanel({
     </>
   );
 }
-

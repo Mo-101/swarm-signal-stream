@@ -125,7 +125,7 @@ export const ingestSignals = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((input: { signals: SignalInput[] }) => input)
   .handler(async ({ data, context }) => {
-    const rows = data.signals.slice(0, 200).map((s) => ({
+    const rows = data.signals.slice(0, 1000).map((s) => ({
       user_id: context.userId,
       symbol: s.symbol,
       side: s.side,

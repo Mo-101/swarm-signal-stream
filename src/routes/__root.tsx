@@ -14,19 +14,36 @@ import { reportLovableError } from "../lib/lovable-error-reporting";
 
 function NotFoundComponent() {
   return (
-    <div className="flex min-h-screen items-center justify-center bg-background px-4">
-      <div className="max-w-md text-center">
-        <h1 className="text-7xl font-bold text-foreground">404</h1>
-        <h2 className="mt-4 text-xl font-semibold text-foreground">Page not found</h2>
-        <p className="mt-2 text-sm text-muted-foreground">
-          The page you're looking for doesn't exist or has been moved.
+    <div className="flex min-h-screen items-center justify-center bg-background px-4 py-12">
+      <div className="max-w-md text-center border border-border bg-card/80 p-8 rounded-xl shadow-xl backdrop-blur-sm">
+        <img
+          src="/alpha-sword-logo.png"
+          alt="Alpha Swarm"
+          className="mx-auto h-28 w-28 rounded-2xl object-cover border border-primary/30 p-1.5 bg-black/40 shadow-xl"
+        />
+        <h1 className="mt-4 text-6xl font-black tracking-tight text-foreground">404</h1>
+        <h2 className="mt-2 text-lg font-semibold text-foreground">Route Not Found</h2>
+        <p className="mt-2 text-xs text-muted-foreground leading-relaxed">
+          The requested page or endpoint doesn&apos;t exist. Jump back into the Swarm Terminal or head to the home dashboard.
         </p>
-        <div className="mt-6">
+        <div className="mt-6 flex flex-wrap justify-center gap-3">
+          <Link
+            to="/dashboard"
+            className="inline-flex items-center justify-center rounded-md bg-primary px-4 py-2 text-xs font-semibold text-primary-foreground transition hover:opacity-90 shadow"
+          >
+            Open Terminal
+          </Link>
+          <Link
+            to="/auth"
+            className="inline-flex items-center justify-center rounded-md border border-border bg-secondary px-4 py-2 text-xs font-medium text-secondary-foreground transition hover:bg-muted"
+          >
+            Sign In / Demo
+          </Link>
           <Link
             to="/"
-            className="inline-flex items-center justify-center rounded-md bg-primary px-4 py-2 text-sm font-medium text-primary-foreground transition-colors hover:bg-primary/90"
+            className="inline-flex items-center justify-center rounded-md border border-border px-4 py-2 text-xs font-medium text-foreground transition hover:bg-muted"
           >
-            Go home
+            Home
           </Link>
         </div>
       </div>
@@ -77,11 +94,11 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
     meta: [
       { charSet: "utf-8" },
       { name: "viewport", content: "width=device-width, initial-scale=1" },
-      { title: "Swarm Terminal" },
+      { title: "Alpha Swarm — Live USDT-M Perp Terminal" },
       {
         name: "description",
         content:
-          "Live AI trading swarm streaming every Binance USDT-M perpetual future.",
+          "Autonomous AI trading swarm streaming every Bybit USDT-M perpetual future with paper execution and real-time edge calibration.",
       },
     ],
     links: [
@@ -89,7 +106,9 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
         rel: "stylesheet",
         href: appCss,
       },
-      { rel: "icon", href: "/favicon.ico", type: "image/x-icon" },
+      { rel: "icon", href: "/alpha-sword-logo.png", type: "image/png" },
+      { rel: "shortcut icon", href: "/alpha-sword-logo.png", type: "image/png" },
+      { rel: "apple-touch-icon", href: "/alpha-sword-logo.png" },
     ],
   }),
   shellComponent: RootShell,
