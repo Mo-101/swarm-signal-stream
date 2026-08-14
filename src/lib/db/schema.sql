@@ -83,6 +83,50 @@ CREATE TABLE IF NOT EXISTS runner_state (
   last_seen_at timestamptz NOT NULL DEFAULT now()
 );
 
+-- Live (real-money) trading — kept in its own tables, deliberately separate
+-- from paper_accounts/paper_trades: a query bug here can never leak a real
+-- position into the paper-simulation view or vice versa. provider is
+-- 'binance' | 'bybit' — one account per (user, provider), since each venue
+-- has its own wallet/balance.
+CREATE TABLE IF NOT EXISTS live_accounts (
+  user_id uuid NOT NULL,
+  provider text NOT NULL,
+  realized_pnl numeric NOT NULL DEFAULT 0,
+  halted boolean NOT NULL DEFAULT false,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, provider)
+);
+
+CREATE TABLE IF NOT EXISTS live_trades (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id uuid NOT NULL,
+  provider text NOT NULL,
+  client_id text NOT NULL,
+  symbol text NOT NULL,
+  side text NOT NULL,
+  entry_price numeric NOT NULL,
+  exit_price numeric,
+  size numeric NOT NULL,
+  notional numeric NOT NULL,
+  stop_loss numeric,
+  take_profit numeric,
+  leverage numeric,
+  status text NOT NULL DEFAULT 'open',
+  pnl numeric,
+  pnl_pct numeric,
+  reason text,
+  entry_order_id text,
+  sl_order_id text,
+  tp_order_id text,
+  exit_order_id text,
+  opened_at timestamptz NOT NULL DEFAULT now(),
+  closed_at timestamptz,
+  UNIQUE (user_id, provider, client_id)
+);
+CREATE INDEX IF NOT EXISTS live_trades_user_status_idx
+  ON live_trades (user_id, provider, status, opened_at DESC);
+
 CREATE OR REPLACE FUNCTION edge_report(p_user_id uuid)
 RETURNS jsonb
 LANGUAGE sql

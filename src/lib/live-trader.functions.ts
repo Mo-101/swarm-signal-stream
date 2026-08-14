@@ -3,6 +3,7 @@
 // Uses testnet.binancefuture.com — never touches real funds.
 
 import { createServerFn } from "@tanstack/react-start";
+import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 
 const BASE = "https://testnet.binancefuture.com";
 
@@ -218,7 +219,9 @@ function roundStep(value: number, step: number, precision: number): string {
 
 // ─── Server functions ────────────────────────────────────────────────────
 
-export const getLiveStatus = createServerFn({ method: "GET" }).handler(async () => {
+export const getLiveStatus = createServerFn({ method: "GET" })
+  .middleware([requireSupabaseAuth])
+  .handler(async () => {
   const apiKey = normalizeSecret(
     process.env.BINANCE_TESTNET_API_KEY,
     "BINANCE_TESTNET_API_KEY",
@@ -290,6 +293,7 @@ interface LiveOrderInput {
 }
 
 export const placeLiveTrade = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
   .inputValidator((raw: LiveOrderInput) => {
     if (!raw || typeof raw !== "object") throw new Error("Invalid payload");
     const { symbol, side, notionalUsd, slPct, tpPct, refPrice } = raw;
@@ -308,7 +312,7 @@ export const placeLiveTrade = createServerFn({ method: "POST" })
       leverage: Math.max(1, Math.min(Math.floor(raw.leverage ?? 5), 20)),
     } as LiveOrderInput;
   })
-  .handler(async ({ data }) => {
+  .handler(async ({ data, context }) => {
     const filter = await getFilter(data.symbol);
     const qtyRaw = data.notionalUsd / data.refPrice;
     const quantity = roundStep(qtyRaw, filter.stepSize, filter.quantityPrecision);
@@ -376,13 +380,32 @@ export const placeLiveTrade = createServerFn({ method: "POST" })
         workingType: "MARK_PRICE",
         timeInForce: "GTE_GTC",
       });
+
+      const entryPrice = parseFloat(entry.avgPrice ?? entry.price ?? "0") || data.refPrice;
+      const { persistLiveOpenTrade } = await import("@/lib/db/live-store.server");
+      const { clientId } = await persistLiveOpenTrade(context.supabase, context.userId, {
+        provider: "binance",
+        symbol: data.symbol,
+        side: data.side,
+        entryPrice,
+        size: parseFloat(quantity),
+        notional: data.notionalUsd,
+        stopLoss: parseFloat(slStr),
+        takeProfit: parseFloat(tpStr),
+        leverage: data.leverage,
+        entryOrderId: String(entry.orderId),
+        slOrderId: String(sl.orderId),
+        tpOrderId: String(tp.orderId),
+      });
+
       return {
         ok: true as const,
+        clientId,
         symbol: data.symbol,
         side: data.side,
         quantity,
         entryOrderId: entry.orderId,
-        entryPrice: parseFloat(entry.avgPrice ?? entry.price ?? "0") || data.refPrice,
+        entryPrice,
         slOrderId: sl.orderId,
         tpOrderId: tp.orderId,
         slPrice: slStr,
@@ -410,7 +433,9 @@ export const placeLiveTrade = createServerFn({ method: "POST" })
     }
   });
 
-export const getLivePositions = createServerFn({ method: "GET" }).handler(async () => {
+export const getLivePositions = createServerFn({ method: "GET" })
+  .middleware([requireSupabaseAuth])
+  .handler(async () => {
   interface PositionRisk {
     symbol: string;
     positionAmt: string;
@@ -447,15 +472,19 @@ export const getLivePositions = createServerFn({ method: "GET" }).handler(async 
 });
 
 export const closeLivePosition = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
   .inputValidator((raw: { symbol: string }) => {
     if (!raw?.symbol) throw new Error("symbol required");
     return { symbol: raw.symbol.toUpperCase() };
   })
-  .handler(async ({ data }) => {
+  .handler(async ({ data, context }) => {
     // Look up current position size.
     interface PositionRisk {
       symbol: string;
       positionAmt: string;
+      entryPrice: string;
+      markPrice: string;
+      unRealizedProfit: string;
     }
     const rows = await signedRequest<PositionRisk[]>("GET", "/fapi/v2/positionRisk", {
       symbol: data.symbol,
@@ -475,7 +504,7 @@ export const closeLivePosition = createServerFn({ method: "POST" })
       filter.quantityPrecision,
     );
     const side = amt > 0 ? "SELL" : "BUY";
-    await signedRequest("POST", "/fapi/v1/order", {
+    const exitOrder = await signedRequest<{ orderId: number }>("POST", "/fapi/v1/order", {
       symbol: data.symbol,
       side,
       type: "MARKET",
@@ -488,5 +517,21 @@ export const closeLivePosition = createServerFn({ method: "POST" })
     } catch {
       /* ignore */
     }
+
+    const entryPrice = parseFloat(row.entryPrice);
+    const exitPrice = parseFloat(row.markPrice);
+    const pnl = parseFloat(row.unRealizedProfit);
+    const notional = entryPrice * Math.abs(amt);
+    const { persistLiveCloseTrade } = await import("@/lib/db/live-store.server");
+    await persistLiveCloseTrade(context.supabase, context.userId, {
+      provider: "binance",
+      symbol: data.symbol,
+      exitPrice,
+      pnl,
+      pnlPct: notional ? (pnl / notional) * 100 : 0,
+      reason: "MANUAL",
+      exitOrderId: String(exitOrder.orderId),
+    });
+
     return { ok: true as const, closed: true, symbol: data.symbol };
   });

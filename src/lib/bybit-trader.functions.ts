@@ -3,6 +3,7 @@
 // Venue is testnet by default; set BYBIT_ENV=mainnet to trade the real book.
 
 import { createServerFn } from "@tanstack/react-start";
+import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
 
 const TESTNET_BASE = "https://api-testnet.bybit.com";
 const MAINNET_BASE = "https://api.bybit.com";
@@ -225,7 +226,9 @@ function roundStep(value: number, step: number, precision: number): string {
 }
 
 // ─── Server functions ────────────────────────────────────────────────────
-export const getBybitStatus = createServerFn({ method: "GET" }).handler(async () => {
+export const getBybitStatus = createServerFn({ method: "GET" })
+  .middleware([requireSupabaseAuth])
+  .handler(async () => {
   const { apiKey, apiSecret } = readCreds();
 
   const diagnostics = {
@@ -359,6 +362,7 @@ interface LiveOrderInput {
 }
 
 export const placeBybitTrade = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
   .inputValidator((raw: LiveOrderInput) => {
     if (!raw || typeof raw !== "object") throw new Error("Invalid payload");
     const { symbol, side, notionalUsd, slPct, tpPct, refPrice } = raw;
@@ -377,7 +381,7 @@ export const placeBybitTrade = createServerFn({ method: "POST" })
       leverage: Math.max(1, Math.min(Math.floor(raw.leverage ?? 5), 20)),
     } as LiveOrderInput;
   })
-  .handler(async ({ data }) => {
+  .handler(async ({ data, context }) => {
     const filter = await getFilter(data.symbol);
     const qtyRaw = data.notionalUsd / data.refPrice;
     const quantity = roundStep(qtyRaw, filter.qtyStep, filter.quantityPrecision);
@@ -432,8 +436,25 @@ export const placeBybitTrade = createServerFn({ method: "POST" })
       positionIdx: 0,
     });
 
+    const { persistLiveOpenTrade } = await import("@/lib/db/live-store.server");
+    const { clientId } = await persistLiveOpenTrade(context.supabase, context.userId, {
+      provider: "bybit",
+      symbol: data.symbol,
+      side: data.side,
+      entryPrice: data.refPrice,
+      size: parseFloat(quantity),
+      notional: data.notionalUsd,
+      stopLoss: parseFloat(slStr),
+      takeProfit: parseFloat(tpStr),
+      leverage: data.leverage,
+      entryOrderId: entry.orderId,
+      slOrderId: entry.orderId,
+      tpOrderId: entry.orderId,
+    });
+
     return {
       ok: true as const,
+      clientId,
       symbol: data.symbol,
       side: data.side,
       quantity,
@@ -447,7 +468,9 @@ export const placeBybitTrade = createServerFn({ method: "POST" })
     };
   });
 
-export const getBybitPositions = createServerFn({ method: "GET" }).handler(async () => {
+export const getBybitPositions = createServerFn({ method: "GET" })
+  .middleware([requireSupabaseAuth])
+  .handler(async () => {
   interface PositionsResp {
     list: Array<{
       symbol: string;
@@ -487,13 +510,21 @@ export const getBybitPositions = createServerFn({ method: "GET" }).handler(async
 });
 
 export const closeBybitPosition = createServerFn({ method: "POST" })
+  .middleware([requireSupabaseAuth])
   .inputValidator((raw: { symbol: string }) => {
     if (!raw?.symbol) throw new Error("symbol required");
     return { symbol: raw.symbol.toUpperCase() };
   })
-  .handler(async ({ data }) => {
+  .handler(async ({ data, context }) => {
     interface PositionsResp {
-      list: Array<{ symbol: string; side: "Buy" | "Sell" | ""; size: string }>;
+      list: Array<{
+        symbol: string;
+        side: "Buy" | "Sell" | "";
+        size: string;
+        avgPrice: string;
+        markPrice: string;
+        unrealisedPnl: string;
+      }>;
     }
     const r = await signedRequest<PositionsResp>("GET", "/v5/position/list", {
       category: "linear",
@@ -505,7 +536,7 @@ export const closeBybitPosition = createServerFn({ method: "POST" })
     if (size === 0) return { ok: true as const, closed: false, note: "No open position." };
     const filter = await getFilter(data.symbol);
     const quantity = roundStep(size, filter.qtyStep, filter.quantityPrecision);
-    await signedRequest("POST", "/v5/order/create", {
+    const exitOrder = await signedRequest<{ orderId: string }>("POST", "/v5/order/create", {
       category: "linear",
       symbol: data.symbol,
       side: row.side === "Buy" ? "Sell" : "Buy",
@@ -514,5 +545,21 @@ export const closeBybitPosition = createServerFn({ method: "POST" })
       reduceOnly: true,
       positionIdx: 0,
     });
+
+    const entryPrice = parseFloat(row.avgPrice);
+    const exitPrice = parseFloat(row.markPrice);
+    const pnl = parseFloat(row.unrealisedPnl);
+    const notional = entryPrice * size;
+    const { persistLiveCloseTrade } = await import("@/lib/db/live-store.server");
+    await persistLiveCloseTrade(context.supabase, context.userId, {
+      provider: "bybit",
+      symbol: data.symbol,
+      exitPrice,
+      pnl,
+      pnlPct: notional ? (pnl / notional) * 100 : 0,
+      reason: "MANUAL",
+      exitOrderId: exitOrder.orderId,
+    });
+
     return { ok: true as const, closed: true, symbol: data.symbol };
   });
