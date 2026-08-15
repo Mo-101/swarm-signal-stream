@@ -158,36 +158,6 @@ export type Database = {
         }
         Relationships: []
       }
-      runner_state: {
-        Row: {
-          closed_trades: number
-          equity: number
-          last_seen_at: string
-          started_at: string
-          status: string
-          ticks_per_sec: number
-          user_id: string
-        }
-        Insert: {
-          closed_trades?: number
-          equity?: number
-          last_seen_at?: string
-          started_at?: string
-          status?: string
-          ticks_per_sec?: number
-          user_id: string
-        }
-        Update: {
-          closed_trades?: number
-          equity?: number
-          last_seen_at?: string
-          started_at?: string
-          status?: string
-          ticks_per_sec?: number
-          user_id?: string
-        }
-        Relationships: []
-      }
       signals: {
         Row: {
           agents: Json
