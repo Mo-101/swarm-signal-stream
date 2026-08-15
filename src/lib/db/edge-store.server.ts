@@ -8,7 +8,7 @@
 // as integrations/supabase/client.server.ts. The runner imports it directly
 // since it's a plain Node process with no client bundle to worry about.
 import type { SupabaseClient } from "@supabase/supabase-js";
-import { getNeonSql } from "./neon";
+import { getNeonSql, getNeonSqlOrNoop, neonEnabled } from "./neon";
 import { EMPTY_EDGE_REPORT, type EdgeReport } from "@/lib/edge-model";
 import type {
   StoredTrade,
@@ -52,6 +52,7 @@ export async function loadBootState(
   supabase: SupabaseClient,
   userId: string,
 ): Promise<{ boot: EngineBootState; report: EdgeReport; signalCount: number }> {
+  if (!neonEnabled()) return loadBootStateFromSupabase(supabase, userId);
   try {
     const sql = getNeonSql();
     let account = (
@@ -148,7 +149,7 @@ export async function ingestSignals(
   const rows = signals.slice(0, 1000);
   if (rows.length === 0) return { inserted: 0 };
 
-  const sql = getNeonSql();
+  const sql = getNeonSqlOrNoop();
   await sql`
     INSERT INTO signals (user_id, symbol, side, price, confidence, conf_bucket, regime, hour_utc, agents, executed)
     SELECT * FROM UNNEST(
@@ -164,7 +165,7 @@ export async function ingestSignals(
       ${rows.map((s) => s.executed)}::boolean[]
     )`;
 
-  void supabase
+  await supabase
     .from("signals")
     .insert(
       rows.map((s) => ({
@@ -194,7 +195,7 @@ export async function persistOpenTrade(
   userId: string,
   data: OpenTradeInput,
 ): Promise<{ ok: true }> {
-  const sql = getNeonSql();
+  const sql = getNeonSqlOrNoop();
   await sql`
     INSERT INTO paper_trades (
       user_id, client_id, symbol, side, entry_price, size, notional, stop_loss, take_profit,
@@ -212,7 +213,7 @@ export async function persistOpenTrade(
       entry_price = EXCLUDED.entry_price, size = EXCLUDED.size, notional = EXCLUDED.notional,
       stop_loss = EXCLUDED.stop_loss, take_profit = EXCLUDED.take_profit, status = 'open'`;
 
-  void supabase
+  await supabase
     .from("paper_trades")
     .upsert(
       {
@@ -256,7 +257,7 @@ export async function persistCloseTrade(
   userId: string,
   data: CloseTradeInput,
 ): Promise<{ report: EdgeReport }> {
-  const sql = getNeonSql();
+  const sql = getNeonSqlOrNoop();
   await sql`
     UPDATE paper_trades SET
       exit_price = ${data.exitPrice}, pnl = ${data.pnl}, pnl_pct = ${data.pnlPct},
@@ -275,7 +276,7 @@ export async function persistCloseTrade(
   const reportRows = await sql`SELECT edge_report(${userId}) AS report`;
   const report = (reportRows[0]?.report as EdgeReport | undefined) ?? EMPTY_EDGE_REPORT;
 
-  void (async () => {
+  await (async () => {
     const { error: updateErr } = await supabase
       .from("paper_trades")
       .update({
@@ -319,7 +320,7 @@ export async function resetPaperAccount(
   userId: string,
   wipeHistory: boolean,
 ): Promise<{ report: EdgeReport }> {
-  const sql = getNeonSql();
+  const sql = getNeonSqlOrNoop();
   if (wipeHistory) {
     await sql`DELETE FROM paper_trades WHERE user_id = ${userId}`;
     await sql`DELETE FROM signals WHERE user_id = ${userId}`;
@@ -333,7 +334,7 @@ export async function resetPaperAccount(
   const reportRows = await sql`SELECT edge_report(${userId}) AS report`;
   const report = (reportRows[0]?.report as EdgeReport | undefined) ?? EMPTY_EDGE_REPORT;
 
-  void (async () => {
+  await (async () => {
     if (wipeHistory) {
       await supabase.from("paper_trades").delete().eq("user_id", userId);
       await supabase.from("signals").delete().eq("user_id", userId);
@@ -365,7 +366,7 @@ export async function upsertHeartbeat(
   startedAt: Date,
   fields: HeartbeatFields,
 ): Promise<void> {
-  const sql = getNeonSql();
+  const sql = getNeonSqlOrNoop();
   await sql`
     INSERT INTO runner_state (user_id, status, equity, closed_trades, ticks_per_sec, started_at, last_seen_at)
     VALUES (${userId}, ${fields.status}, ${fields.equity}, ${fields.closedTrades}, ${fields.ticksPerSec}, ${startedAt.toISOString()}, now())
@@ -373,7 +374,7 @@ export async function upsertHeartbeat(
       status = EXCLUDED.status, equity = EXCLUDED.equity, closed_trades = EXCLUDED.closed_trades,
       ticks_per_sec = EXCLUDED.ticks_per_sec, last_seen_at = now()`;
 
-  void supabase
+  await supabase
     .from("runner_state")
     .upsert(
       {

@@ -14,3 +14,20 @@ export function getNeonSql(): NeonQueryFunction<false, false> {
   }
   return _sql;
 }
+
+/** True when DATABASE_URL is configured. */
+export function neonEnabled(): boolean {
+  return Boolean(process.env.DATABASE_URL);
+}
+
+/**
+ * Neon client when configured, otherwise a no-op tagged template that
+ * resolves to an empty result set. Lets the store run Supabase-only
+ * (Lovable Cloud) without every write throwing.
+ */
+export function getNeonSqlOrNoop(): NeonQueryFunction<false, false> {
+  if (!neonEnabled()) {
+    return (async () => [] as unknown[]) as unknown as NeonQueryFunction<false, false>;
+  }
+  return getNeonSql();
+}
