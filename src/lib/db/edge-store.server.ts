@@ -46,6 +46,63 @@ function logMirrorError(op: string, e: unknown) {
   console.error(`[edge-store] Supabase mirror ${op} failed:`, e instanceof Error ? e.message : e);
 }
 
+// ── One-time reconciliation ─────────────────────────────────────────────
+// Dual-write only covers trades made *after* Neon was wired up — anything
+// that existed only in Supabase before that point never got copied over, so
+// a Neon read would silently show an incomplete history (and an
+// undercounted edge_report) for any account with pre-migration trades. This
+// closes that gap using the caller's own already-authenticated Supabase
+// session — no service-role key needed. Idempotent (ON CONFLICT DO NOTHING),
+// and the count check makes every call after the first one a single cheap
+// query instead of a full re-copy.
+async function reconcileFromSupabaseIfBehind(supabase: SupabaseClient, userId: string) {
+  const sql = getNeonSql();
+  const neonCountRows = await sql`SELECT count(*)::int AS n FROM paper_trades WHERE user_id = ${userId}`;
+  const neonCount = (neonCountRows[0]?.n as number | undefined) ?? 0;
+  const { count: supabaseCount } = await supabase
+    .from("paper_trades")
+    .select("id", { count: "exact", head: true })
+    .eq("user_id", userId);
+  if ((supabaseCount ?? 0) <= neonCount) return;
+
+  console.log(
+    `[edge-store] Neon behind for user ${userId} (${neonCount} < ${supabaseCount}) — backfilling from Supabase`,
+  );
+  const { data: rows } = await supabase.from("paper_trades").select("*").eq("user_id", userId);
+  for (const r of rows ?? []) {
+    await sql`
+      INSERT INTO paper_trades (
+        user_id, client_id, symbol, side, entry_price, exit_price, size, notional,
+        stop_loss, take_profit, confidence, conf_bucket, agents, regime, hour_utc, status,
+        pnl, pnl_pct, reason, opened_at, closed_at,
+        signal_price, entry_slip_bps, exit_slip_bps, trigger_price, spread_entry_bps, spread_exit_bps,
+        latency_ms, slip_cost_usd, gross_pnl, fees, funding, leverage, liq_price, book_priced
+      ) VALUES (
+        ${userId}, ${r.client_id}, ${r.symbol}, ${r.side}, ${r.entry_price}, ${r.exit_price}, ${r.size}, ${r.notional},
+        ${r.stop_loss}, ${r.take_profit}, ${r.confidence}, ${r.conf_bucket}, ${JSON.stringify(r.agents ?? {})}::jsonb,
+        ${r.regime}, ${r.hour_utc}, ${r.status},
+        ${r.pnl}, ${r.pnl_pct}, ${r.reason}, ${r.opened_at}, ${r.closed_at},
+        ${r.signal_price}, ${r.entry_slip_bps}, ${r.exit_slip_bps}, ${r.trigger_price}, ${r.spread_entry_bps}, ${r.spread_exit_bps},
+        ${r.latency_ms}, ${r.slip_cost_usd}, ${r.gross_pnl}, ${r.fees}, ${r.funding}, ${r.leverage}, ${r.liq_price}, ${r.book_priced}
+      )
+      ON CONFLICT (user_id, client_id) DO NOTHING`;
+  }
+
+  const { data: acct } = await supabase
+    .from("paper_accounts")
+    .select("*")
+    .eq("user_id", userId)
+    .maybeSingle();
+  if (acct) {
+    await sql`
+      INSERT INTO paper_accounts (user_id, starting_balance, realized_pnl, halted)
+      VALUES (${userId}, ${acct.starting_balance}, ${acct.realized_pnl}, ${acct.halted})
+      ON CONFLICT (user_id) DO UPDATE SET
+        realized_pnl = EXCLUDED.realized_pnl, halted = EXCLUDED.halted`;
+  }
+  console.log(`[edge-store] backfill complete for user ${userId}: ${rows?.length ?? 0} trades copied`);
+}
+
 // ── Boot state (read) ───────────────────────────────────────────────────
 
 export async function loadBootState(
@@ -54,6 +111,7 @@ export async function loadBootState(
 ): Promise<{ boot: EngineBootState; report: EdgeReport; signalCount: number }> {
   if (!neonEnabled()) return loadBootStateFromSupabase(supabase, userId);
   try {
+    await reconcileFromSupabaseIfBehind(supabase, userId);
     const sql = getNeonSql();
     let account = (
       await sql`SELECT * FROM paper_accounts WHERE user_id = ${userId}`
