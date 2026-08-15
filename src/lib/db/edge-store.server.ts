@@ -274,7 +274,10 @@ export async function persistCloseTrade(
       realized_pnl = EXCLUDED.realized_pnl, halted = EXCLUDED.halted, updated_at = now()`;
 
   const reportRows = await sql`SELECT edge_report(${userId}) AS report`;
-  const report = (reportRows[0]?.report as EdgeReport | undefined) ?? EMPTY_EDGE_REPORT;
+  const report =
+    (reportRows[0]?.report as EdgeReport | undefined) ??
+    ((await supabase.rpc("edge_report")).data as EdgeReport | null) ??
+    EMPTY_EDGE_REPORT;
 
   await (async () => {
     const { error: updateErr } = await supabase
@@ -332,7 +335,10 @@ export async function resetPaperAccount(
     VALUES (${userId}, 0, false, now())
     ON CONFLICT (user_id) DO UPDATE SET realized_pnl = 0, halted = false, updated_at = now()`;
   const reportRows = await sql`SELECT edge_report(${userId}) AS report`;
-  const report = (reportRows[0]?.report as EdgeReport | undefined) ?? EMPTY_EDGE_REPORT;
+  const report =
+    (reportRows[0]?.report as EdgeReport | undefined) ??
+    ((await supabase.rpc("edge_report")).data as EdgeReport | null) ??
+    EMPTY_EDGE_REPORT;
 
   await (async () => {
     if (wipeHistory) {
