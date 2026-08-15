@@ -190,7 +190,7 @@ const EMPTY_EXEC_STATS: ExecutionStats = {
 };
 
 /** Max signals retained in memory for review. */
-const SIGNAL_BUFFER = 10_000;
+const SIGNAL_BUFFER = 500_000;
 /** Rows rendered per page so the feed stays responsive. */
 const SIGNAL_PAGE = 150;
 
@@ -523,19 +523,30 @@ function SwarmDashboard() {
   useEffect(() => {
     let cancelled = false;
     const poll = async () => {
-      const { data } = await supabase.from("runner_state").select("*").maybeSingle();
+      const { data } = await (supabase as any)
+        .from("runner_state")
+        .select("*")
+        .maybeSingle();
       if (cancelled) return;
-      if (!data) {
+      const row = data as {
+        status: string;
+        equity: number | string;
+        closed_trades: number;
+        ticks_per_sec: number | string;
+        started_at: string;
+        last_seen_at: string;
+      } | null;
+      if (!row) {
         setRunnerHeartbeat(null);
         return;
       }
       setRunnerHeartbeat({
-        status: data.status,
-        equity: Number(data.equity),
-        closedTrades: data.closed_trades,
-        ticksPerSec: Number(data.ticks_per_sec),
-        startedAt: new Date(data.started_at).getTime(),
-        lastSeenAt: new Date(data.last_seen_at).getTime(),
+        status: row.status,
+        equity: Number(row.equity),
+        closedTrades: row.closed_trades,
+        ticksPerSec: Number(row.ticks_per_sec),
+        startedAt: new Date(row.started_at).getTime(),
+        lastSeenAt: new Date(row.last_seen_at).getTime(),
       });
     };
     void poll();
