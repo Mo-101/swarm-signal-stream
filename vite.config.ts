@@ -14,4 +14,11 @@ export default defineConfig({
     // nitro/vite builds from this
     server: { entry: "server" },
   },
+  vite: {
+    server: {
+      // Vite's dev-server Host-header check otherwise rejects requests
+      // arriving through the alphatrade.mostarindustries.com reverse proxy.
+      allowedHosts: ["alphatrade.mostarindustries.com"],
+    },
+  },
 });
