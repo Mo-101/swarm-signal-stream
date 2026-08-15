@@ -190,7 +190,7 @@ const EMPTY_EXEC_STATS: ExecutionStats = {
 };
 
 /** Max signals retained in memory for review. */
-const SIGNAL_BUFFER = 10_000;
+const SIGNAL_BUFFER = 500_000;
 /** Rows rendered per page so the feed stays responsive. */
 const SIGNAL_PAGE = 150;
 
