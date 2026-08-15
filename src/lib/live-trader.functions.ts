@@ -489,6 +489,14 @@ export const getLivePositions = createServerFn({ method: "GET" })
   }
 });
 
+export const getLiveHistory = createServerFn({ method: "GET" })
+  .middleware([requireSupabaseAuth])
+  .handler(async ({ context }) => {
+    const { loadLiveTrades } = await import("@/lib/db/live-store.server");
+    const { closed } = await loadLiveTrades(context.supabase, context.userId, "binance");
+    return closed;
+  });
+
 export const closeLivePosition = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((raw: { symbol: string }) => {

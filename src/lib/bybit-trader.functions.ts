@@ -536,6 +536,14 @@ export const getBybitPositions = createServerFn({ method: "GET" })
   }
 });
 
+export const getBybitHistory = createServerFn({ method: "GET" })
+  .middleware([requireSupabaseAuth])
+  .handler(async ({ context }) => {
+    const { loadLiveTrades } = await import("@/lib/db/live-store.server");
+    const { closed } = await loadLiveTrades(context.supabase, context.userId, "bybit");
+    return closed;
+  });
+
 export const closeBybitPosition = createServerFn({ method: "POST" })
   .middleware([requireSupabaseAuth])
   .inputValidator((raw: { symbol: string }) => {

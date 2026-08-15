@@ -24,15 +24,18 @@ import { createEngineRuntime } from "@/lib/engine-runtime";
 import {
   getLiveStatus,
   getLivePositions,
+  getLiveHistory,
   placeLiveTrade,
   closeLivePosition,
 } from "@/lib/live-trader.functions";
 import {
   getBybitStatus,
   getBybitPositions,
+  getBybitHistory,
   placeBybitTrade,
   closeBybitPosition,
 } from "@/lib/bybit-trader.functions";
+import type { LiveTradeRow } from "@/lib/db/live-store.server";
 import { SystemPanel, type DiscoveryHealth } from "@/components/SystemPanel";
 import { EdgePanel } from "@/components/EdgePanel";
 import { ExecutionPanel } from "@/components/ExecutionPanel";
@@ -216,6 +219,7 @@ function SwarmDashboard() {
   const [liveStatus, setLiveStatus] = useState<LiveStatus | null>(null);
   const [livePositions, setLivePositions] = useState<LivePosition[]>([]);
   const livePositionsRef = useRef<LivePosition[]>([]);
+  const [liveHistory, setLiveHistory] = useState<LiveTradeRow[]>([]);
   const [liveLog, setLiveLog] = useState<LiveLogEntry[]>([]);
   /** Non-null when the circuit breaker disarmed live mode; holds the reason. */
   const [liveTripped, setLiveTripped] = useState<string | null>(null);
@@ -301,15 +305,18 @@ function SwarmDashboard() {
   const placeBinance = useServerFn(placeLiveTrade);
   const fetchBinanceStatus = useServerFn(getLiveStatus);
   const fetchBinancePositions = useServerFn(getLivePositions);
+  const fetchBinanceHistory = useServerFn(getLiveHistory);
   const closeBinance = useServerFn(closeLivePosition);
   const placeBybit = useServerFn(placeBybitTrade);
   const fetchBybitStatus = useServerFn(getBybitStatus);
   const fetchBybitPositions = useServerFn(getBybitPositions);
+  const fetchBybitHistory = useServerFn(getBybitHistory);
   const closeBybit = useServerFn(closeBybitPosition);
 
   const placeLive = liveProvider === "bybit" ? placeBybit : placeBinance;
   const fetchLiveStatus = liveProvider === "bybit" ? fetchBybitStatus : fetchBinanceStatus;
   const fetchLivePositions = liveProvider === "bybit" ? fetchBybitPositions : fetchBinancePositions;
+  const fetchLiveHistory = liveProvider === "bybit" ? fetchBybitHistory : fetchBinanceHistory;
   const closeLive = liveProvider === "bybit" ? closeBybit : closeBinance;
 
   useEffect(() => {
@@ -318,6 +325,7 @@ function SwarmDashboard() {
     setLiveStatus(null);
     setLivePositions([]);
     livePositionsRef.current = [];
+    setLiveHistory([]);
   }, [liveProvider]);
 
   useEffect(() => {
@@ -449,11 +457,12 @@ function SwarmDashboard() {
     let cancelled = false;
     const load = async () => {
       try {
-        const [st, ps] = await Promise.all([
+        const [st, ps, hist] = await Promise.all([
           fetchLiveStatus(),
           liveModeRef.current
             ? fetchLivePositions().catch(() => [] as LivePosition[])
             : Promise.resolve([] as LivePosition[]),
+          fetchLiveHistory().catch(() => [] as LiveTradeRow[]),
         ]);
         if (cancelled) return;
         const status = st as LiveStatus;
@@ -466,6 +475,7 @@ function SwarmDashboard() {
         }
         setLivePositions(ps as LivePosition[]);
         livePositionsRef.current = ps as LivePosition[];
+        setLiveHistory(hist as LiveTradeRow[]);
         setLiveUpdatedAt(Date.now());
       } catch (e) {
         if (cancelled) return;
@@ -482,7 +492,7 @@ function SwarmDashboard() {
       cancelled = true;
       clearInterval(iv);
     };
-  }, [liveMode, fetchLiveStatus, fetchLivePositions]);
+  }, [liveMode, fetchLiveStatus, fetchLivePositions, fetchLiveHistory]);
 
   // Load the persisted account, open positions, history and edge report.
   useEffect(() => {
@@ -699,6 +709,8 @@ function SwarmDashboard() {
         const ps = (await fetchLivePositions().catch(() => [])) as LivePosition[];
         setLivePositions(ps);
         livePositionsRef.current = ps;
+        const hist = (await fetchLiveHistory().catch(() => [])) as LiveTradeRow[];
+        setLiveHistory(hist);
       } catch (e) {
         pushLog({
           ok: false,
@@ -707,7 +719,7 @@ function SwarmDashboard() {
         });
       }
     },
-    [closeLive, fetchLivePositions, pushLog],
+    [closeLive, fetchLivePositions, fetchLiveHistory, pushLog],
   );
 
   // Hold a screen wake lock so an unattended run isn't killed by display sleep.
@@ -1094,6 +1106,7 @@ function SwarmDashboard() {
               provider={liveProvider}
               status={liveStatus}
               positions={livePositions}
+              history={liveHistory}
               log={liveLog}
               tripped={liveTripped}
               onClose={handleCloseLive}
@@ -1599,6 +1612,7 @@ function LivePanel({
   provider,
   status,
   positions,
+  history,
   log,
   tripped,
   onClose,
@@ -1607,6 +1621,7 @@ function LivePanel({
   provider: LiveProvider;
   status: LiveStatus | null;
   positions: LivePosition[];
+  history: LiveTradeRow[];
   log: LiveLogEntry[];
   tripped: string | null;
   onClose: (symbol: string) => void;
@@ -1721,6 +1736,67 @@ function LivePanel({
                       >
                         Close
                       </button>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        )}
+      </div>
+
+      <div className="border-b border-border">
+        <div className="px-4 py-2 text-xs font-semibold text-muted-foreground">
+          Closed trades (real PnL)
+        </div>
+        {history.length === 0 ? (
+          <EmptyState label="No closed live trades yet." />
+        ) : (
+          <table className="w-full text-sm">
+            <thead className="text-xs text-muted-foreground">
+              <tr className="border-b border-border">
+                <th className="px-4 py-2 text-left font-medium">Time</th>
+                <th className="px-4 py-2 text-left font-medium">Symbol</th>
+                <th className="px-4 py-2 text-left font-medium">Side</th>
+                <th className="px-4 py-2 text-right font-medium">Entry → Exit</th>
+                <th className="px-4 py-2 text-left font-medium">Reason</th>
+                <th className="px-4 py-2 text-right font-medium">PnL</th>
+              </tr>
+            </thead>
+            <tbody>
+              {history.map((t) => {
+                const tone = (t.pnl ?? 0) >= 0 ? "text-bull" : "text-bear";
+                return (
+                  <tr key={`${t.clientId}-${t.closedAt}`} className="border-b border-border/50">
+                    <td className="px-4 py-1.5 font-mono text-[11px] text-muted-foreground">
+                      {t.closedAt ? formatTime(t.closedAt) : "—"}
+                    </td>
+                    <td className="px-4 py-1.5 font-mono text-xs">{t.symbol}</td>
+                    <td className="px-4 py-1.5">
+                      <span
+                        className={`rounded px-1.5 py-0.5 font-mono text-[10px] font-semibold ${t.side === "BUY" ? "bg-bull/15 text-bull" : "bg-bear/15 text-bear"
+                          }`}
+                      >
+                        {t.side}
+                      </span>
+                    </td>
+                    <td className="px-4 py-1.5 text-right font-mono text-xs tabular">
+                      {formatPrice(t.entryPrice)} →{" "}
+                      <span className="text-foreground">
+                        {t.exitPrice !== null ? formatPrice(t.exitPrice) : "—"}
+                      </span>
+                    </td>
+                    <td className="px-4 py-1.5">
+                      <span className="rounded bg-muted px-1.5 py-0.5 font-mono text-[10px] text-muted-foreground">
+                        {t.reason ?? "—"}
+                      </span>
+                    </td>
+                    <td className={`px-4 py-1.5 text-right font-mono text-xs tabular ${tone}`}>
+                      {formatUsd(t.pnl ?? 0)}{" "}
+                      <span className="text-[10px] text-muted-foreground">
+                        ({(t.pnlPct ?? 0) >= 0 ? "+" : ""}
+                        {(t.pnlPct ?? 0).toFixed(2)}%)
+                      </span>
                     </td>
                   </tr>
                 );
