@@ -1,6 +1,6 @@
 import { createFileRoute } from "@tanstack/react-router";
 import { useServerFn } from "@tanstack/react-start";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   SwarmEngine,
   fetchPerpetualSymbols,
@@ -56,6 +56,7 @@ import {
   persistOpenTrade,
   persistCloseTrade,
   resetPaperAccount,
+  getRunnerHeartbeat,
 } from "@/lib/edge.functions";
 
 type LiveProvider = "binance" | "bybit";
@@ -284,6 +285,7 @@ function SwarmDashboard() {
   const saveOpen = useServerFn(persistOpenTrade);
   const saveClose = useServerFn(persistCloseTrade);
   const resetAccount = useServerFn(resetPaperAccount);
+  const fetchRunnerHeartbeat = useServerFn(getRunnerHeartbeat);
 
   const learned: LearnedEdge = useMemo(
     () => deriveEdge(edgeReport, DEFAULT_PAPER_CONFIG.minConfidence),
@@ -533,30 +535,19 @@ function SwarmDashboard() {
   useEffect(() => {
     let cancelled = false;
     const poll = async () => {
-      const { data } = await (supabase as any)
-        .from("runner_state")
-        .select("*")
-        .maybeSingle();
+      const row = await fetchRunnerHeartbeat();
       if (cancelled) return;
-      const row = data as {
-        status: string;
-        equity: number | string;
-        closed_trades: number;
-        ticks_per_sec: number | string;
-        started_at: string;
-        last_seen_at: string;
-      } | null;
       if (!row) {
         setRunnerHeartbeat(null);
         return;
       }
       setRunnerHeartbeat({
         status: row.status,
-        equity: Number(row.equity),
-        closedTrades: row.closed_trades,
-        ticksPerSec: Number(row.ticks_per_sec),
-        startedAt: new Date(row.started_at).getTime(),
-        lastSeenAt: new Date(row.last_seen_at).getTime(),
+        equity: row.equity,
+        closedTrades: row.closedTrades,
+        ticksPerSec: row.ticksPerSec,
+        startedAt: row.startedAt,
+        lastSeenAt: row.lastSeenAt,
       });
     };
     void poll();
@@ -565,7 +556,7 @@ function SwarmDashboard() {
       cancelled = true;
       clearInterval(iv);
     };
-  }, []);
+  }, [fetchRunnerHeartbeat]);
 
   const runnerActive =
     runnerHeartbeat !== null &&
@@ -829,8 +820,8 @@ function SwarmDashboard() {
                   onClick={() => setLiveProvider(p)}
                   disabled={liveMode}
                   className={`px-2 py-1.5 transition-colors ${liveProvider === p
-                      ? "bg-accent/20 text-accent"
-                      : "bg-card text-muted-foreground hover:text-foreground"
+                    ? "bg-accent/20 text-accent"
+                    : "bg-card text-muted-foreground hover:text-foreground"
                     } ${liveMode ? "cursor-not-allowed opacity-60" : ""}`}
                   title={liveMode ? "Turn off live mode to switch provider" : `Use ${p} testnet`}
                 >
@@ -855,10 +846,10 @@ function SwarmDashboard() {
               }}
               disabled={!liveMode && !liveArmed}
               className={`rounded-md border px-3 py-1.5 text-xs font-semibold transition-colors ${liveMode
-                  ? "border-accent bg-accent/20 text-accent"
-                  : liveArmed
-                    ? "border-border bg-card text-muted-foreground hover:text-foreground"
-                    : "cursor-not-allowed border-border bg-card text-muted-foreground opacity-50"
+                ? "border-accent bg-accent/20 text-accent"
+                : liveArmed
+                  ? "border-border bg-card text-muted-foreground hover:text-foreground"
+                  : "cursor-not-allowed border-border bg-card text-muted-foreground opacity-50"
                 }`}
               title={
                 liveMode
@@ -1007,8 +998,8 @@ function SwarmDashboard() {
                 key={t}
                 onClick={() => setTab(t)}
                 className={`rounded-md px-3 py-1.5 text-xs font-medium capitalize transition-colors ${tab === t
-                    ? "bg-primary text-primary-foreground"
-                    : "text-muted-foreground hover:text-foreground"
+                  ? "bg-primary text-primary-foreground"
+                  : "text-muted-foreground hover:text-foreground"
                   }`}
               >
                 {t}

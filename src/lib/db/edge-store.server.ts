@@ -457,7 +457,32 @@ export async function upsertHeartbeat(
     });
 }
 
-// Note: the dashboard reads runner_state directly from Supabase in the
-// browser (it can't reach Neon — no server round-trip for that poll today).
-// upsertHeartbeat above mirrors every write to Supabase, so that read stays
-// fresh without needing a Neon-aware server function for it.
+// ── Runner heartbeat (read) ─────────────────────────────────────────────
+
+export interface RunnerHeartbeatRow {
+  status: string;
+  equity: number;
+  closedTrades: number;
+  ticksPerSec: number;
+  startedAt: number;
+  lastSeenAt: number;
+}
+
+export async function getRunnerHeartbeat(
+  userId: string,
+): Promise<RunnerHeartbeatRow | null> {
+  const sql = getNeonSqlOrNoop();
+  const rows = await sql`
+    SELECT status, equity, closed_trades, ticks_per_sec, started_at, last_seen_at
+    FROM runner_state WHERE user_id = ${userId}`;
+  const row = rows[0] as Record<string, unknown> | undefined;
+  if (!row) return null;
+  return {
+    status: row.status as string,
+    equity: Number(row.equity),
+    closedTrades: Number(row.closed_trades),
+    ticksPerSec: Number(row.ticks_per_sec),
+    startedAt: new Date(row.started_at as string).getTime(),
+    lastSeenAt: new Date(row.last_seen_at as string).getTime(),
+  };
+}

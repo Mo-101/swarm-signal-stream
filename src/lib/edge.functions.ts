@@ -56,3 +56,14 @@ export const resetPaperAccount = createServerFn({ method: "POST" })
     const { resetPaperAccount: reset } = await import("@/lib/db/edge-store.server");
     return reset(context.supabase, context.userId, data.wipeHistory);
   });
+
+// Reads runner_state from Neon directly — the runner writes there as its
+// primary store, and Neon is reachable from the server even when the
+// Supabase mirror table doesn't exist yet (unapplied migration). Replaces a
+// prior version of this poll that queried Supabase from the browser.
+export const getRunnerHeartbeat = createServerFn({ method: "GET" })
+  .middleware([requireSupabaseAuth])
+  .handler(async ({ context }) => {
+    const { getRunnerHeartbeat: get } = await import("@/lib/db/edge-store.server");
+    return get(context.userId);
+  });
