@@ -151,6 +151,14 @@ export function createEngineRuntime(opts: EngineRuntimeOptions): EngineRuntime {
   const tickCounterRef = { current: 0 };
 
   const micro = new MicrostructureFeed();
+  // Zero-risk counterfactual: mirrors the paper SL/TP and fee model so that
+  // declined proposals can be scored against the ones we actually took.
+  const shadow = new ShadowBook({
+    slPct: DEFAULT_PAPER_CONFIG.slPct,
+    tpPct: DEFAULT_PAPER_CONFIG.tpPct,
+    takerFeeRate: DEFAULT_PAPER_CONFIG.takerFeeRate,
+    fundingRatePer8h: DEFAULT_PAPER_CONFIG.defaultFundingRate,
+  });
 
   const broker = new PaperBroker(DEFAULT_PAPER_CONFIG, {
     onHalt: (msg) => hooks.onHalt?.(msg),
