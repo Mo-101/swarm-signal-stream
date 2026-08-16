@@ -18,6 +18,19 @@ import { getDatabaseUrl, getNeonSql } from "@/lib/db/neon";
 const TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60; // 30 days
 const TOKEN_ISSUER = "alpha-swarm-local";
 
+function normalizeEnvCredential(value: string | undefined): string | undefined {
+  if (!value) return undefined;
+  const trimmed = value.trim();
+  if (
+    (trimmed.startsWith('"') && trimmed.endsWith('"')) ||
+    (trimmed.startsWith("'") && trimmed.endsWith("'")) ||
+    (trimmed.startsWith("`") && trimmed.endsWith("`"))
+  ) {
+    return trimmed.slice(1, -1).trim();
+  }
+  return trimmed;
+}
+
 export interface LocalSession {
   userId: string;
   email: string;
@@ -129,8 +142,8 @@ export async function signInLocal(email: string, password: string): Promise<Loca
   if (!user) {
     // First-run bootstrap: only the env-configured bot credentials may claim
     // the pre-existing data owner id. Anything else must sign up explicitly.
-    const envEmail = process.env.RUNNER_EMAIL?.trim().toLowerCase();
-    const envPassword = process.env.RUNNER_PASSWORD;
+    const envEmail = normalizeEnvCredential(process.env.RUNNER_EMAIL)?.toLowerCase();
+    const envPassword = normalizeEnvCredential(process.env.RUNNER_PASSWORD);
     if (envEmail && envPassword && normalized === envEmail && password === envPassword) {
       const id = await adoptExistingOwnerId();
       const passwordHash = hashPassword(password);

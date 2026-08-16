@@ -47,7 +47,15 @@ loadDotEnv(join(__dirname, ".env"));
 function requireEnv(name: string): string {
   const v = process.env[name];
   if (!v) throw new Error(`Missing required env var: ${name}`);
-  return v;
+  const value = v.trim();
+  if (
+    (value.startsWith('"') && value.endsWith('"')) ||
+    (value.startsWith("'") && value.endsWith("'")) ||
+    (value.startsWith("`") && value.endsWith("`"))
+  ) {
+    return value.slice(1, -1).trim();
+  }
+  return value;
 }
 
 const HEARTBEAT_INTERVAL_MS = 15_000;

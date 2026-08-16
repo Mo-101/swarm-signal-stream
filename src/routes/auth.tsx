@@ -1,8 +1,6 @@
 import { createFileRoute, useNavigate, Link } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
-import { supabase } from "@/integrations/supabase/client";
-import { lovable } from "@/integrations/lovable/index";
-import { localSignIn, localSignUp, mirrorCredentials } from "@/lib/auth/auth.functions";
+import { localSignIn, localSignUp } from "@/lib/auth/auth.functions";
 import { getLocalSession, setLocalSession } from "@/lib/auth/local-session";
 
 export const Route = createFileRoute("/auth")({
@@ -55,24 +53,12 @@ function AuthPage() {
   const [notice, setNotice] = useState<string | null>(null);
 
   useEffect(() => {
-    if (typeof window !== "undefined" && localStorage.getItem("alpha_swarm_guest") === "true") {
-      if (next) window.location.href = next;
-      else navigate({ to: "/dashboard", replace: true });
-      return;
-    }
-
     if (getLocalSession()) {
       if (next) window.location.href = next;
       else navigate({ to: "/dashboard", replace: true });
       return;
     }
 
-    supabase.auth.getSession().then(({ data }) => {
-      if (data.session) {
-        if (next) window.location.href = next;
-        else navigate({ to: "/dashboard", replace: true });
-      }
-    });
   }, [navigate, next]);
 
   const enterAsGuest = () => {
@@ -90,63 +76,17 @@ function AuthPage() {
     setNotice(null);
     try {
       if (mode === "signup") {
-        // Neon-local is canonical; Supabase signup is attempted as a
-        // best-effort mirror but its failure never blocks the account.
         const session = await localSignUp({ data: { email, password } });
         setLocalSession(session);
-        supabase.auth
-          .signUp({
-            email,
-            password,
-            options: {
-              emailRedirectTo: next ? window.location.origin + next : window.location.origin,
-            },
-          })
-          .catch(() => {});
       } else {
-        // Sign in against Neon first. If Neon has no record, fall back to
-        // Supabase — and on success mirror the credentials into Neon
-        // automatically so next time the local path works.
-        try {
-          const session = await localSignIn({ data: { email, password } });
-          setLocalSession(session);
-        } catch {
-          const { error: err } = await supabase.auth.signInWithPassword({ email, password });
-          if (err) throw err;
-          mirrorCredentials({ data: { email, password } }).catch(() => {});
-        }
+        const session = await localSignIn({ data: { email, password } });
+        setLocalSession(session);
       }
       afterAuth();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Authentication failed");
     } finally {
       setBusy(false);
-    }
-  };
-
-  const google = async () => {
-    setError(null);
-    try {
-      const result = await lovable.auth.signInWithOAuth("google", {
-        redirect_uri: next ? window.location.origin + next : window.location.origin,
-      });
-      if (result.error) {
-        // Fallback to standard Supabase OAuth
-        const { error: sbErr } = await supabase.auth.signInWithOAuth({
-          provider: "google",
-          options: {
-            redirectTo: next ? window.location.origin + next : window.location.origin,
-          },
-        });
-        if (sbErr) throw sbErr;
-        return;
-      }
-      if (result.redirected) return;
-      afterAuth();
-    } catch (err) {
-      setError(
-        err instanceof Error ? err.message : "Google sign-in failed. Try again or enter as Guest.",
-      );
     }
   };
 
@@ -194,7 +134,7 @@ function AuthPage() {
           </div>
           <div className="relative flex justify-center text-xs uppercase">
             <span className="bg-card px-2 text-muted-foreground text-[10px] tracking-wider">
-              Or Sign In with Supabase
+              Or Sign In with Neon
             </span>
           </div>
         </div>
@@ -236,32 +176,6 @@ function AuthPage() {
             {busy ? "Authenticating…" : mode === "signin" ? "Sign in to Engine" : "Create Account"}
           </button>
         </form>
-
-        <button
-          onClick={google}
-          type="button"
-          className="mt-3 w-full rounded border border-border px-3 py-2 text-sm text-foreground hover:bg-muted transition-colors flex items-center justify-center gap-2"
-        >
-          <svg className="w-4 h-4" viewBox="0 0 24 24">
-            <path
-              fill="#4285F4"
-              d="M23.745 12.27c0-.7-.06-1.4-.19-2.07H12v4.51h6.6c-.29 1.52-1.14 2.82-2.4 3.68v3.05h3.88c2.27-2.09 3.66-5.17 3.66-9.17z"
-            />
-            <path
-              fill="#34A853"
-              d="M12 24c3.24 0 5.95-1.08 7.93-2.91l-3.88-3.05c-1.08.72-2.45 1.16-4.05 1.16-3.12 0-5.77-2.1-6.72-4.93H1.25v3.15C3.26 21.36 7.35 24 12 24z"
-            />
-            <path
-              fill="#FBBC05"
-              d="M5.28 14.27c-.25-.72-.38-1.49-.38-2.27s.13-1.55.38-2.27V6.58H1.25C.45 8.18 0 9.99 0 12s.45 3.82 1.25 5.42l4.03-3.15z"
-            />
-            <path
-              fill="#EA4335"
-              d="M12 4.75c1.77 0 3.35.61 4.6 1.8l3.42-3.42C17.95 1.19 15.24 0 12 0 7.35 0 3.26 2.64 1.25 6.58l4.03 3.15c.95-2.83 3.6-4.98 6.72-4.98z"
-            />
-          </svg>
-          Continue with Google
-        </button>
 
         {error && (
           <div className="mt-3 p-2 rounded bg-destructive/10 border border-destructive/20 text-xs text-destructive">
