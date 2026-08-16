@@ -681,6 +681,9 @@ function SwarmDashboard() {
   const carriedPnl = realized - attributedPnl;
   const hasCarried = Math.abs(carriedPnl) >= 0.01;
 
+  // Live marks for the grid form, so deriving a range needs no extra feed.
+  const boardMarks = useMemo(() => new Map(board.map((s) => [s.symbol, s.lastPrice])), [board]);
+
   const filteredBoard = useMemo(() => {
     const q = query.trim().toUpperCase();
     const rows = q ? board.filter((r: { symbol: string | any[] }) => r.symbol.includes(q)) : board;
@@ -1128,7 +1131,7 @@ function SwarmDashboard() {
           {tab === "shadow" && (
             <ShadowPanel shadow={activeShadow} currentThreshold={learned.minConfidence} />
           )}
-          {tab === "grid" && <GridPanel />}
+          {tab === "grid" && <GridPanel marks={boardMarks} />}
           {tab === "live" && (
             <LivePanel
               enabled={liveMode}

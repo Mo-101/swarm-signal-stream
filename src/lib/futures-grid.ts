@@ -292,6 +292,59 @@ export function assertGridEconomics(config: FuturesGridConfig): void {
   }
 }
 
+/**
+ * Symmetric range around the live mark: L = M(1-r), U = M(1+r).
+ *
+ * Bounds chosen without reference to the market produce a lattice entirely on
+ * one side of it — every level a Sell, nothing to buy back into — which passes
+ * every geometry and economics check while being useless as a grid.
+ */
+export function deriveRangeFromMark(args: { markPrice: number; rangePct: number }): {
+  lowerPrice: number;
+  upperPrice: number;
+} {
+  const { markPrice, rangePct } = args;
+
+  if (!finitePositive(markPrice)) {
+    throw new Error("markPrice must be > 0");
+  }
+
+  if (!Number.isFinite(rangePct) || rangePct <= 0 || rangePct >= 1) {
+    throw new Error("rangePct must be between 0 and 1");
+  }
+
+  return {
+    lowerPrice: markPrice * (1 - rangePct),
+    upperPrice: markPrice * (1 + rangePct),
+  };
+}
+
+/**
+ * Enforce L < M < U.
+ *
+ * Belongs on the execution side, checked against the runner's own mark rather
+ * than the UI's copy: a stale price in the browser, or a client that skips the
+ * form entirely, must not be able to create a one-sided lattice.
+ */
+export function assertMarkInsideRange(args: {
+  markPrice: number;
+  lowerPrice: number;
+  upperPrice: number;
+}): void {
+  const { markPrice, lowerPrice, upperPrice } = args;
+
+  if (!(lowerPrice < markPrice && markPrice < upperPrice)) {
+    throw new Error(
+      [
+        "Grid range must bracket live mark.",
+        `lower=${lowerPrice}`,
+        `mark=${markPrice}`,
+        `upper=${upperPrice}`,
+      ].join(" "),
+    );
+  }
+}
+
 export function liquidationDistancePct(markPrice: number, liquidationPrice: number): number {
   if (!finitePositive(markPrice) || !finitePositive(liquidationPrice)) {
     throw new Error("markPrice and liquidationPrice must be > 0");

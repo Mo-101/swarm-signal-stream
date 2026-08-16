@@ -13,6 +13,7 @@
 // grid that is already live.
 import { hostname } from "node:os";
 import type { EngineRuntime } from "../src/lib/engine-runtime";
+import { assertMarkInsideRange } from "../src/lib/futures-grid";
 import {
   loadRunnableGridStates,
   persistGridRuntime,
@@ -100,6 +101,16 @@ export class GridRuntimeCoordinator {
       });
 
       const markPrice = this.resolveMarkPrice(row.symbol);
+
+      // Checked here, against the runner's own mark, not the UI's copy. A
+      // stale browser price or a client bypassing the form must not be able to
+      // stand up a lattice entirely on one side of the market.
+      assertMarkInsideRange({
+        markPrice,
+        lowerPrice: row.config.lowerPrice,
+        upperPrice: row.config.upperPrice,
+      });
+
       const state = this.engine.configureGrid(row.config, markPrice);
 
       // Recorded before the write: if the write fails, the engine is still
