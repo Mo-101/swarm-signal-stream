@@ -270,6 +270,19 @@ export function createEngineRuntime(opts: EngineRuntimeOptions): EngineRuntime {
         agents: p.contributions,
         executed,
       });
+      if (!executed) {
+        shadow.record(
+          p,
+          readOnly
+            ? "observer"
+            : suppressed
+              ? "suppressed"
+              : p.confidence < broker.getMinConfidence()
+                ? "confidence"
+                : "blocked",
+          regime,
+        );
+      }
       if (signalBuffer.length > 400) signalBuffer.splice(0, signalBuffer.length - 400);
       hooks.onProposal?.(p, { regime, suppressed, executed });
     },
