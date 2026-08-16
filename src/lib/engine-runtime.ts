@@ -26,7 +26,19 @@ import {
   type MarginSummary,
 } from "@/lib/paper-broker";
 import { MicrostructureFeed, fetchInstrumentFilters, type MicroMetrics } from "@/lib/microstructure";
-import { ShadowBook, type ShadowStats } from "@/lib/shadow-book";
+import {
+  ShadowBook,
+  resolveShadowConfig,
+  type ShadowBookSnapshot,
+  type ShadowStats,
+  type ShadowTrade,
+} from "@/lib/shadow-book";
+import {
+  createInitialGridState,
+  evaluateGridRisk,
+  type FuturesGridConfig,
+  type GridRuntimeState,
+} from "@/lib/futures-grid";
 import { confBucket, regimeOf, type LearnedEdge, type EdgeReport } from "@/lib/edge-model";
 import type {
   StoredTrade,
@@ -35,10 +47,33 @@ import type {
   CloseTradeInput,
 } from "@/lib/edge.functions";
 
+/**
+ * Shadow economics the engine always runs with: the counterfactual only means
+ * something if it mirrors the paper broker's SL/TP and cost model. Exported so
+ * a caller can load a persisted book under the identical terms — restore()
+ * rejects any snapshot whose economics disagree.
+ */
+export const ENGINE_SHADOW_CONFIG = resolveShadowConfig({
+  slPct: DEFAULT_PAPER_CONFIG.slPct,
+  tpPct: DEFAULT_PAPER_CONFIG.tpPct,
+  takerFeeRate: DEFAULT_PAPER_CONFIG.takerFeeRate,
+  fundingRatePer8h: DEFAULT_PAPER_CONFIG.defaultFundingRate,
+});
+
 export interface EnginePersistence {
   saveOpenTrade(input: OpenTradeInput): Promise<unknown>;
   saveCloseTrade(input: CloseTradeInput): Promise<{ report: EdgeReport }>;
   sendSignals(signals: SignalInput[]): Promise<void>;
+  /**
+   * Durably record shadow trades. Optional: a caller that omits these (the
+   * dashboard, which runs a throwaway observer book) keeps the shadow book
+   * purely in memory. The headless runner supplies both so the counterfactual
+   * evidence — and the fee/funding costs behind it — survives a restart.
+   */
+  saveShadowOpen?(trade: ShadowTrade): Promise<unknown>;
+  saveShadowClose?(trade: ShadowTrade): Promise<unknown>;
+  /** Persist grid config + runtime state after configure and every risk update. */
+  saveGridState?(config: FuturesGridConfig, state: GridRuntimeState): Promise<unknown>;
   onPersistError?: (message: string) => void;
 }
 
@@ -86,6 +121,19 @@ export interface EngineRuntimeOptions {
   /** Read fresh on every proposal — pass a ref/getter so learned weights can update live. */
   getLearned: () => LearnedEdge;
   persistence: EnginePersistence;
+  /**
+   * Previously persisted shadow book. Restored on construction so the
+   * counterfactual resumes rather than restarting its sample count at zero.
+   * A snapshot whose economics no longer match the live config is rejected by
+   * ShadowBook.restore() and reported through onPersistError.
+   */
+  shadowBoot?: ShadowBookSnapshot;
+  /**
+   * Previously persisted grids, restored verbatim. Restore does not re-run
+   * economics validation: a grid already holding inventory must come back as
+   * it was, and any breach is caught by the next updateGridRiskState.
+   */
+  gridBoot?: Array<{ config: FuturesGridConfig; state: GridRuntimeState }>;
   hooks?: EngineHooks;
   /** How often to emit onSnapshot, in ms. Default 500 (dashboard cadence). */
   snapshotIntervalMs?: number;
@@ -98,11 +146,38 @@ export interface EngineRuntimeOptions {
   readOnly?: boolean;
 }
 
+export interface GridRiskUpdate {
+  markPrice: number;
+  positionQty: number;
+  positionNotionalUsd: number;
+  liquidationPrice: number | null;
+  marginUtilizationPct: number | null;
+  freeMarginPct: number | null;
+  unrealizedPnlUsd: number;
+  fundingUsd: number;
+  now?: number;
+}
+
 export interface EngineRuntime {
   start(): void;
   stop(): void;
   getBroker(): PaperBroker;
   getEngine(): SwarmEngine;
+
+  /**
+   * Futures grid, owned by the engine the same way the shadow book is.
+   * Configuring a grid validates geometry, economics and risk but does not
+   * place orders — execution is gated separately in the runner.
+   */
+  configureGrid(config: FuturesGridConfig, markPrice: number): GridRuntimeState;
+  restoreGrid(config: FuturesGridConfig, state: GridRuntimeState): void;
+  getGridState(symbol: string): GridRuntimeState | null;
+  getGridStates(): GridRuntimeState[];
+  getGridConfig(symbol: string): FuturesGridConfig | null;
+  updateGridRiskState(
+    symbol: string,
+    update: GridRiskUpdate,
+  ): { state: GridRuntimeState; risk: { ok: boolean; reasons: string[] } } | null;
 }
 
 function toPosition(t: StoredTrade): Position & Partial<Position> {
@@ -143,7 +218,17 @@ function toClosedTrade(t: StoredTrade): ClosedTrade & Partial<ClosedTrade> {
 
 /** Builds and wires the engine + broker + microstructure feed. Caller owns start()/stop() timing. */
 export function createEngineRuntime(opts: EngineRuntimeOptions): EngineRuntime {
-  const { symbols, boot, getLearned, persistence, hooks = {}, snapshotIntervalMs = 500, readOnly = false } = opts;
+  const {
+    symbols,
+    boot,
+    getLearned,
+    persistence,
+    shadowBoot,
+    gridBoot,
+    hooks = {},
+    snapshotIntervalMs = 500,
+    readOnly = false,
+  } = opts;
 
   const marksRef = new Map<string, number>();
   const regimeMap = new Map<string, string>();
@@ -153,12 +238,28 @@ export function createEngineRuntime(opts: EngineRuntimeOptions): EngineRuntime {
   const micro = new MicrostructureFeed();
   // Zero-risk counterfactual: mirrors the paper SL/TP and fee model so that
   // declined proposals can be scored against the ones we actually took.
-  const shadow = new ShadowBook({
-    slPct: DEFAULT_PAPER_CONFIG.slPct,
-    tpPct: DEFAULT_PAPER_CONFIG.tpPct,
-    takerFeeRate: DEFAULT_PAPER_CONFIG.takerFeeRate,
-    fundingRatePer8h: DEFAULT_PAPER_CONFIG.defaultFundingRate,
+  const reportShadowError = (verb: string) => (e: unknown) =>
+    persistence.onPersistError?.(
+      e instanceof Error
+        ? `Shadow ${verb} save failed: ${e.message}`
+        : `Shadow ${verb} save failed`,
+    );
+
+  const shadow = new ShadowBook(ENGINE_SHADOW_CONFIG, {
+    onOpen: (t) => void persistence.saveShadowOpen?.(t)?.catch(reportShadowError("open")),
+    onClose: (t) => void persistence.saveShadowClose?.(t)?.catch(reportShadowError("close")),
   });
+
+  if (shadowBoot) {
+    try {
+      shadow.restore(shadowBoot);
+    } catch (e) {
+      // A rejected snapshot must not stop the engine — it only costs history.
+      persistence.onPersistError?.(
+        e instanceof Error ? `Shadow restore skipped: ${e.message}` : "Shadow restore skipped",
+      );
+    }
+  }
 
   const broker = new PaperBroker(DEFAULT_PAPER_CONFIG, {
     onHalt: (msg) => hooks.onHalt?.(msg),
@@ -390,10 +491,104 @@ export function createEngineRuntime(opts: EngineRuntimeOptions): EngineRuntime {
     micro.stop();
   }
 
+  // ── Futures grid ──────────────────────────────────────────────────────
+  // Keyed by symbol to match the futures_grid_state unique (user_id, symbol),
+  // so several grids can run side by side without contending on one row.
+  const gridConfigs = new Map<string, FuturesGridConfig>();
+  const gridStates = new Map<string, GridRuntimeState>();
+
+  const saveGrid = (config: FuturesGridConfig, state: GridRuntimeState) =>
+    void persistence
+      .saveGridState?.(config, state)
+      ?.catch((e: unknown) =>
+        persistence.onPersistError?.(
+          e instanceof Error ? `Grid state save failed: ${e.message}` : "Grid state save failed",
+        ),
+      );
+
+  for (const restored of gridBoot ?? []) {
+    try {
+      if (restored.config.symbol !== restored.state.symbol) {
+        throw new Error("grid restore symbol mismatch");
+      }
+      gridConfigs.set(restored.config.symbol, restored.config);
+      gridStates.set(restored.state.symbol, restored.state);
+    } catch (e) {
+      persistence.onPersistError?.(
+        e instanceof Error ? `Grid restore skipped: ${e.message}` : "Grid restore skipped",
+      );
+    }
+  }
+
+  function configureGrid(config: FuturesGridConfig, markPrice: number): GridRuntimeState {
+    // Throws on invalid geometry, unprofitable steps or over-limit leverage —
+    // a grid that cannot pay for itself must never reach the order path.
+    const state = createInitialGridState(config, markPrice);
+    gridConfigs.set(config.symbol, config);
+    gridStates.set(config.symbol, state);
+    saveGrid(config, state);
+    return structuredClone(state);
+  }
+
+  function restoreGrid(config: FuturesGridConfig, state: GridRuntimeState): void {
+    if (config.symbol !== state.symbol) {
+      throw new Error("grid restore symbol mismatch");
+    }
+    gridConfigs.set(config.symbol, config);
+    gridStates.set(state.symbol, state);
+  }
+
+  function updateGridRiskState(symbol: string, update: GridRiskUpdate) {
+    const config = gridConfigs.get(symbol);
+    const current = gridStates.get(symbol);
+    if (!config || !current) return null;
+
+    let next: GridRuntimeState = {
+      ...current,
+      markPrice: update.markPrice,
+      positionQty: update.positionQty,
+      positionNotionalUsd: update.positionNotionalUsd,
+      liquidationPrice: update.liquidationPrice,
+      marginUtilizationPct: update.marginUtilizationPct,
+      freeMarginPct: update.freeMarginPct,
+      unrealizedPnlUsd: update.unrealizedPnlUsd,
+      fundingUsd: update.fundingUsd,
+      updatedAt: update.now ?? Date.now(),
+    };
+
+    const risk = evaluateGridRisk(config, next);
+
+    // A breach halts the grid and records why, so the reason survives a
+    // restart instead of the grid silently coming back up inactive.
+    if (!risk.ok) {
+      next = { ...next, active: false, haltReasons: risk.reasons };
+    } else if (next.haltReasons) {
+      const { haltReasons: _cleared, ...rest } = next;
+      next = rest;
+    }
+
+    gridStates.set(symbol, next);
+    saveGrid(config, next);
+
+    return { state: structuredClone(next), risk };
+  }
+
   return {
     start,
     stop,
     getBroker: () => broker,
     getEngine: () => engine,
+    configureGrid,
+    restoreGrid,
+    getGridState: (symbol) => {
+      const state = gridStates.get(symbol);
+      return state ? structuredClone(state) : null;
+    },
+    getGridStates: () => [...gridStates.values()].map((s) => structuredClone(s)),
+    getGridConfig: (symbol) => {
+      const config = gridConfigs.get(symbol);
+      return config ? structuredClone(config) : null;
+    },
+    updateGridRiskState,
   };
 }

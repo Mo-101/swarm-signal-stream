@@ -96,6 +96,62 @@ CREATE TABLE IF NOT EXISTS runner_state (
 );
 ALTER TABLE runner_state ADD COLUMN IF NOT EXISTS shadow jsonb;
 
+-- Counterfactual shadow book. runner_state.shadow holds only the rolled-up
+-- ShadowStats for the dashboard; this table is the durable per-trade record,
+-- so a restart resumes the book instead of restarting the evidence from zero.
+-- gross_bps/fee_usd/funding_usd are stored alongside net_usd because the whole
+-- point of the book is proving whether the gate earns its keep — a net number
+-- with the costs folded in cannot be audited after the fact.
+CREATE TABLE IF NOT EXISTS shadow_trades (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id uuid NOT NULL,
+  shadow_id text NOT NULL,
+  symbol text NOT NULL,
+  side text NOT NULL,
+  reason text NOT NULL,
+  confidence numeric NOT NULL,
+  regime text NOT NULL DEFAULT 'unknown',
+  notional numeric NOT NULL,
+  entry_price numeric NOT NULL,
+  stop_loss numeric NOT NULL,
+  take_profit numeric NOT NULL,
+  status text NOT NULL DEFAULT 'open',
+  last_price numeric NOT NULL,
+  last_marked_at timestamptz NOT NULL,
+  max_favourable_bps numeric NOT NULL DEFAULT 0,
+  max_adverse_bps numeric NOT NULL DEFAULT 0,
+  exit_price numeric,
+  exit_reason text,
+  gross_bps numeric,
+  net_bps numeric,
+  net_usd numeric,
+  fee_usd numeric,
+  funding_usd numeric,
+  opened_at timestamptz NOT NULL,
+  closed_at timestamptz,
+  UNIQUE (user_id, shadow_id)
+);
+CREATE INDEX IF NOT EXISTS shadow_trades_user_status_idx
+  ON shadow_trades (user_id, status, closed_at DESC);
+
+-- Futures grid bot state. Its own table rather than another runner_state
+-- column: config and runtime state change on a different cadence from the
+-- heartbeat, and one row per (user, symbol) lets several grids run without
+-- contending on a single row.
+CREATE TABLE IF NOT EXISTS futures_grid_state (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id uuid NOT NULL,
+  symbol text NOT NULL,
+  config jsonb NOT NULL,
+  runtime_state jsonb NOT NULL,
+  active boolean NOT NULL DEFAULT false,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (user_id, symbol)
+);
+CREATE INDEX IF NOT EXISTS futures_grid_state_user_idx ON futures_grid_state (user_id);
+CREATE INDEX IF NOT EXISTS futures_grid_state_active_idx ON futures_grid_state (user_id, active);
+
 -- Live (real-money) trading — kept in its own tables, deliberately separate
 -- from paper_accounts/paper_trades: a query bug here can never leak a real
 -- position into the paper-simulation view or vice versa. provider is

@@ -34,6 +34,9 @@ export interface ShadowTrade {
   confidence: number;
   regime: string;
 
+  /** Fixed USD notional this trade was opened under. */
+  notional: number;
+
   entryPrice: number;
   stopLoss: number;
   takeProfit: number;
@@ -55,6 +58,26 @@ export interface ShadowTrade {
   netBps: number | null;
   /** Net USD on the fixed shadow notional. */
   netUsd: number | null;
+
+  /** Gross return in bps before fees and funding, for cost attribution. */
+  grossBps: number | null;
+  /** Modeled round-trip taker fee in USD. Always a cost, so always >= 0. */
+  feeUsd: number | null;
+  /**
+   * Modeled funding carry in USD over the hold.
+   * Positive = the position paid funding; negative = it received funding.
+   */
+  fundingUsd: number | null;
+}
+
+/**
+ * Side effects for the owner process — the hook the book fires when a trade
+ * closes is how a caller durably records the result. Storage stays outside
+ * this class; the book only reports what happened.
+ */
+export interface ShadowHooks {
+  onOpen?: (trade: ShadowTrade) => void;
+  onClose?: (trade: ShadowTrade) => void;
 }
 
 export interface ShadowBucket {
@@ -158,6 +181,22 @@ export const DEFAULT_SHADOW_CONFIG: ShadowConfig = {
   minTradesPerThreshold: 20,
   recommendationMetric: "expectancyBps",
 };
+
+/**
+ * Merge a partial config over the defaults and validate it, without building a
+ * book. Lets a caller derive the exact economics and memory limits a book will
+ * run with — needed to load a persisted snapshot that will actually restore.
+ */
+export function resolveShadowConfig(cfg: Partial<ShadowConfig> = {}): ShadowConfig {
+  const merged = { ...DEFAULT_SHADOW_CONFIG, ...cfg };
+  validateConfig(merged);
+  return merged;
+}
+
+/** The subset of a config that a snapshot must agree on to be restorable. */
+export function shadowEconomicsOf(cfg: ShadowConfig): ShadowBookSnapshot["economics"] {
+  return economicsOf(cfg);
+}
 
 const CONF_BANDS: ReadonlyArray<readonly [string, number, number]> = [
   ["<0.60", 0, 0.6],
@@ -349,6 +388,7 @@ function isRestorableTrade(t: ShadowTrade): boolean {
       t.reason === "blocked" ||
       t.reason === "observer") &&
     isConfidence(t.confidence) &&
+    isFinitePositive(t.notional) &&
     isFinitePositive(t.entryPrice) &&
     isFinitePositive(t.stopLoss) &&
     isFinitePositive(t.takeProfit) &&
@@ -389,12 +429,14 @@ function sameEconomics(
 
 export class ShadowBook {
   private readonly cfg: ShadowConfig;
+  private readonly hooks: ShadowHooks;
   private readonly open = new Map<string, ShadowTrade>();
   private closed: ShadowTrade[] = [];
   private seq = 0;
 
-  constructor(cfg: Partial<ShadowConfig> = {}) {
+  constructor(cfg: Partial<ShadowConfig> = {}, hooks: ShadowHooks = {}) {
     this.cfg = { ...DEFAULT_SHADOW_CONFIG, ...cfg };
+    this.hooks = hooks;
     validateConfig(this.cfg);
   }
 
@@ -430,13 +472,14 @@ export class ShadowBook {
 
     const dir = p.direction === "BUY" ? 1 : -1;
 
-    this.open.set(symbol, {
+    const trade: ShadowTrade = {
       id: `shadow-${p.time}-${++this.seq}`,
       symbol,
       side: p.direction,
       reason,
       confidence: p.confidence,
       regime,
+      notional: this.cfg.notional,
       entryPrice,
       stopLoss: entryPrice * (1 - dir * this.cfg.slPct),
       takeProfit: entryPrice * (1 + dir * this.cfg.tpPct),
@@ -450,7 +493,13 @@ export class ShadowBook {
       exitReason: null,
       netBps: null,
       netUsd: null,
-    });
+      grossBps: null,
+      feeUsd: null,
+      fundingUsd: null,
+    };
+
+    this.open.set(symbol, trade);
+    this.hooks.onOpen?.(cloneTrade(trade));
 
     return true;
   }
@@ -558,7 +607,12 @@ export class ShadowBook {
     t.closedAt = time;
     t.exitReason = reason;
     t.netBps = netBps;
-    t.netUsd = (netBps / 10_000) * this.cfg.notional;
+    // Sized off the trade's own notional, not the live config, so a restored
+    // trade is always settled on the terms it was opened under.
+    t.netUsd = (netBps / 10_000) * t.notional;
+    t.grossBps = grossBps;
+    t.feeUsd = (feeBps / 10_000) * t.notional;
+    t.fundingUsd = (fundingBps / 10_000) * t.notional;
     t.lastPrice = rawExitPrice;
     t.lastMarkedAt = Math.max(t.lastMarkedAt, time);
 
@@ -568,6 +622,10 @@ export class ShadowBook {
     if (this.closed.length > this.cfg.maxClosed) {
       this.closed.splice(0, this.closed.length - this.cfg.maxClosed);
     }
+
+    // Fired after the book is consistent, so a handler that reads back the
+    // book during the callback sees the trade already moved to `closed`.
+    this.hooks.onClose?.(cloneTrade(t));
   }
 
   reset(): void {

@@ -8,10 +8,22 @@ import {
   persistCloseTrade as persistCloseTradeShared,
   ingestSignals as ingestSignalsShared,
   upsertHeartbeat as upsertHeartbeatShared,
+  persistShadowOpen as persistShadowOpenShared,
+  persistShadowClose as persistShadowCloseShared,
+  loadShadowBook as loadShadowBookShared,
+  persistGridState as persistGridStateShared,
+  loadAllGridStates as loadAllGridStatesShared,
   type HeartbeatFields,
 } from "../src/lib/db/edge-store.server";
+import type { FuturesGridConfig, GridRuntimeState } from "../src/lib/futures-grid";
 import type { OpenTradeInput, CloseTradeInput, SignalInput } from "../src/lib/db/types";
 import type { EnginePersistence, EngineBootState } from "../src/lib/engine-runtime";
+import { ENGINE_SHADOW_CONFIG } from "../src/lib/engine-runtime";
+import {
+  shadowEconomicsOf,
+  type ShadowBookSnapshot,
+  type ShadowTrade,
+} from "../src/lib/shadow-book";
 import type { EdgeReport } from "../src/lib/edge-model";
 
 function validHttpUrl(value: string | undefined): value is string {
@@ -77,8 +89,36 @@ export function createSupabasePersistence(
     async sendSignals(signals: SignalInput[]) {
       await ingestSignalsShared(supabase, userId, signals);
     },
+    async saveShadowOpen(trade: ShadowTrade) {
+      await persistShadowOpenShared(userId, trade);
+    },
+    async saveShadowClose(trade: ShadowTrade) {
+      await persistShadowCloseShared(userId, trade);
+    },
+    async saveGridState(config: FuturesGridConfig, state: GridRuntimeState) {
+      await persistGridStateShared({ userId, config, state });
+    },
     onPersistError: onError,
   };
+}
+
+/** Grids previously configured for this user, restored verbatim at boot. */
+export async function loadGridBoot(
+  userId: string,
+): Promise<Array<{ config: FuturesGridConfig; state: GridRuntimeState }>> {
+  const stored = await loadAllGridStatesShared(userId);
+  return stored.map(({ config, state }) => ({ config, state }));
+}
+
+/**
+ * Load the persisted shadow book under the engine's own economics, so the
+ * counterfactual resumes across restarts instead of restarting its evidence.
+ */
+export async function loadShadowBoot(userId: string): Promise<ShadowBookSnapshot> {
+  return loadShadowBookShared(userId, shadowEconomicsOf(ENGINE_SHADOW_CONFIG), {
+    maxOpen: ENGINE_SHADOW_CONFIG.maxOpen,
+    maxClosed: ENGINE_SHADOW_CONFIG.maxClosed,
+  });
 }
 
 export async function upsertHeartbeat(

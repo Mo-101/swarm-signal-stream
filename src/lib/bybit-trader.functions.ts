@@ -153,6 +153,20 @@ async function signedRequest<T = unknown>(
   });
   const text = await res.text();
   if (!res.ok) {
+    let bybitError: BybitResp<unknown> | undefined;
+    try {
+      bybitError = JSON.parse(text) as BybitResp<unknown>;
+    } catch {
+      /* body is not JSON */
+    }
+    if (bybitError && typeof bybitError.retCode === "number") {
+      const err = new BybitError(classifyBybit(bybitError.retCode, bybitError.retMsg));
+      console.error(
+        `[bybit] HTTP ${res.status} on ${path}: retCode=${bybitError.retCode}, retMsg=${bybitError.retMsg}, reason=${err.info.reason}`,
+      );
+      throw err;
+    }
+    console.error(`[bybit] HTTP ${res.status} on ${path}: no parseable retCode in response`);
     throw new BybitError({
       message: `Bybit HTTP ${res.status}: ${text}`,
       status: res.status,
@@ -161,7 +175,11 @@ async function signedRequest<T = unknown>(
   }
   const parsed = JSON.parse(text) as BybitResp<T>;
   if (parsed.retCode !== 0) {
-    throw new BybitError(classifyBybit(parsed.retCode, parsed.retMsg));
+    const err = new BybitError(classifyBybit(parsed.retCode, parsed.retMsg));
+    console.error(
+      `[bybit] business error on ${path}: retCode=${parsed.retCode}, retMsg=${parsed.retMsg}, reason=${err.info.reason}`,
+    );
+    throw err;
   }
   return parsed.result;
 }

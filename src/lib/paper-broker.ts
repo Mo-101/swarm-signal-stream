@@ -15,6 +15,26 @@ import {
   type InstrumentFilter,
 } from "@/lib/microstructure";
 
+// ── risk overrides ──
+// This module is imported by the dashboard bundle as well as the runner, so
+// `process` may not exist. Read defensively and never let a bad value through:
+// a typo in .env must not silently arm 100x leverage.
+function envNum(name: string, fallback: number, min: number, max: number): number {
+  const raw =
+    typeof process !== "undefined" && process.env ? process.env[name] : undefined;
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < min || n > max) {
+    if (typeof console !== "undefined") {
+      console.warn(
+        `[paper-broker] ignoring ${name}="${raw}" (must be a number in [${min}, ${max}]); using ${fallback}`,
+      );
+    }
+    return fallback;
+  }
+  return n;
+}
+
 export interface Position {
   id: string;
   symbol: string;
@@ -191,10 +211,10 @@ export function lastFundingBoundary(t: number): number {
 }
 
 export const DEFAULT_PAPER_CONFIG: PaperConfig = {
-  startingBalance: 10_000,
-  maxPositions: 5,
-  riskPerTrade: 0.01,
-  slPct: 0.02,
+  startingBalance: envNum("STARTING_BALANCE", 10_000, 1, 10_000_000),
+  maxPositions: envNum("MAX_POSITIONS", 5, 1, 50),
+  riskPerTrade: envNum("RISK_PER_TRADE", 0.005, 0.0001, 0.1),
+  slPct: envNum("SL_PCT", 0.02, 0.001, 0.2),
   tpPct: 0.04,
   minConfidence: 0.7,
   maxDailyDrawdown: 0.05,
@@ -202,8 +222,8 @@ export const DEFAULT_PAPER_CONFIG: PaperConfig = {
   takerFeeRate: 0.00055,
   // Interest rate component: 0.03%/day = 0.01% per 8h interval.
   defaultFundingRate: 0.0001,
-  leverage: 10,
-  maxMarginUsage: 0.8,
+  leverage: envNum("LEVERAGE", 5, 1, 100),
+  maxMarginUsage: envNum("MAX_MARGIN_USAGE", 0.8, 0.01, 1),
 
   latencyMs: 250,
   latencyJitterMs: 120,

@@ -17,8 +17,11 @@ import {
   signInBotUser,
   loadBootState,
   createSupabasePersistence,
+  loadShadowBoot,
+  loadGridBoot,
   upsertHeartbeat,
 } from "./db";
+import { getGridExecutionMode, canPlaceGridOrders } from "./bybit-grid";
 import { startHealthServer, type HealthStatus } from "./health";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -90,6 +93,38 @@ async function main() {
       `realized pnl $${boot.account.realizedPnl.toFixed(2)}`,
   );
 
+  // Best-effort: a shadow book that fails to load costs history, not trading.
+  let shadowBoot;
+  try {
+    shadowBoot = await loadShadowBoot(userId);
+    console.log(
+      `[runner] shadow book resumed: ${shadowBoot.open.length} open, ` +
+        `${shadowBoot.closed.length} closed`,
+    );
+  } catch (e) {
+    console.error("[runner] shadow book load failed, starting empty:", e);
+  }
+
+  // Grid engine ships present but gated: only FUTURES_GRID_MODE=testnet can
+  // reach the exchange, so a paper-mode image cannot place an order at all.
+  const gridMode = getGridExecutionMode();
+  console.log(
+    `[grid] execution mode=${gridMode} ` +
+      `(orders ${canPlaceGridOrders(gridMode) ? "ENABLED" : "suppressed"})`,
+  );
+
+  let gridBoot;
+  try {
+    gridBoot = await loadGridBoot(userId);
+    console.log(
+      gridBoot.length > 0
+        ? `[grid] state restored: ${gridBoot.map((g) => g.config.symbol).join(", ")}`
+        : "[grid] no persisted grids",
+    );
+  } catch (e) {
+    console.error("[grid] state load failed, starting with no grids:", e);
+  }
+
   console.log("[runner] discovering Bybit USDT perpetual symbols...");
   const symbols = await fetchPerpetualSymbols();
   console.log(`[runner] tracking ${symbols.length} symbols`);
@@ -122,6 +157,8 @@ async function main() {
     boot,
     getLearned: () => learned,
     persistence,
+    shadowBoot,
+    gridBoot,
     hooks: {
       onReportUpdate: (report) => {
         learned = deriveEdge(report, DEFAULT_PAPER_CONFIG.minConfidence);

@@ -16,17 +16,15 @@ export const loadEngineState = createServerFn({ method: "GET" })
 export const getEdgeReport = createServerFn({ method: "GET" })
   .middleware([requireAuth])
   .handler(async ({ context }) => {
-    // Neon is canonical; the Supabase RPC is only consulted if Neon fails.
     try {
       const { getNeonSql } = await import("@/lib/db/neon");
       const rows = await getNeonSql()`SELECT edge_report(${context.userId}) AS report`;
       const report = rows[0]?.report as EdgeReport | undefined;
       if (report) return report;
     } catch (e) {
-      console.error("[edge] Neon edge_report failed, falling back to Supabase:", e);
+      console.error("[edge] Neon edge_report failed:", e);
     }
-    const { data } = await context.supabase.rpc("edge_report");
-    return (data as EdgeReport | null) ?? EMPTY_EDGE_REPORT;
+    return EMPTY_EDGE_REPORT;
   });
 
 export const ingestSignals = createServerFn({ method: "POST" })

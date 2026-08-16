@@ -6,7 +6,8 @@
 // since it's a plain Node process with no client bundle to worry about.
 import { getNeonSql, getNeonSqlOrNoop, neonEnabled } from "./neon";
 import { EMPTY_EDGE_REPORT, type EdgeReport } from "@/lib/edge-model";
-import type { ShadowStats } from "@/lib/shadow-book";
+import type { ShadowBookSnapshot, ShadowStats, ShadowTrade } from "@/lib/shadow-book";
+import type { FuturesGridConfig, GridRuntimeState } from "@/lib/futures-grid";
 import type {
   StoredTrade,
   SignalInput,
@@ -199,6 +200,214 @@ export async function resetPaperAccount(
   const report = (reportRows[0]?.report as EdgeReport | undefined) ?? EMPTY_EDGE_REPORT;
 
   return { report };
+}
+
+// ── Shadow book (write) ─────────────────────────────────────────────────
+
+// Both writes are upserts on (user_id, shadow_id) rather than insert-then-
+// update: the open write is best-effort and fire-and-forget, so a close must
+// still land a complete row even when the open never made it to the database.
+// Losing a closed shadow trade loses the evidence the book exists to collect.
+
+export async function persistShadowOpen(userId: string, t: ShadowTrade): Promise<void> {
+  const sql = getNeonSqlOrNoop();
+  await sql`
+    INSERT INTO shadow_trades (
+      user_id, shadow_id, symbol, side, reason, confidence, regime, notional,
+      entry_price, stop_loss, take_profit, status, last_price, last_marked_at,
+      max_favourable_bps, max_adverse_bps, opened_at
+    ) VALUES (
+      ${userId}, ${t.id}, ${t.symbol}, ${t.side}, ${t.reason}, ${t.confidence},
+      ${t.regime}, ${t.notional}, ${t.entryPrice}, ${t.stopLoss}, ${t.takeProfit},
+      'open', ${t.lastPrice}, ${new Date(t.lastMarkedAt).toISOString()},
+      ${t.maxFavourableBps}, ${t.maxAdverseBps}, ${new Date(t.openedAt).toISOString()}
+    )
+    ON CONFLICT (user_id, shadow_id) DO UPDATE SET
+      last_price = EXCLUDED.last_price,
+      last_marked_at = EXCLUDED.last_marked_at,
+      max_favourable_bps = EXCLUDED.max_favourable_bps,
+      max_adverse_bps = EXCLUDED.max_adverse_bps`;
+}
+
+export async function persistShadowClose(userId: string, t: ShadowTrade): Promise<void> {
+  const sql = getNeonSqlOrNoop();
+  await sql`
+    INSERT INTO shadow_trades (
+      user_id, shadow_id, symbol, side, reason, confidence, regime, notional,
+      entry_price, stop_loss, take_profit, status, last_price, last_marked_at,
+      max_favourable_bps, max_adverse_bps, exit_price, exit_reason,
+      gross_bps, net_bps, net_usd, fee_usd, funding_usd, opened_at, closed_at
+    ) VALUES (
+      ${userId}, ${t.id}, ${t.symbol}, ${t.side}, ${t.reason}, ${t.confidence},
+      ${t.regime}, ${t.notional}, ${t.entryPrice}, ${t.stopLoss}, ${t.takeProfit},
+      'closed', ${t.lastPrice}, ${new Date(t.lastMarkedAt).toISOString()},
+      ${t.maxFavourableBps}, ${t.maxAdverseBps}, ${t.exitPrice}, ${t.exitReason},
+      ${t.grossBps}, ${t.netBps}, ${t.netUsd}, ${t.feeUsd}, ${t.fundingUsd},
+      ${new Date(t.openedAt).toISOString()},
+      ${t.closedAt === null ? null : new Date(t.closedAt).toISOString()}
+    )
+    ON CONFLICT (user_id, shadow_id) DO UPDATE SET
+      status = 'closed',
+      last_price = EXCLUDED.last_price,
+      last_marked_at = EXCLUDED.last_marked_at,
+      max_favourable_bps = EXCLUDED.max_favourable_bps,
+      max_adverse_bps = EXCLUDED.max_adverse_bps,
+      exit_price = EXCLUDED.exit_price,
+      exit_reason = EXCLUDED.exit_reason,
+      gross_bps = EXCLUDED.gross_bps,
+      net_bps = EXCLUDED.net_bps,
+      net_usd = EXCLUDED.net_usd,
+      fee_usd = EXCLUDED.fee_usd,
+      funding_usd = EXCLUDED.funding_usd,
+      closed_at = EXCLUDED.closed_at`;
+}
+
+// ── Shadow book (read) ──────────────────────────────────────────────────
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function mapShadowRow(row: any): ShadowTrade {
+  const num = (v: unknown): number | null => (v === null || v === undefined ? null : Number(v));
+  return {
+    id: row.shadow_id,
+    symbol: row.symbol,
+    side: row.side,
+    reason: row.reason,
+    confidence: Number(row.confidence),
+    regime: row.regime,
+    notional: Number(row.notional),
+    entryPrice: Number(row.entry_price),
+    stopLoss: Number(row.stop_loss),
+    takeProfit: Number(row.take_profit),
+    openedAt: new Date(row.opened_at).getTime(),
+    lastPrice: Number(row.last_price),
+    lastMarkedAt: new Date(row.last_marked_at).getTime(),
+    maxFavourableBps: Number(row.max_favourable_bps),
+    maxAdverseBps: Number(row.max_adverse_bps),
+    exitPrice: num(row.exit_price),
+    closedAt: row.closed_at ? new Date(row.closed_at).getTime() : null,
+    exitReason: row.exit_reason,
+    netBps: num(row.net_bps),
+    netUsd: num(row.net_usd),
+    grossBps: num(row.gross_bps),
+    feeUsd: num(row.fee_usd),
+    fundingUsd: num(row.funding_usd),
+  };
+}
+
+/**
+ * Rebuild a shadow book snapshot from persisted rows.
+ *
+ * `notional` is the one economics field stored per row, so it is the guard
+ * used here: rows opened under a different shadow notional are dropped rather
+ * than mixed into stats they are not comparable with. The caller supplies the
+ * remaining economics from its live config, and ShadowBook.restore() applies
+ * its own per-row structural validation on top.
+ */
+export async function loadShadowBook(
+  userId: string,
+  economics: ShadowBookSnapshot["economics"],
+  limits: { maxOpen: number; maxClosed: number },
+): Promise<ShadowBookSnapshot> {
+  if (!neonEnabled()) {
+    return { version: 1, seq: 0, economics, open: [], closed: [] };
+  }
+
+  const sql = getNeonSql();
+  const openRows = await sql`
+    SELECT * FROM shadow_trades
+    WHERE user_id = ${userId} AND status = 'open' AND notional = ${economics.notional}
+    ORDER BY opened_at DESC LIMIT ${limits.maxOpen}`;
+  const closedRows = await sql`
+    SELECT * FROM shadow_trades
+    WHERE user_id = ${userId} AND status = 'closed' AND notional = ${economics.notional}
+    ORDER BY closed_at DESC LIMIT ${limits.maxClosed}`;
+
+  const open = openRows.map(mapShadowRow);
+  // Query takes the newest maxClosed; reverse back to chronological order so
+  // the in-memory book keeps trimming its oldest entries first.
+  const closed = closedRows.map(mapShadowRow).reverse();
+
+  // Trade ids are `shadow-<openedAt>-<seq>`. Resuming past the highest seq
+  // already issued keeps ids unique across restarts.
+  const seq = [...open, ...closed].reduce((max, t) => {
+    const parsed = Number(t.id.split("-").pop());
+    return Number.isSafeInteger(parsed) && parsed > max ? parsed : max;
+  }, 0);
+
+  return { version: 1, seq, economics, open, closed };
+}
+
+// ── Futures grid state ──────────────────────────────────────────────────
+
+// Grid state is stored apart from the shadow ledger on purpose: the shadow
+// book is an append-only record of what was never traded, while the grid is
+// mutable live state. Mixing them would let a grid write clobber evidence.
+
+export async function persistGridState(args: {
+  userId: string;
+  config: FuturesGridConfig;
+  state: GridRuntimeState;
+}): Promise<void> {
+  const { userId, config, state } = args;
+  const sql = getNeonSqlOrNoop();
+  await sql`
+    INSERT INTO futures_grid_state (user_id, symbol, config, runtime_state, active, updated_at)
+    VALUES (
+      ${userId}, ${config.symbol}, ${JSON.stringify(config)}::jsonb,
+      ${JSON.stringify(state)}::jsonb, ${state.active}, now()
+    )
+    ON CONFLICT (user_id, symbol) DO UPDATE SET
+      config = EXCLUDED.config,
+      runtime_state = EXCLUDED.runtime_state,
+      active = EXCLUDED.active,
+      updated_at = now()`;
+}
+
+export interface StoredGridState {
+  config: FuturesGridConfig;
+  state: GridRuntimeState;
+  active: boolean;
+}
+
+function parseJsonColumn<T>(value: unknown): T {
+  return typeof value === "string" ? (JSON.parse(value) as T) : (value as T);
+}
+
+export async function loadGridState(args: {
+  userId: string;
+  symbol: string;
+}): Promise<StoredGridState | null> {
+  if (!neonEnabled()) return null;
+
+  const sql = getNeonSql();
+  const rows = await sql`
+    SELECT config, runtime_state, active FROM futures_grid_state
+    WHERE user_id = ${args.userId} AND symbol = ${args.symbol}`;
+
+  const row = rows[0] as Record<string, unknown> | undefined;
+  if (!row) return null;
+
+  return {
+    config: parseJsonColumn<FuturesGridConfig>(row.config),
+    state: parseJsonColumn<GridRuntimeState>(row.runtime_state),
+    active: Boolean(row.active),
+  };
+}
+
+/** Every grid configured for this user, for boot restore and dashboard reads. */
+export async function loadAllGridStates(userId: string): Promise<StoredGridState[]> {
+  if (!neonEnabled()) return [];
+
+  const sql = getNeonSql();
+  const rows = await sql`
+    SELECT config, runtime_state, active FROM futures_grid_state
+    WHERE user_id = ${userId} ORDER BY symbol`;
+
+  return (rows as Record<string, unknown>[]).map((row) => ({
+    config: parseJsonColumn<FuturesGridConfig>(row.config),
+    state: parseJsonColumn<GridRuntimeState>(row.runtime_state),
+    active: Boolean(row.active),
+  }));
 }
 
 // ── Runner heartbeat (write) ────────────────────────────────────────────
