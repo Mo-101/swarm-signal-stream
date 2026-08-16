@@ -11,8 +11,8 @@ import {
   persistShadowOpen as persistShadowOpenShared,
   persistShadowClose as persistShadowCloseShared,
   loadShadowBook as loadShadowBookShared,
-  persistGridState as persistGridStateShared,
-  loadAllGridStates as loadAllGridStatesShared,
+  persistGridRuntimeBySymbol as persistGridRuntimeBySymbolShared,
+  loadGridStatesForUser as loadGridStatesForUserShared,
   type HeartbeatFields,
 } from "../src/lib/db/edge-store.server";
 import type { FuturesGridConfig, GridRuntimeState } from "../src/lib/futures-grid";
@@ -96,18 +96,32 @@ export function createSupabasePersistence(
       await persistShadowCloseShared(userId, trade);
     },
     async saveGridState(config: FuturesGridConfig, state: GridRuntimeState) {
-      await persistGridStateShared({ userId, config, state });
+      // Runtime marking only. desired_state and the version columns belong to
+      // the coordinator; a marking write must never move them.
+      await persistGridRuntimeBySymbolShared({
+        userId,
+        symbol: config.symbol,
+        runtimeState: state,
+        runtimeStatus: state.active ? "running" : state.haltReasons?.length ? "halted" : "idle",
+      });
     },
     onPersistError: onError,
   };
 }
 
-/** Grids previously configured for this user, restored verbatim at boot. */
+/**
+ * Grids previously configured for this user, restored verbatim at boot.
+ * Only rows the runner had actually configured (runtime_state present) are
+ * restored — a row that is merely *desired* is left for the coordinator to
+ * apply, so restore never front-runs validation.
+ */
 export async function loadGridBoot(
   userId: string,
 ): Promise<Array<{ config: FuturesGridConfig; state: GridRuntimeState }>> {
-  const stored = await loadAllGridStatesShared(userId);
-  return stored.map(({ config, state }) => ({ config, state }));
+  const stored = await loadGridStatesForUserShared(userId);
+  return stored
+    .filter((row) => row.runtimeState !== null)
+    .map((row) => ({ config: row.config, state: row.runtimeState as GridRuntimeState }));
 }
 
 /**

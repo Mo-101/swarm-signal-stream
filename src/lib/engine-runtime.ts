@@ -171,6 +171,11 @@ export interface EngineRuntime {
    */
   configureGrid(config: FuturesGridConfig, markPrice: number): GridRuntimeState;
   restoreGrid(config: FuturesGridConfig, state: GridRuntimeState): void;
+  /**
+   * Last price seen by the live tick feed. Exposed so the grid coordinator
+   * reuses the feed the engine already runs rather than opening a second one.
+   */
+  getMarkPrice(symbol: string): number | null;
   getGridState(symbol: string): GridRuntimeState | null;
   getGridStates(): GridRuntimeState[];
   getGridConfig(symbol: string): FuturesGridConfig | null;
@@ -580,6 +585,7 @@ export function createEngineRuntime(opts: EngineRuntimeOptions): EngineRuntime {
     getEngine: () => engine,
     configureGrid,
     restoreGrid,
+    getMarkPrice: (symbol) => marksRef.get(symbol) ?? null,
     getGridState: (symbol) => {
       const state = gridStates.get(symbol);
       return state ? structuredClone(state) : null;

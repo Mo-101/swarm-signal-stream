@@ -337,77 +337,150 @@ export async function loadShadowBook(
   return { version: 1, seq, economics, open, closed };
 }
 
-// ── Futures grid state ──────────────────────────────────────────────────
+// ── Futures grid control plane ──────────────────────────────────────────
 
-// Grid state is stored apart from the shadow ledger on purpose: the shadow
-// book is an append-only record of what was never traded, while the grid is
-// mutable live state. Mixing them would let a grid write clobber evidence.
+// Desired state (what the user asked for) is kept separate from runtime state
+// (what the runner is doing). The web process only ever writes intent and bumps
+// config_version; the runner claims the row, applies it, and sets
+// applied_version. config_version > applied_version means unapplied work, which
+// is what makes the reconcile loop idempotent.
 
-export async function persistGridState(args: {
+export type GridDesiredState = "stopped" | "running";
+
+export type GridRuntimeStatus = "idle" | "starting" | "running" | "halted" | "stopping" | "error";
+
+export interface PersistedGridState {
+  id: string;
   userId: string;
+  symbol: string;
+  desiredState: GridDesiredState;
+  runtimeStatus: GridRuntimeStatus;
   config: FuturesGridConfig;
-  state: GridRuntimeState;
-}): Promise<void> {
-  const { userId, config, state } = args;
-  const sql = getNeonSqlOrNoop();
-  await sql`
-    INSERT INTO futures_grid_state (user_id, symbol, config, runtime_state, active, updated_at)
-    VALUES (
-      ${userId}, ${config.symbol}, ${JSON.stringify(config)}::jsonb,
-      ${JSON.stringify(state)}::jsonb, ${state.active}, now()
-    )
-    ON CONFLICT (user_id, symbol) DO UPDATE SET
-      config = EXCLUDED.config,
-      runtime_state = EXCLUDED.runtime_state,
-      active = EXCLUDED.active,
-      updated_at = now()`;
+  runtimeState: GridRuntimeState | null;
+  configVersion: number;
+  appliedVersion: number;
+  claimedBy: string | null;
+  claimedAt: string | null;
+  lastError: string | null;
+  updatedAt: string;
 }
 
-export interface StoredGridState {
-  config: FuturesGridConfig;
-  state: GridRuntimeState;
-  active: boolean;
-}
-
-function parseJsonColumn<T>(value: unknown): T {
+function parseJsonColumn<T>(value: unknown): T | null {
+  if (value === null || value === undefined) return null;
   return typeof value === "string" ? (JSON.parse(value) as T) : (value as T);
 }
 
-export async function loadGridState(args: {
-  userId: string;
-  symbol: string;
-}): Promise<StoredGridState | null> {
-  if (!neonEnabled()) return null;
-
-  const sql = getNeonSql();
-  const rows = await sql`
-    SELECT config, runtime_state, active FROM futures_grid_state
-    WHERE user_id = ${args.userId} AND symbol = ${args.symbol}`;
-
-  const row = rows[0] as Record<string, unknown> | undefined;
-  if (!row) return null;
-
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function mapGridRow(row: any): PersistedGridState {
   return {
-    config: parseJsonColumn<FuturesGridConfig>(row.config),
-    state: parseJsonColumn<GridRuntimeState>(row.runtime_state),
-    active: Boolean(row.active),
+    id: row.id,
+    userId: row.user_id,
+    symbol: row.symbol,
+    desiredState: row.desired_state,
+    runtimeStatus: row.runtime_status,
+    config: parseJsonColumn<FuturesGridConfig>(row.config) as FuturesGridConfig,
+    runtimeState: parseJsonColumn<GridRuntimeState>(row.runtime_state),
+    configVersion: Number(row.config_version),
+    appliedVersion: Number(row.applied_version),
+    claimedBy: row.claimed_by ?? null,
+    claimedAt: row.claimed_at ? new Date(row.claimed_at).toISOString() : null,
+    lastError: row.last_error ?? null,
+    updatedAt: new Date(row.updated_at).toISOString(),
   };
 }
 
-/** Every grid configured for this user, for boot restore and dashboard reads. */
-export async function loadAllGridStates(userId: string): Promise<StoredGridState[]> {
-  if (!neonEnabled()) return [];
-
+/**
+ * Write desired configuration and bump config_version so the runner picks it
+ * up. The bump happens inside the UPSERT rather than as a read-then-write, so
+ * two concurrent writers cannot both read version N and both write N+1.
+ */
+export async function upsertGridConfig(args: {
+  userId: string;
+  config: FuturesGridConfig;
+  desiredState: GridDesiredState;
+}): Promise<PersistedGridState> {
   const sql = getNeonSql();
   const rows = await sql`
-    SELECT config, runtime_state, active FROM futures_grid_state
-    WHERE user_id = ${userId} ORDER BY symbol`;
+    INSERT INTO futures_grid_state (user_id, symbol, config, desired_state, config_version, updated_at)
+    VALUES (${args.userId}, ${args.config.symbol}, ${JSON.stringify(args.config)}::jsonb,
+            ${args.desiredState}, 1, now())
+    ON CONFLICT (user_id, symbol) DO UPDATE SET
+      config = EXCLUDED.config,
+      desired_state = EXCLUDED.desired_state,
+      config_version = futures_grid_state.config_version + 1,
+      last_error = NULL,
+      updated_at = now()
+    RETURNING *`;
 
-  return (rows as Record<string, unknown>[]).map((row) => ({
-    config: parseJsonColumn<FuturesGridConfig>(row.config),
-    state: parseJsonColumn<GridRuntimeState>(row.runtime_state),
-    active: Boolean(row.active),
-  }));
+  return mapGridRow(rows[0]);
+}
+
+export async function loadGridStatesForUser(userId: string): Promise<PersistedGridState[]> {
+  if (!neonEnabled()) return [];
+  const sql = getNeonSql();
+  const rows = await sql`
+    SELECT * FROM futures_grid_state WHERE user_id = ${userId} ORDER BY updated_at DESC`;
+  return (rows as Record<string, unknown>[]).map(mapGridRow);
+}
+
+/**
+ * Rows the runner must act on: anything the user wants running, plus anything
+ * still reported as running/starting so a grid that was stopped mid-flight is
+ * driven back to idle rather than stranded.
+ *
+ * Scoped to one user — this runner signs in as a single account, and a global
+ * query would have it reconciling grids it has no business touching.
+ */
+export async function loadRunnableGridStates(userId: string): Promise<PersistedGridState[]> {
+  if (!neonEnabled()) return [];
+  const sql = getNeonSql();
+  const rows = await sql`
+    SELECT * FROM futures_grid_state
+    WHERE user_id = ${userId}
+      AND (desired_state = 'running' OR runtime_status IN ('running', 'starting'))
+    ORDER BY symbol`;
+  return (rows as Record<string, unknown>[]).map(mapGridRow);
+}
+
+export async function persistGridRuntime(args: {
+  id: string;
+  runtimeStatus: GridRuntimeStatus;
+  runtimeState: GridRuntimeState | null;
+  appliedVersion: number;
+  claimedBy: string;
+  lastError?: string | null;
+}): Promise<void> {
+  const sql = getNeonSqlOrNoop();
+  await sql`
+    UPDATE futures_grid_state SET
+      runtime_status = ${args.runtimeStatus},
+      runtime_state = ${args.runtimeState === null ? null : JSON.stringify(args.runtimeState)}::jsonb,
+      applied_version = ${args.appliedVersion},
+      claimed_by = ${args.claimedBy},
+      claimed_at = now(),
+      last_error = ${args.lastError ?? null},
+      updated_at = now()
+    WHERE id = ${args.id}`;
+}
+
+/**
+ * Ongoing runtime marking, keyed by symbol so the engine never has to know a
+ * database id. Deliberately leaves desired_state and the version columns alone
+ * — only the coordinator moves those.
+ */
+export async function persistGridRuntimeBySymbol(args: {
+  userId: string;
+  symbol: string;
+  runtimeState: GridRuntimeState;
+  runtimeStatus: GridRuntimeStatus;
+}): Promise<void> {
+  const sql = getNeonSqlOrNoop();
+  await sql`
+    UPDATE futures_grid_state SET
+      runtime_state = ${JSON.stringify(args.runtimeState)}::jsonb,
+      runtime_status = ${args.runtimeStatus},
+      updated_at = now()
+    WHERE user_id = ${args.userId} AND symbol = ${args.symbol}`;
 }
 
 // ── Runner heartbeat (write) ────────────────────────────────────────────

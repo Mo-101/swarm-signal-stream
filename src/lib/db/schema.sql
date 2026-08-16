@@ -138,19 +138,31 @@ CREATE INDEX IF NOT EXISTS shadow_trades_user_status_idx
 -- column: config and runtime state change on a different cadence from the
 -- heartbeat, and one row per (user, symbol) lets several grids run without
 -- contending on a single row.
+-- Control plane: desired_state is what the user asked for, runtime_status is
+-- what the runner is doing. config_version > applied_version means the runner
+-- has unapplied work, which is what makes its reconcile loop idempotent.
 CREATE TABLE IF NOT EXISTS futures_grid_state (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id uuid NOT NULL,
   symbol text NOT NULL,
+  desired_state text NOT NULL DEFAULT 'stopped'
+    CHECK (desired_state IN ('stopped', 'running')),
+  runtime_status text NOT NULL DEFAULT 'idle'
+    CHECK (runtime_status IN ('idle','starting','running','halted','stopping','error')),
   config jsonb NOT NULL,
-  runtime_state jsonb NOT NULL,
-  active boolean NOT NULL DEFAULT false,
+  runtime_state jsonb,
+  config_version bigint NOT NULL DEFAULT 1,
+  applied_version bigint NOT NULL DEFAULT 0,
+  claimed_by text,
+  claimed_at timestamptz,
+  last_error text,
   created_at timestamptz NOT NULL DEFAULT now(),
   updated_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE (user_id, symbol)
 );
 CREATE INDEX IF NOT EXISTS futures_grid_state_user_idx ON futures_grid_state (user_id);
-CREATE INDEX IF NOT EXISTS futures_grid_state_active_idx ON futures_grid_state (user_id, active);
+CREATE INDEX IF NOT EXISTS futures_grid_state_desired_idx ON futures_grid_state (desired_state);
+CREATE INDEX IF NOT EXISTS futures_grid_state_runtime_idx ON futures_grid_state (runtime_status);
 
 -- Live (real-money) trading — kept in its own tables, deliberately separate
 -- from paper_accounts/paper_trades: a query bug here can never leak a real

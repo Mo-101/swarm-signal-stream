@@ -22,6 +22,7 @@ import {
   upsertHeartbeat,
 } from "./db";
 import { getGridExecutionMode, canPlaceGridOrders } from "./bybit-grid";
+import { GridRuntimeCoordinator } from "./grid-runtime";
 import { startHealthServer, type HealthStatus } from "./health";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -174,8 +175,29 @@ async function main() {
         console.log(
           `[runner] CLOSE ${t.side} ${t.symbol} @ ${t.exitPrice} pnl=$${t.pnl.toFixed(2)} (${t.reason})`,
         ),
-      onTick: () => {
+      onTick: (t) => {
         health.lastTickAt = Date.now();
+
+        // Mark any grid on this symbol. In paper mode no orders exist, so the
+        // position fields are genuinely zero and liquidation genuinely unknown
+        // — reported as null rather than 0, which would read as "at the mark".
+        const grid = runtime.getGridState(t.symbol);
+        if (grid) {
+          const result = runtime.updateGridRiskState(t.symbol, {
+            markPrice: t.price,
+            positionQty: grid.positionQty,
+            positionNotionalUsd: grid.positionNotionalUsd,
+            liquidationPrice: grid.liquidationPrice,
+            marginUtilizationPct: grid.marginUtilizationPct,
+            freeMarginPct: grid.freeMarginPct,
+            unrealizedPnlUsd: grid.unrealizedPnlUsd,
+            fundingUsd: grid.fundingUsd,
+            now: t.time,
+          });
+          if (result && !result.risk.ok) {
+            console.warn(`[grid] risk halt ${t.symbol}: ${result.risk.reasons.join(", ")}`);
+          }
+        }
       },
       onSnapshot: (s) => {
         lastTickRate = s.tickRate;
@@ -190,6 +212,11 @@ async function main() {
   runtime.getBroker().setMinConfidence(learned.minConfidence);
   runtime.start();
   console.log("[runner] engine started");
+
+  // The runner owns grid execution. The dashboard only writes intent.
+  const gridCoordinator = new GridRuntimeCoordinator(runtime, userId);
+  await gridCoordinator.start();
+  console.log(`[grid] coordinator started (poll 2s, runner owns execution)`);
 
   const heartbeat = setInterval(() => {
     const broker = runtime.getBroker();
@@ -219,6 +246,7 @@ async function main() {
     health.status = "stopped";
     clearInterval(heartbeat);
     clearInterval(statusLog);
+    gridCoordinator.stop();
     runtime.stop();
     await upsertHeartbeat(supabase, userId, startedAt, {
       status: "stopped",

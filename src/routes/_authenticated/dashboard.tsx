@@ -41,6 +41,7 @@ import { EdgePanel } from "@/components/EdgePanel";
 import { ExecutionPanel } from "@/components/ExecutionPanel";
 import { ReviewProgress } from "@/components/ReviewProgress";
 import { ShadowPanel } from "@/components/ShadowPanel";
+import { GridPanel } from "@/components/GridPanel";
 import { EMPTY_SHADOW_STATS, type ShadowStats } from "@/lib/shadow-book";
 
 import { clearLocalSession } from "@/lib/auth/local-session";
@@ -178,6 +179,7 @@ type Tab =
   | "execution"
   | "edge"
   | "shadow"
+  | "grid"
   | "live"
   | "system";
 
@@ -1019,6 +1021,7 @@ function SwarmDashboard() {
                 "execution",
                 "edge",
                 "shadow",
+                "grid",
                 "live",
                 "system",
               ] as Tab[]
@@ -1125,6 +1128,7 @@ function SwarmDashboard() {
           {tab === "shadow" && (
             <ShadowPanel shadow={activeShadow} currentThreshold={learned.minConfidence} />
           )}
+          {tab === "grid" && <GridPanel />}
           {tab === "live" && (
             <LivePanel
               enabled={liveMode}
