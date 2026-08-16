@@ -9,23 +9,6 @@ RUN npm config set fetch-retries 5 && \
 
 COPY . .
 
-# Build the dashboard for production.
-#
-# The container previously served `vite dev`, which resolves modules on demand
-# from /src/** — behind a public proxy that published the entire application
-# source. Shipping built output closes that and also stops server-function ids
-# from being tied to live module-graph state.
-#
-# node-server preset because the default here is cloudflare-module, whose
-# output is a Worker bundle that plain node cannot execute.
-#
-# Only publishable client values may be passed here: ARGs are baked into the
-# bundle. Never pass DATABASE_URL, API secrets, or the runner password.
-ARG VITE_SUPABASE_URL=""
-ARG VITE_SUPABASE_PUBLISHABLE_KEY=""
-ARG VITE_SUPABASE_PROJECT_ID=""
-RUN NITRO_PRESET=node-server npm run build
-
 EXPOSE 8090
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
   CMD node -e "fetch('http://localhost:8090/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"

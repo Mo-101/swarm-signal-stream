@@ -47,6 +47,21 @@ function usd(v: number): string {
   return `${v < 0 ? "-" : ""}$${Math.abs(v).toFixed(2)}`;
 }
 
+/**
+ * A failing server function rejects with the response body, and this app's SSR
+ * wrapper answers 500s with a rendered HTML error page — so the raw message can
+ * be an entire document. Dumping that into the panel is unreadable noise, and
+ * it buries the one fact worth showing.
+ */
+function toMessage(e: unknown, fallback: string): string {
+  const raw = (e instanceof Error ? e.message : typeof e === "string" ? e : "").trim();
+  if (!raw) return fallback;
+  if (/^<!doctype|^<html|<body[\s>]|<\/html>/i.test(raw)) {
+    return `${fallback} — the server returned an error page. Check the runner logs.`;
+  }
+  return raw.length > 200 ? `${raw.slice(0, 200)}…` : raw;
+}
+
 function num(v: number, dp = 2): string {
   return v.toLocaleString(undefined, { maximumFractionDigits: dp });
 }
@@ -92,13 +107,19 @@ export function GridPanel({ marks }: { marks?: Map<string, number> }) {
   const [rows, setRows] = useState<GridRow[]>([]);
   const [form, setForm] = useState<GridFormValues>(DEFAULTS);
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
+  // `sticky` marks an error the user caused (configure/stop). Polling clears a
+  // stale load failure once it recovers, but must not wipe an action's error
+  // out from under the user two seconds after they caused it.
+  const [error, setError] = useState<{ message: string; sticky: boolean } | null>(null);
 
   const refresh = useCallback(async () => {
     try {
       setRows(await loadGridStates());
+      setError((prev) => (prev?.sticky ? prev : null));
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to load grids");
+      setError((prev) =>
+        prev?.sticky ? prev : { message: toMessage(e, "Failed to load grids"), sticky: false },
+      );
     }
   }, []);
 
@@ -186,7 +207,7 @@ export function GridPanel({ marks }: { marks?: Map<string, number> }) {
       });
       await refresh();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to configure grid");
+      setError({ message: toMessage(e, "Failed to configure grid"), sticky: true });
     } finally {
       setBusy(false);
     }
@@ -199,7 +220,7 @@ export function GridPanel({ marks }: { marks?: Map<string, number> }) {
       await stopGrid({ data: { symbol: sym } });
       await refresh();
     } catch (e) {
-      setError(e instanceof Error ? e.message : "Failed to stop grid");
+      setError({ message: toMessage(e, "Failed to stop grid"), sticky: true });
     } finally {
       setBusy(false);
     }
@@ -304,7 +325,7 @@ export function GridPanel({ marks }: { marks?: Map<string, number> }) {
 
         {error && (
           <div className="mt-3 rounded-md border border-bear/40 bg-bear/10 p-2 text-xs text-bear">
-            {error}
+            {error.message}
           </div>
         )}
 
