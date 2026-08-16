@@ -246,6 +246,7 @@ export function createEngineRuntime(opts: EngineRuntimeOptions): EngineRuntime {
         lastPendingSweep = now;
         broker.processPending(now);
       }
+      shadow.mark(t.symbol, t.price, t.time);
       hooks.onTick?.(t);
     },
     onProposal: (p) => {
