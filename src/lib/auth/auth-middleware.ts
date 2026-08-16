@@ -32,14 +32,21 @@ function createSupabaseFetch(supabaseKey: string): typeof fetch {
 }
 
 function makeSupabaseClient(token?: string): SupabaseClient<Database> {
-  const SUPABASE_URL = process.env["SUPABASE_URL"];
-  const SUPABASE_PUBLISHABLE_KEY = process.env["SUPABASE_PUBLISHABLE_KEY"];
-  if (!SUPABASE_URL || !SUPABASE_PUBLISHABLE_KEY) {
-    throw new Error("Missing SUPABASE_URL / SUPABASE_PUBLISHABLE_KEY environment variables.");
+  const configuredUrl = process.env["SUPABASE_URL"];
+  const configuredKey = process.env["SUPABASE_PUBLISHABLE_KEY"];
+  let validUrl = false;
+  try {
+    const parsed = configuredUrl ? new URL(configuredUrl) : null;
+    validUrl = parsed?.protocol === "http:" || parsed?.protocol === "https:";
+  } catch {
+    validUrl = false;
   }
-  return createClient<Database>(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY, {
+  const mirrorEnabled = validUrl && Boolean(configuredKey?.trim());
+  const supabaseUrl = mirrorEnabled ? configuredUrl! : "http://127.0.0.1:9";
+  const supabaseKey = mirrorEnabled ? configuredKey! : "supabase-disabled";
+  return createClient<Database>(supabaseUrl, supabaseKey, {
     global: {
-      fetch: createSupabaseFetch(SUPABASE_PUBLISHABLE_KEY),
+      fetch: createSupabaseFetch(supabaseKey),
       headers: token ? { Authorization: `Bearer ${token}` } : {},
     },
     auth: { storage: undefined, persistSession: false, autoRefreshToken: false },

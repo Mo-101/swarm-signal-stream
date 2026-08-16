@@ -14,10 +14,34 @@ import type { OpenTradeInput, CloseTradeInput, SignalInput } from "../src/lib/db
 import type { EnginePersistence, EngineBootState } from "../src/lib/engine-runtime";
 import type { EdgeReport } from "../src/lib/edge-model";
 
-export function createRunnerSupabaseClient(url: string, publishableKey: string): SupabaseClient {
-  return createClient(url, publishableKey, {
+function validHttpUrl(value: string | undefined): value is string {
+  if (!value) return false;
+  try {
+    const parsed = new URL(value);
+    return parsed.protocol === "http:" || parsed.protocol === "https:";
+  } catch {
+    return false;
+  }
+}
+
+export function createRunnerSupabaseClient(
+  url?: string,
+  publishableKey?: string,
+): SupabaseClient {
+  // A local discard endpoint keeps the mirror interface available without
+  // making Supabase configuration a startup requirement. Neon operations are
+  // awaited; mirror calls are already best-effort and log their own failures.
+  const mirrorEnabled = validHttpUrl(url) && Boolean(publishableKey?.trim());
+  if (!mirrorEnabled) {
+    console.warn("[runner] Supabase mirror disabled; Neon remains canonical");
+  }
+  return createClient(
+    mirrorEnabled ? url : "http://127.0.0.1:9",
+    mirrorEnabled ? publishableKey! : "supabase-disabled",
+    {
     auth: { persistSession: false, autoRefreshToken: true },
-  });
+    },
+  );
 }
 
 export async function signInBotUser(

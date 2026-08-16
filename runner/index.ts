@@ -56,12 +56,13 @@ const HEALTH_PORT = Number(process.env.HEALTH_PORT ?? 8090);
 
 async function main() {
   requireEnv("DATABASE_URL"); // read directly by src/lib/db/neon.ts
-  const SUPABASE_URL = requireEnv("SUPABASE_URL");
-  const SUPABASE_PUBLISHABLE_KEY = requireEnv("SUPABASE_PUBLISHABLE_KEY");
   const RUNNER_EMAIL = requireEnv("RUNNER_EMAIL");
   const RUNNER_PASSWORD = requireEnv("RUNNER_PASSWORD");
 
-  const supabase = createRunnerSupabaseClient(SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY);
+  const supabase = createRunnerSupabaseClient(
+    process.env.SUPABASE_URL,
+    process.env.SUPABASE_PUBLISHABLE_KEY,
+  );
   console.log("[runner] signing in...");
   const userId = await signInBotUser(supabase, RUNNER_EMAIL, RUNNER_PASSWORD);
   console.log(`[runner] signed in as ${RUNNER_EMAIL} (${userId})`);
