@@ -8,8 +8,11 @@ const APP_PORT = process.env.PORT ?? "8080";
 const children = new Map();
 let stopping = false;
 
-function start(name, cmd, args) {
-  const child = spawn(cmd, args, { stdio: "inherit" });
+function start(name, cmd, args, env) {
+  const child = spawn(cmd, args, {
+    stdio: "inherit",
+    env: env ? { ...process.env, ...env } : process.env,
+  });
   children.set(name, child);
   console.log(`[supervisor] started ${name} (pid ${child.pid})`);
   child.on("exit", (code, signal) => {
@@ -44,5 +47,12 @@ function shutdown(exitCode) {
 process.on("SIGTERM", () => shutdown(0));
 process.on("SIGINT", () => shutdown(0));
 
-start("dashboard", "npx", ["vite", "--host", "0.0.0.0", "--port", APP_PORT]);
+// Built output, not `vite dev`. The dev server resolves modules on demand from
+// /src/**, so running it behind a public proxy served the entire application
+// source to anyone who asked for it. It also ties server-function ids to live
+// module-graph state, which stranded browser sessions on every deploy.
+start("dashboard", "node", [".output/server/index.mjs"], {
+  PORT: APP_PORT,
+  HOST: "0.0.0.0",
+});
 start("runner", "npx", ["tsx", "runner/index.ts"]);
