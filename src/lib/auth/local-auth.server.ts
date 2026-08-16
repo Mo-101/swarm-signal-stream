@@ -133,12 +133,26 @@ export async function signInLocal(email: string, password: string): Promise<Loca
     const envPassword = process.env.RUNNER_PASSWORD;
     if (envEmail && envPassword && normalized === envEmail && password === envPassword) {
       const id = await adoptExistingOwnerId();
-      const inserted = await sql`
-        INSERT INTO app_users (id, email, password_hash)
-        VALUES (${id}, ${normalized}, ${hashPassword(password)})
-        ON CONFLICT (email) DO UPDATE SET updated_at = now()
+      const passwordHash = hashPassword(password);
+      // The adopted data-owner id may already have an app_users row under a
+      // legacy email. Update that row in place so its primary key—and every
+      // trade/account foreign key attached to it—remains unchanged.
+      const adopted = await sql`
+        UPDATE app_users SET
+          email = ${normalized}, password_hash = ${passwordHash}, updated_at = now()
+        WHERE id = ${id}
         RETURNING id, email, password_hash`;
-      user = inserted[0] as UserRow;
+      if (adopted[0]) {
+        user = adopted[0] as UserRow;
+      } else {
+        const inserted = await sql`
+          INSERT INTO app_users (id, email, password_hash)
+          VALUES (${id}, ${normalized}, ${passwordHash})
+          ON CONFLICT (email) DO UPDATE SET
+            password_hash = EXCLUDED.password_hash, updated_at = now()
+          RETURNING id, email, password_hash`;
+        user = inserted[0] as UserRow;
+      }
       console.log(`[local-auth] bootstrapped bot user ${normalized} as ${user!.id}`);
     } else {
       throw new Error("Invalid email or password (local auth).");
