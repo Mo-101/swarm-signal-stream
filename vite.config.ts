@@ -18,7 +18,10 @@ export default defineConfig({
     server: {
       // Vite's dev-server Host-header check otherwise rejects requests
       // arriving through the alphatrade.mostarindustries.com reverse proxy.
-      allowedHosts: ["alphatrade.mostarindustries.com"],
+      allowedHosts: [
+        "alphatrade.mostarindustries.com",
+        "alphaswarm.mostarindustries.com",
+      ],
     },
   },
 });
