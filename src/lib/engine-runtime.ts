@@ -64,6 +64,8 @@ export interface EngineSnapshot {
   ticks: number;
   tickRate: number;
   halted: string | null;
+  /** Counterfactual book of every proposal the engine declined to trade. */
+  shadow: ShadowStats;
 }
 
 export interface EngineHooks {
