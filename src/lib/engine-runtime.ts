@@ -26,6 +26,7 @@ import {
   type MarginSummary,
 } from "@/lib/paper-broker";
 import { MicrostructureFeed, fetchInstrumentFilters, type MicroMetrics } from "@/lib/microstructure";
+import { ShadowBook, type ShadowStats } from "@/lib/shadow-book";
 import { confBucket, regimeOf, type LearnedEdge, type EdgeReport } from "@/lib/edge-model";
 import type {
   StoredTrade,
