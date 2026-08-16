@@ -34,3 +34,6 @@ runner/.env
 *.njsproj
 *.sln
 *.sw?
+
+# Claude Code local settings (may contain credentials in permission rules)
+.claude/
