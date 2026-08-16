@@ -1,13 +1,26 @@
+# ONE container running both services (dashboard + headless runner),
+# supervised internally by docker/supervisor.mjs.
+#
+#   docker compose up -d --build        # build + run on the VPS
+#   docker compose logs -f              # watch both services' logs
+#
+# All persistence is external (Neon canonical, Supabase mirror/fallback), so
+# the container itself is stateless and safe to rebuild/replace at any time.
 services:
   alpha-swarm:
-    image: ghcr.io/mo-101/swarm-signal-stream:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: alpha-swarm:latest
     container_name: alpha-swarm
     restart: always
     ports:
-      - "8085:8080"
+      - "8085:8080" # dashboard
+      - "8090:8090" # runner health endpoint
     env_file:
       - .env
     environment:
       - NODE_ENV=production
       - PORT=8080
       - HOST=0.0.0.0
+      - HEALTH_PORT=8090

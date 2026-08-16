@@ -42,8 +42,22 @@ function mapTradeRow(row: any): StoredTrade {
   };
 }
 
+// Mirror failures are expected while Supabase is unreachable (Neon is the
+// canonical store) — log each op at most once every 10 minutes to keep the
+// runner logs readable instead of repeating the same fetch error per write.
+const MIRROR_LOG_INTERVAL_MS = 10 * 60 * 1000;
+const lastMirrorLogAt = new Map<string, number>();
 function logMirrorError(op: string, e: unknown) {
-  console.error(`[edge-store] Supabase mirror ${op} failed:`, e instanceof Error ? e.message : e);
+  const now = Date.now();
+  if (now - (lastMirrorLogAt.get(op) ?? 0) < MIRROR_LOG_INTERVAL_MS) return;
+  lastMirrorLogAt.set(op, now);
+  const message =
+    e instanceof Error
+      ? e.message
+      : typeof e === "object" && e !== null && "message" in e
+        ? String((e as { message: unknown }).message)
+        : String(e);
+  console.error(`[edge-store] Supabase mirror ${op} failed (muted 10m): ${message}`);
 }
 
 // ── One-time reconciliation ─────────────────────────────────────────────
@@ -57,7 +71,8 @@ function logMirrorError(op: string, e: unknown) {
 // query instead of a full re-copy.
 async function reconcileFromSupabaseIfBehind(supabase: SupabaseClient, userId: string) {
   const sql = getNeonSql();
-  const neonCountRows = await sql`SELECT count(*)::int AS n FROM paper_trades WHERE user_id = ${userId}`;
+  const neonCountRows =
+    await sql`SELECT count(*)::int AS n FROM paper_trades WHERE user_id = ${userId}`;
   const neonCount = (neonCountRows[0]?.n as number | undefined) ?? 0;
   const { count: supabaseCount } = await supabase
     .from("paper_trades")
@@ -100,7 +115,9 @@ async function reconcileFromSupabaseIfBehind(supabase: SupabaseClient, userId: s
       ON CONFLICT (user_id) DO UPDATE SET
         realized_pnl = EXCLUDED.realized_pnl, halted = EXCLUDED.halted`;
   }
-  console.log(`[edge-store] backfill complete for user ${userId}: ${rows?.length ?? 0} trades copied`);
+  console.log(
+    `[edge-store] backfill complete for user ${userId}: ${rows?.length ?? 0} trades copied`,
+  );
 }
 
 // ── Boot state (read) ───────────────────────────────────────────────────
@@ -113,9 +130,8 @@ export async function loadBootState(
   try {
     await reconcileFromSupabaseIfBehind(supabase, userId);
     const sql = getNeonSql();
-    let account = (
-      await sql`SELECT * FROM paper_accounts WHERE user_id = ${userId}`
-    )[0] as Record<string, unknown> | undefined;
+    let account = (await sql`SELECT * FROM paper_accounts WHERE user_id = ${userId}`)[0] as
+      Record<string, unknown> | undefined;
     if (!account) {
       account = (
         await sql`INSERT INTO paper_accounts (user_id) VALUES (${userId}) RETURNING *`
@@ -405,10 +421,12 @@ export async function resetPaperAccount(
     } else {
       await supabase.from("paper_trades").delete().eq("user_id", userId).eq("status", "open");
     }
-    const { error } = await supabase.from("paper_accounts").upsert(
-      { user_id: userId, realized_pnl: 0, halted: false, updated_at: new Date().toISOString() },
-      { onConflict: "user_id" },
-    );
+    const { error } = await supabase
+      .from("paper_accounts")
+      .upsert(
+        { user_id: userId, realized_pnl: 0, halted: false, updated_at: new Date().toISOString() },
+        { onConflict: "user_id" },
+      );
     if (error) logMirrorError("resetPaperAccount", error);
   })();
 
@@ -468,9 +486,7 @@ export interface RunnerHeartbeatRow {
   lastSeenAt: number;
 }
 
-export async function getRunnerHeartbeat(
-  userId: string,
-): Promise<RunnerHeartbeatRow | null> {
+export async function getRunnerHeartbeat(userId: string): Promise<RunnerHeartbeatRow | null> {
   const sql = getNeonSqlOrNoop();
   const rows = await sql`
     SELECT status, equity, closed_trades, ticks_per_sec, started_at, last_seen_at

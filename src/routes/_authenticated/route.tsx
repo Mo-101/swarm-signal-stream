@@ -1,9 +1,22 @@
 import { createFileRoute, Outlet, redirect } from "@tanstack/react-router";
 import { supabase } from "@/integrations/supabase/client";
+import { getLocalSession } from "@/lib/auth/local-session";
 
 export const Route = createFileRoute("/_authenticated")({
   ssr: false,
   beforeLoad: async () => {
+    // Neon-local session is canonical.
+    const local = getLocalSession();
+    if (local) {
+      return {
+        user: {
+          id: local.userId,
+          email: local.email,
+          user_metadata: { role: "local_operator" },
+        },
+      };
+    }
+
     if (typeof window !== "undefined") {
       const isGuest = localStorage.getItem("alpha_swarm_guest") === "true";
       if (isGuest) {
@@ -30,4 +43,3 @@ export const Route = createFileRoute("/_authenticated")({
   },
   component: () => <Outlet />,
 });
-

@@ -3,7 +3,7 @@
 // Uses testnet.binancefuture.com — never touches real funds.
 
 import { createServerFn } from "@tanstack/react-start";
-import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
+import { requireAuth } from "@/lib/auth/auth-middleware";
 
 const BASE = "https://testnet.binancefuture.com";
 
@@ -220,7 +220,7 @@ function roundStep(value: number, step: number, precision: number): string {
 // ─── Server functions ────────────────────────────────────────────────────
 
 export const getLiveStatus = createServerFn({ method: "GET" })
-  .middleware([requireSupabaseAuth])
+  .middleware([requireAuth])
   .handler(async () => {
   const apiKey = normalizeSecret(
     process.env.BINANCE_TESTNET_API_KEY,
@@ -293,7 +293,7 @@ interface LiveOrderInput {
 }
 
 export const placeLiveTrade = createServerFn({ method: "POST" })
-  .middleware([requireSupabaseAuth])
+  .middleware([requireAuth])
   .inputValidator((raw: LiveOrderInput) => {
     if (!raw || typeof raw !== "object") throw new Error("Invalid payload");
     const { symbol, side, notionalUsd, slPct, tpPct, refPrice } = raw;
@@ -452,7 +452,7 @@ export const placeLiveTrade = createServerFn({ method: "POST" })
   });
 
 export const getLivePositions = createServerFn({ method: "GET" })
-  .middleware([requireSupabaseAuth])
+  .middleware([requireAuth])
   .handler(async () => {
   interface PositionRisk {
     symbol: string;
@@ -490,7 +490,7 @@ export const getLivePositions = createServerFn({ method: "GET" })
 });
 
 export const getLiveHistory = createServerFn({ method: "GET" })
-  .middleware([requireSupabaseAuth])
+  .middleware([requireAuth])
   .handler(async ({ context }) => {
     const { loadLiveTrades } = await import("@/lib/db/live-store.server");
     const { closed } = await loadLiveTrades(context.supabase, context.userId, "binance");
@@ -498,7 +498,7 @@ export const getLiveHistory = createServerFn({ method: "GET" })
   });
 
 export const closeLivePosition = createServerFn({ method: "POST" })
-  .middleware([requireSupabaseAuth])
+  .middleware([requireAuth])
   .inputValidator((raw: { symbol: string }) => {
     if (!raw?.symbol) throw new Error("symbol required");
     return { symbol: raw.symbol.toUpperCase() };

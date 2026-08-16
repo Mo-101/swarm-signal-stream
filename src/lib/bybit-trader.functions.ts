@@ -3,7 +3,7 @@
 // Venue is testnet by default; set BYBIT_ENV=mainnet to trade the real book.
 
 import { createServerFn } from "@tanstack/react-start";
-import { requireSupabaseAuth } from "@/integrations/supabase/auth-middleware";
+import { requireAuth } from "@/lib/auth/auth-middleware";
 
 const TESTNET_BASE = "https://api-testnet.bybit.com";
 const MAINNET_BASE = "https://api.bybit.com";
@@ -227,7 +227,7 @@ function roundStep(value: number, step: number, precision: number): string {
 
 // ─── Server functions ────────────────────────────────────────────────────
 export const getBybitStatus = createServerFn({ method: "GET" })
-  .middleware([requireSupabaseAuth])
+  .middleware([requireAuth])
   .handler(async () => {
   const { apiKey, apiSecret } = readCreds();
 
@@ -362,7 +362,7 @@ interface LiveOrderInput {
 }
 
 export const placeBybitTrade = createServerFn({ method: "POST" })
-  .middleware([requireSupabaseAuth])
+  .middleware([requireAuth])
   .inputValidator((raw: LiveOrderInput) => {
     if (!raw || typeof raw !== "object") throw new Error("Invalid payload");
     const { symbol, side, notionalUsd, slPct, tpPct, refPrice } = raw;
@@ -496,7 +496,7 @@ export const placeBybitTrade = createServerFn({ method: "POST" })
   });
 
 export const getBybitPositions = createServerFn({ method: "GET" })
-  .middleware([requireSupabaseAuth])
+  .middleware([requireAuth])
   .handler(async () => {
   interface PositionsResp {
     list: Array<{
@@ -537,7 +537,7 @@ export const getBybitPositions = createServerFn({ method: "GET" })
 });
 
 export const getBybitHistory = createServerFn({ method: "GET" })
-  .middleware([requireSupabaseAuth])
+  .middleware([requireAuth])
   .handler(async ({ context }) => {
     const { loadLiveTrades } = await import("@/lib/db/live-store.server");
     const { closed } = await loadLiveTrades(context.supabase, context.userId, "bybit");
@@ -545,7 +545,7 @@ export const getBybitHistory = createServerFn({ method: "GET" })
   });
 
 export const closeBybitPosition = createServerFn({ method: "POST" })
-  .middleware([requireSupabaseAuth])
+  .middleware([requireAuth])
   .inputValidator((raw: { symbol: string }) => {
     if (!raw?.symbol) throw new Error("symbol required");
     return { symbol: raw.symbol.toUpperCase() };

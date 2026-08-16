@@ -42,6 +42,7 @@ import { ExecutionPanel } from "@/components/ExecutionPanel";
 import { ReviewProgress } from "@/components/ReviewProgress";
 
 import { supabase } from "@/integrations/supabase/client";
+import { clearLocalSession } from "@/lib/auth/local-session";
 import { useNavigate } from "@tanstack/react-router";
 import { setAgentWeights } from "@/lib/swarm";
 import {
@@ -273,6 +274,7 @@ function SwarmDashboard() {
     if (typeof window !== "undefined") {
       localStorage.removeItem("alpha_swarm_guest");
     }
+    clearLocalSession();
     try {
       await supabase.auth.signOut();
     } catch {
@@ -688,7 +690,12 @@ function SwarmDashboard() {
       );
   };
   const signOut = async () => {
-    await supabase.auth.signOut();
+    clearLocalSession();
+    try {
+      await supabase.auth.signOut();
+    } catch {
+      // ignore — local session already cleared
+    }
     navigate({ to: "/auth", replace: true });
   };
 

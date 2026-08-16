@@ -26,9 +26,28 @@ export async function signInBotUser(
   email: string,
   password: string,
 ): Promise<string> {
-  const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-  if (error || !data.user) throw new Error(`Runner sign-in failed: ${error?.message ?? "no user"}`);
-  return data.user.id;
+  // Supabase first (keeps its session for the mirror writes), but Neon-local
+  // auth is canonical: if Supabase is unreachable or rejects, fall back to
+  // app_users in Neon so the runner keeps trading through outages.
+  try {
+    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+    if (!error && data.user) {
+      const { mirrorSupabaseUser } = await import("../src/lib/auth/local-auth.server");
+      await mirrorSupabaseUser(data.user.id, email, password);
+      return data.user.id;
+    }
+    console.warn(
+      `[runner] Supabase sign-in failed (${error?.message ?? "no user"}) — using Neon local auth`,
+    );
+  } catch (e) {
+    console.warn(
+      `[runner] Supabase unreachable (${e instanceof Error ? e.message : e}) — using Neon local auth`,
+    );
+  }
+  const { signInLocal } = await import("../src/lib/auth/local-auth.server");
+  const session = await signInLocal(email, password);
+  console.log(`[runner] Neon local auth OK (${session.userId})`);
+  return session.userId;
 }
 
 export async function loadBootState(

@@ -7,6 +7,18 @@
 --     src/lib/db/edge-store.ts filters by user_id explicitly instead.
 --   * edge_report() takes user_id as an explicit argument instead of
 --     reading auth.uid().
+-- Neon-local auth: canonical user records so sign-in works even when the
+-- Supabase project is unreachable. When a Supabase login succeeds its user id
+-- and credentials are mirrored here automatically with the same id, so all
+-- data stays attached. When Supabase is down, sign-in verifies against this table.
+CREATE TABLE IF NOT EXISTS app_users (
+  id uuid PRIMARY KEY,
+  email text UNIQUE NOT NULL,
+  password_hash text NOT NULL,
+  created_at timestamptz NOT NULL DEFAULT now(),
+  updated_at timestamptz NOT NULL DEFAULT now()
+);
+
 CREATE TABLE IF NOT EXISTS paper_accounts (
   user_id uuid PRIMARY KEY,
   starting_balance numeric NOT NULL DEFAULT 10000,

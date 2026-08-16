@@ -2,6 +2,8 @@ import { createFileRoute, useNavigate, Link } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { supabase } from "@/integrations/supabase/client";
 import { lovable } from "@/integrations/lovable/index";
+import { localSignIn, localSignUp, mirrorCredentials } from "@/lib/auth/auth.functions";
+import { getLocalSession, setLocalSession } from "@/lib/auth/local-session";
 
 export const Route = createFileRoute("/auth")({
   validateSearch: (search: Record<string, unknown>): { next?: string } => {
@@ -59,6 +61,12 @@ function AuthPage() {
       return;
     }
 
+    if (getLocalSession()) {
+      if (next) window.location.href = next;
+      else navigate({ to: "/dashboard", replace: true });
+      return;
+    }
+
     supabase.auth.getSession().then(({ data }) => {
       if (data.session) {
         if (next) window.location.href = next;
@@ -82,21 +90,31 @@ function AuthPage() {
     setNotice(null);
     try {
       if (mode === "signup") {
-        const { data, error: err } = await supabase.auth.signUp({
-          email,
-          password,
-          options: {
-            emailRedirectTo: next ? window.location.origin + next : window.location.origin,
-          },
-        });
-        if (err) throw err;
-        if (!data.session) {
-          setNotice("Account created! If confirmation is required, check your email, or use Instant Demo Access below.");
-          return;
-        }
+        // Neon-local is canonical; Supabase signup is attempted as a
+        // best-effort mirror but its failure never blocks the account.
+        const session = await localSignUp({ data: { email, password } });
+        setLocalSession(session);
+        supabase.auth
+          .signUp({
+            email,
+            password,
+            options: {
+              emailRedirectTo: next ? window.location.origin + next : window.location.origin,
+            },
+          })
+          .catch(() => {});
       } else {
-        const { error: err } = await supabase.auth.signInWithPassword({ email, password });
-        if (err) throw err;
+        // Sign in against Neon first. If Neon has no record, fall back to
+        // Supabase — and on success mirror the credentials into Neon
+        // automatically so next time the local path works.
+        try {
+          const session = await localSignIn({ data: { email, password } });
+          setLocalSession(session);
+        } catch {
+          const { error: err } = await supabase.auth.signInWithPassword({ email, password });
+          if (err) throw err;
+          mirrorCredentials({ data: { email, password } }).catch(() => {});
+        }
       }
       afterAuth();
     } catch (err) {
@@ -126,7 +144,9 @@ function AuthPage() {
       if (result.redirected) return;
       afterAuth();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Google sign-in failed. Try again or enter as Guest.");
+      setError(
+        err instanceof Error ? err.message : "Google sign-in failed. Try again or enter as Guest.",
+      );
     }
   };
 
@@ -181,7 +201,9 @@ function AuthPage() {
 
         <form onSubmit={submit} className="space-y-3">
           <div>
-            <label className="text-[11px] font-medium text-muted-foreground block mb-1">Email</label>
+            <label className="text-[11px] font-medium text-muted-foreground block mb-1">
+              Email
+            </label>
             <input
               type="email"
               required
@@ -192,7 +214,9 @@ function AuthPage() {
             />
           </div>
           <div>
-            <label className="text-[11px] font-medium text-muted-foreground block mb-1">Password</label>
+            <label className="text-[11px] font-medium text-muted-foreground block mb-1">
+              Password
+            </label>
             <input
               type="password"
               required
