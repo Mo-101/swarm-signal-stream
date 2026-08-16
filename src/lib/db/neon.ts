@@ -6,18 +6,39 @@ import { neon, type NeonQueryFunction } from "@neondatabase/serverless";
 
 let _sql: NeonQueryFunction<false, false> | undefined;
 
+export function getDatabaseUrl(): string {
+  const raw = process.env.DATABASE_URL;
+  if (!raw) throw new Error("Missing DATABASE_URL — Neon is not configured.");
+  let value = raw.trim().replace(/[\u200B-\u200D\uFEFF]/g, "");
+  if (value.startsWith("DATABASE_URL=")) value = value.slice("DATABASE_URL=".length).trim();
+  if (
+    (value.startsWith('"') && value.endsWith('"')) ||
+    (value.startsWith("'") && value.endsWith("'")) ||
+    (value.startsWith("`") && value.endsWith("`"))
+  ) {
+    value = value.slice(1, -1).trim();
+  }
+  const parsed = new URL(value);
+  if (parsed.protocol !== "postgres:" && parsed.protocol !== "postgresql:") {
+    throw new Error("DATABASE_URL must use the postgres:// or postgresql:// scheme.");
+  }
+  return value;
+}
+
 export function getNeonSql(): NeonQueryFunction<false, false> {
   if (!_sql) {
-    const url = process.env.DATABASE_URL;
-    if (!url) throw new Error("Missing DATABASE_URL — Neon is not configured.");
-    _sql = neon(url);
+    _sql = neon(getDatabaseUrl());
   }
   return _sql;
 }
 
 /** True when DATABASE_URL is configured. */
 export function neonEnabled(): boolean {
-  return Boolean(process.env.DATABASE_URL);
+  try {
+    return Boolean(getDatabaseUrl());
+  } catch {
+    return false;
+  }
 }
 
 /**

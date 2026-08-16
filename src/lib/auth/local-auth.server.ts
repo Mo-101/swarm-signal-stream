@@ -13,7 +13,7 @@ import {
   scryptSync,
   timingSafeEqual,
 } from "node:crypto";
-import { getNeonSql } from "@/lib/db/neon";
+import { getDatabaseUrl, getNeonSql } from "@/lib/db/neon";
 
 const TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60; // 30 days
 const TOKEN_ISSUER = "alpha-swarm-local";
@@ -33,8 +33,7 @@ function authSecret(): string {
   // extra configuration.
   const explicit = process.env.LOCAL_AUTH_SECRET;
   if (explicit) return explicit;
-  const dbUrl = process.env.DATABASE_URL;
-  if (!dbUrl) throw new Error("Local auth needs LOCAL_AUTH_SECRET or DATABASE_URL to be set.");
+  const dbUrl = getDatabaseUrl();
   return createHash("sha256").update(`alpha-swarm-local-auth:${dbUrl}`).digest("hex");
 }
 
