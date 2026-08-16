@@ -1,7 +1,6 @@
 // Runner-side wiring for the shared Neon-primary/Supabase-mirror store.
-// Auth still goes through Supabase (password sign-in) — only persistence
-// moved to src/lib/db/edge-store.server.ts, the same module the dashboard's
-// server functions use, so both paths agree on one implementation.
+// Neon-local auth and persistence are canonical. Supabase is retained only
+// as a best-effort compatibility mirror/fallback.
 import { createClient, type SupabaseClient } from "@supabase/supabase-js";
 import {
   loadBootState as loadBootStateShared,
@@ -26,28 +25,29 @@ export async function signInBotUser(
   email: string,
   password: string,
 ): Promise<string> {
-  // Supabase first (keeps its session for the mirror writes), but Neon-local
-  // auth is canonical: if Supabase is unreachable or rejects, fall back to
-  // app_users in Neon so the runner keeps trading through outages.
+  // Authenticate against Neon first. This avoids a network dependency during
+  // startup and guarantees the runner uses the same canonical app_users id as
+  // the dashboard. Supabase is consulted only for legacy accounts that have
+  // not been adopted into Neon yet.
   try {
-    const { data, error } = await supabase.auth.signInWithPassword({ email, password });
-    if (!error && data.user) {
-      const { mirrorSupabaseUser } = await import("../src/lib/auth/local-auth.server");
-      await mirrorSupabaseUser(data.user.id, email, password);
-      return data.user.id;
-    }
+    const { signInLocal } = await import("../src/lib/auth/local-auth.server");
+    const session = await signInLocal(email, password);
+    console.log(`[runner] Neon local auth OK (${session.userId})`);
+    return session.userId;
+  } catch (localError) {
     console.warn(
-      `[runner] Supabase sign-in failed (${error?.message ?? "no user"}) — using Neon local auth`,
-    );
-  } catch (e) {
-    console.warn(
-      `[runner] Supabase unreachable (${e instanceof Error ? e.message : e}) — using Neon local auth`,
+      `[runner] Neon local sign-in unavailable (${localError instanceof Error ? localError.message : localError}) — trying Supabase fallback`,
     );
   }
-  const { signInLocal } = await import("../src/lib/auth/local-auth.server");
-  const session = await signInLocal(email, password);
-  console.log(`[runner] Neon local auth OK (${session.userId})`);
-  return session.userId;
+
+  const { data, error } = await supabase.auth.signInWithPassword({ email, password });
+  if (error || !data.user) {
+    throw new Error(`Neon and Supabase sign-in failed: ${error?.message ?? "no user"}`);
+  }
+  const { mirrorSupabaseUser } = await import("../src/lib/auth/local-auth.server");
+  await mirrorSupabaseUser(data.user.id, email, password);
+  console.log(`[runner] Supabase fallback authenticated and mirrored (${data.user.id})`);
+  return data.user.id;
 }
 
 export async function loadBootState(

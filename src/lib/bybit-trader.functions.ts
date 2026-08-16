@@ -541,7 +541,80 @@ export const getBybitHistory = createServerFn({ method: "GET" })
   .handler(async ({ context }) => {
     const { loadLiveTrades } = await import("@/lib/db/live-store.server");
     const { closed } = await loadLiveTrades(context.supabase, context.userId, "bybit");
-    return closed;
+
+    // Bybit is the source of truth for real-money executions. Protective
+    // stops and trailing stops can close a position on the exchange while
+    // the dashboard is closed, so those trades will never pass through our
+    // local close handler. Recover them from Bybit on every history refresh
+    // and merge them with the richer app-side records.
+    try {
+      interface ClosedPnlResp {
+        list: Array<{
+          symbol: string;
+          orderId: string;
+          side: "Buy" | "Sell";
+          qty: string;
+          closedSize: string;
+          avgEntryPrice: string;
+          avgExitPrice: string;
+          cumEntryValue: string;
+          closedPnl: string;
+          leverage?: string;
+          createdTime: string;
+          updatedTime: string;
+        }>;
+      }
+
+      const result = await signedRequest<ClosedPnlResp>("GET", "/v5/position/closed-pnl", {
+        category: "linear",
+        limit: 100,
+      });
+      const persistedExitIds = new Set(closed.map((trade) => trade.exitOrderId).filter(Boolean));
+      const exchangeRows = (result.list ?? [])
+        .filter((row) => !persistedExitIds.has(row.orderId))
+        .map((row) => {
+          const entryPrice = Number(row.avgEntryPrice);
+          const exitPrice = Number(row.avgExitPrice);
+          const size = Number(row.closedSize || row.qty);
+          const notional = Number(row.cumEntryValue) || entryPrice * size;
+          const pnl = Number(row.closedPnl);
+          return {
+            clientId: `bybit-closed-${row.orderId}`,
+            provider: "bybit" as const,
+            symbol: row.symbol,
+            side: row.side === "Buy" ? ("BUY" as const) : ("SELL" as const),
+            entryPrice,
+            exitPrice,
+            size,
+            notional,
+            stopLoss: null,
+            takeProfit: null,
+            leverage: row.leverage ? Number(row.leverage) : null,
+            trailingActivePrice: null,
+            trailingDistance: null,
+            status: "closed" as const,
+            pnl,
+            pnlPct: notional ? (pnl / notional) * 100 : 0,
+            reason: "EXCHANGE",
+            entryOrderId: null,
+            slOrderId: null,
+            tpOrderId: null,
+            exitOrderId: row.orderId,
+            openedAt: Number(row.createdTime),
+            closedAt: Number(row.updatedTime),
+          };
+        });
+
+      return [...closed, ...exchangeRows].sort(
+        (a, b) => (b.closedAt ?? b.openedAt) - (a.closedAt ?? a.openedAt),
+      );
+    } catch (error) {
+      console.error(
+        "[bybit] closed-PnL reconciliation failed; using persisted history:",
+        error instanceof Error ? error.message : error,
+      );
+      return closed;
+    }
   });
 
 export const closeBybitPosition = createServerFn({ method: "POST" })
