@@ -26,6 +26,7 @@ import {
   type MarginSummary,
 } from "@/lib/paper-broker";
 import { MicrostructureFeed, fetchInstrumentFilters, type MicroMetrics } from "@/lib/microstructure";
+import { ShadowBook, type ShadowStats } from "@/lib/shadow-book";
 import { confBucket, regimeOf, type LearnedEdge, type EdgeReport } from "@/lib/edge-model";
 import type {
   StoredTrade,
@@ -63,6 +64,8 @@ export interface EngineSnapshot {
   ticks: number;
   tickRate: number;
   halted: string | null;
+  /** Counterfactual book of every proposal the engine declined to trade. */
+  shadow: ShadowStats;
 }
 
 export interface EngineHooks {
@@ -148,6 +151,14 @@ export function createEngineRuntime(opts: EngineRuntimeOptions): EngineRuntime {
   const tickCounterRef = { current: 0 };
 
   const micro = new MicrostructureFeed();
+  // Zero-risk counterfactual: mirrors the paper SL/TP and fee model so that
+  // declined proposals can be scored against the ones we actually took.
+  const shadow = new ShadowBook({
+    slPct: DEFAULT_PAPER_CONFIG.slPct,
+    tpPct: DEFAULT_PAPER_CONFIG.tpPct,
+    takerFeeRate: DEFAULT_PAPER_CONFIG.takerFeeRate,
+    fundingRatePer8h: DEFAULT_PAPER_CONFIG.defaultFundingRate,
+  });
 
   const broker = new PaperBroker(DEFAULT_PAPER_CONFIG, {
     onHalt: (msg) => hooks.onHalt?.(msg),
@@ -235,6 +246,7 @@ export function createEngineRuntime(opts: EngineRuntimeOptions): EngineRuntime {
         lastPendingSweep = now;
         broker.processPending(now);
       }
+      shadow.mark(t.symbol, t.price, t.time);
       hooks.onTick?.(t);
     },
     onProposal: (p) => {
@@ -258,6 +270,19 @@ export function createEngineRuntime(opts: EngineRuntimeOptions): EngineRuntime {
         agents: p.contributions,
         executed,
       });
+      if (!executed) {
+        shadow.record(
+          p,
+          readOnly
+            ? "observer"
+            : suppressed
+              ? "suppressed"
+              : p.confidence < broker.getMinConfidence()
+                ? "confidence"
+                : "blocked",
+          regime,
+        );
+      }
       if (signalBuffer.length > 400) signalBuffer.splice(0, signalBuffer.length - 400);
       hooks.onProposal?.(p, { regime, suppressed, executed });
     },
@@ -325,6 +350,12 @@ export function createEngineRuntime(opts: EngineRuntimeOptions): EngineRuntime {
       lastSample = now;
 
       broker.accrueFunding(now, marksRef);
+      shadow.sweep(now);
+      const realSamples = broker.getClosed().map((t) => ({
+        confidence: t.confidence,
+        netBps: t.pnlPct * 100,
+        netUsd: (t.pnlPct / 100) * 1_000,
+      }));
       const state = engine.getState();
       for (const row of state) regimeMap.set(row.symbol, regimeOf(row.change1m));
 
@@ -344,6 +375,7 @@ export function createEngineRuntime(opts: EngineRuntimeOptions): EngineRuntime {
         ticks: tickCounterRef.current,
         tickRate,
         halted: broker.isHalted() ? "halted" : null,
+        shadow: shadow.getStats(realSamples),
       });
     }, snapshotIntervalMs);
   }
