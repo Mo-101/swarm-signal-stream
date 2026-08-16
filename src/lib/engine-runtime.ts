@@ -350,6 +350,12 @@ export function createEngineRuntime(opts: EngineRuntimeOptions): EngineRuntime {
       lastSample = now;
 
       broker.accrueFunding(now, marksRef);
+      shadow.sweep(now);
+      const realSamples = broker.getClosed().map((t) => ({
+        confidence: t.confidence,
+        netBps: t.pnlPct * 100,
+        netUsd: (t.pnlPct / 100) * 1_000,
+      }));
       const state = engine.getState();
       for (const row of state) regimeMap.set(row.symbol, regimeOf(row.change1m));
 
