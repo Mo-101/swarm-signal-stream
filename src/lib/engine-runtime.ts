@@ -375,6 +375,7 @@ export function createEngineRuntime(opts: EngineRuntimeOptions): EngineRuntime {
         ticks: tickCounterRef.current,
         tickRate,
         halted: broker.isHalted() ? "halted" : null,
+        shadow: shadow.getStats(realSamples),
       });
     }, snapshotIntervalMs);
   }
