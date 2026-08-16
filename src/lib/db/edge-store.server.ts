@@ -465,20 +465,27 @@ export async function persistGridRuntime(args: {
 
 /**
  * Ongoing runtime marking, keyed by symbol so the engine never has to know a
- * database id. Deliberately leaves desired_state and the version columns alone
- * — only the coordinator moves those.
+ * database id.
+ *
+ * Writes runtime_state on every call but only ever *escalates* runtime_status,
+ * and only to 'halted'. The lifecycle status belongs to the coordinator: a
+ * freshly built grid is legitimately inactive, so letting this path derive
+ * status from state.active would rewrite 'running' back to 'idle' on the next
+ * tick, and the coordinator would answer that by rebuilding the grid — a
+ * reconfigure loop. desired_state and the version columns are likewise
+ * untouched here.
  */
 export async function persistGridRuntimeBySymbol(args: {
   userId: string;
   symbol: string;
   runtimeState: GridRuntimeState;
-  runtimeStatus: GridRuntimeStatus;
+  halted: boolean;
 }): Promise<void> {
   const sql = getNeonSqlOrNoop();
   await sql`
     UPDATE futures_grid_state SET
       runtime_state = ${JSON.stringify(args.runtimeState)}::jsonb,
-      runtime_status = ${args.runtimeStatus},
+      runtime_status = CASE WHEN ${args.halted} THEN 'halted' ELSE runtime_status END,
       updated_at = now()
     WHERE user_id = ${args.userId} AND symbol = ${args.symbol}`;
 }

@@ -96,13 +96,13 @@ export function createSupabasePersistence(
       await persistShadowCloseShared(userId, trade);
     },
     async saveGridState(config: FuturesGridConfig, state: GridRuntimeState) {
-      // Runtime marking only. desired_state and the version columns belong to
-      // the coordinator; a marking write must never move them.
+      // Runtime marking only. The lifecycle status belongs to the coordinator;
+      // this path may escalate to halted but must never demote 'running'.
       await persistGridRuntimeBySymbolShared({
         userId,
         symbol: config.symbol,
         runtimeState: state,
-        runtimeStatus: state.active ? "running" : state.haltReasons?.length ? "halted" : "idle",
+        halted: Boolean(state.haltReasons?.length),
       });
     },
     onPersistError: onError,

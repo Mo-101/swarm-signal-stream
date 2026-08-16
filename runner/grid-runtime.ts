@@ -77,8 +77,18 @@ export class GridRuntimeCoordinator {
       return;
     }
 
-    // Already running the current version — nothing to do.
-    if (row.configVersion <= effectiveApplied && row.runtimeStatus === "running") return;
+    // Current version already applied — nothing to do.
+    //
+    // 'halted' counts as settled, not as work: a risk breach must stay latched
+    // until the user changes the config (new version) or stops the grid.
+    // Re-applying would rebuild the grid and silently clear the halt that the
+    // risk model just raised.
+    if (
+      row.configVersion <= effectiveApplied &&
+      (row.runtimeStatus === "running" || row.runtimeStatus === "halted")
+    ) {
+      return;
+    }
 
     try {
       await persistGridRuntime({
