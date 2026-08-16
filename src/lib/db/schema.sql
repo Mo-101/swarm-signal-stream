@@ -94,6 +94,7 @@ CREATE TABLE IF NOT EXISTS runner_state (
   started_at timestamptz NOT NULL DEFAULT now(),
   last_seen_at timestamptz NOT NULL DEFAULT now()
 );
+ALTER TABLE runner_state ADD COLUMN IF NOT EXISTS shadow jsonb;
 
 -- Live (real-money) trading — kept in its own tables, deliberately separate
 -- from paper_accounts/paper_trades: a query bug here can never leak a real

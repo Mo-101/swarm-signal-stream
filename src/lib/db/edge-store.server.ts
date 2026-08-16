@@ -1,15 +1,12 @@
-// Neon-primary, Supabase-mirror data layer. Neon is authoritative: a write
-// that fails on Neon fails the whole call. The Supabase write is a
-// best-effort mirror — its failure is logged but never fails the caller.
-// Reads try Neon first and fall back to Supabase if Neon is unreachable.
+// Neon-only data layer. Reads and writes go through Neon (DATABASE_URL).
 //
 // Server-only (imports the Neon client, which reads process.env.DATABASE_URL)
 // — dynamically import this from edge.functions.ts handlers, same convention
 // as integrations/supabase/client.server.ts. The runner imports it directly
 // since it's a plain Node process with no client bundle to worry about.
-import type { SupabaseClient } from "@supabase/supabase-js";
 import { getNeonSql, getNeonSqlOrNoop, neonEnabled } from "./neon";
 import { EMPTY_EDGE_REPORT, type EdgeReport } from "@/lib/edge-model";
+import type { ShadowStats } from "@/lib/shadow-book";
 import type {
   StoredTrade,
   SignalInput,
@@ -42,181 +39,49 @@ function mapTradeRow(row: any): StoredTrade {
   };
 }
 
-// Mirror failures are expected while Supabase is unreachable (Neon is the
-// canonical store) — log each op at most once every 10 minutes to keep the
-// runner logs readable instead of repeating the same fetch error per write.
-const MIRROR_LOG_INTERVAL_MS = 10 * 60 * 1000;
-const lastMirrorLogAt = new Map<string, number>();
-function logMirrorError(op: string, e: unknown) {
-  const now = Date.now();
-  if (now - (lastMirrorLogAt.get(op) ?? 0) < MIRROR_LOG_INTERVAL_MS) return;
-  lastMirrorLogAt.set(op, now);
-  const message =
-    e instanceof Error
-      ? e.message
-      : typeof e === "object" && e !== null && "message" in e
-        ? String((e as { message: unknown }).message)
-        : String(e);
-  console.error(`[edge-store] Supabase mirror ${op} failed (muted 10m): ${message}`);
-}
-
-// ── One-time reconciliation ─────────────────────────────────────────────
-// Dual-write only covers trades made *after* Neon was wired up — anything
-// that existed only in Supabase before that point never got copied over, so
-// a Neon read would silently show an incomplete history (and an
-// undercounted edge_report) for any account with pre-migration trades. This
-// closes that gap using the caller's own already-authenticated Supabase
-// session — no service-role key needed. Idempotent (ON CONFLICT DO NOTHING),
-// and the count check makes every call after the first one a single cheap
-// query instead of a full re-copy.
-async function reconcileFromSupabaseIfBehind(supabase: SupabaseClient, userId: string) {
-  const sql = getNeonSql();
-  const neonCountRows =
-    await sql`SELECT count(*)::int AS n FROM paper_trades WHERE user_id = ${userId}`;
-  const neonCount = (neonCountRows[0]?.n as number | undefined) ?? 0;
-  const { count: supabaseCount } = await supabase
-    .from("paper_trades")
-    .select("id", { count: "exact", head: true })
-    .eq("user_id", userId);
-  if ((supabaseCount ?? 0) <= neonCount) return;
-
-  console.log(
-    `[edge-store] Neon behind for user ${userId} (${neonCount} < ${supabaseCount}) — backfilling from Supabase`,
-  );
-  const { data: rows } = await supabase.from("paper_trades").select("*").eq("user_id", userId);
-  for (const r of rows ?? []) {
-    await sql`
-      INSERT INTO paper_trades (
-        user_id, client_id, symbol, side, entry_price, exit_price, size, notional,
-        stop_loss, take_profit, confidence, conf_bucket, agents, regime, hour_utc, status,
-        pnl, pnl_pct, reason, opened_at, closed_at,
-        signal_price, entry_slip_bps, exit_slip_bps, trigger_price, spread_entry_bps, spread_exit_bps,
-        latency_ms, slip_cost_usd, gross_pnl, fees, funding, leverage, liq_price, book_priced
-      ) VALUES (
-        ${userId}, ${r.client_id}, ${r.symbol}, ${r.side}, ${r.entry_price}, ${r.exit_price}, ${r.size}, ${r.notional},
-        ${r.stop_loss}, ${r.take_profit}, ${r.confidence}, ${r.conf_bucket}, ${JSON.stringify(r.agents ?? {})}::jsonb,
-        ${r.regime}, ${r.hour_utc}, ${r.status},
-        ${r.pnl}, ${r.pnl_pct}, ${r.reason}, ${r.opened_at}, ${r.closed_at},
-        ${r.signal_price}, ${r.entry_slip_bps}, ${r.exit_slip_bps}, ${r.trigger_price}, ${r.spread_entry_bps}, ${r.spread_exit_bps},
-        ${r.latency_ms}, ${r.slip_cost_usd}, ${r.gross_pnl}, ${r.fees}, ${r.funding}, ${r.leverage}, ${r.liq_price}, ${r.book_priced}
-      )
-      ON CONFLICT (user_id, client_id) DO NOTHING`;
-  }
-
-  const { data: acct } = await supabase
-    .from("paper_accounts")
-    .select("*")
-    .eq("user_id", userId)
-    .maybeSingle();
-  if (acct) {
-    await sql`
-      INSERT INTO paper_accounts (user_id, starting_balance, realized_pnl, halted)
-      VALUES (${userId}, ${acct.starting_balance}, ${acct.realized_pnl}, ${acct.halted})
-      ON CONFLICT (user_id) DO UPDATE SET
-        realized_pnl = EXCLUDED.realized_pnl, halted = EXCLUDED.halted`;
-  }
-  console.log(
-    `[edge-store] backfill complete for user ${userId}: ${rows?.length ?? 0} trades copied`,
-  );
-}
-
 // ── Boot state (read) ───────────────────────────────────────────────────
 
 export async function loadBootState(
-  supabase: SupabaseClient,
+  _supabase: unknown,
   userId: string,
 ): Promise<{ boot: EngineBootState; report: EdgeReport; signalCount: number }> {
-  if (!neonEnabled()) return loadBootStateFromSupabase(supabase, userId);
-  try {
-    await reconcileFromSupabaseIfBehind(supabase, userId);
-    const sql = getNeonSql();
-    let account = (await sql`SELECT * FROM paper_accounts WHERE user_id = ${userId}`)[0] as
-      Record<string, unknown> | undefined;
-    if (!account) {
-      account = (
-        await sql`INSERT INTO paper_accounts (user_id) VALUES (${userId}) RETURNING *`
-      )[0] as Record<string, unknown>;
-    }
-    const open = await sql`
-      SELECT * FROM paper_trades WHERE user_id = ${userId} AND status = 'open'
-      ORDER BY opened_at DESC`;
-    const closed = await sql`
-      SELECT * FROM paper_trades WHERE user_id = ${userId} AND status = 'closed'
-      ORDER BY closed_at DESC LIMIT 200`;
-    const reportRows = await sql`SELECT edge_report(${userId}) AS report`;
-    const signalCountRows =
-      await sql`SELECT count(*)::int AS count FROM signals WHERE user_id = ${userId}`;
-
-    return {
-      boot: {
-        account: {
-          startingBalance: Number(account.starting_balance ?? 10000),
-          realizedPnl: Number(account.realized_pnl ?? 0),
-          halted: Boolean(account.halted),
-        },
-        open: open.map(mapTradeRow),
-        closed: closed.map(mapTradeRow),
-      },
-      report: (reportRows[0]?.report as EdgeReport | undefined) ?? EMPTY_EDGE_REPORT,
-      signalCount: (signalCountRows[0]?.count as number | undefined) ?? 0,
-    };
-  } catch (e) {
-    console.error("[edge-store] Neon loadBootState failed, falling back to Supabase:", e);
-    return loadBootStateFromSupabase(supabase, userId);
-  }
-}
-
-async function loadBootStateFromSupabase(supabase: SupabaseClient, userId: string) {
-  let { data: account } = await supabase
-    .from("paper_accounts")
-    .select("*")
-    .eq("user_id", userId)
-    .maybeSingle();
+  const sql = getNeonSql();
+  let account = (await sql`SELECT * FROM paper_accounts WHERE user_id = ${userId}`)[0] as
+    Record<string, unknown> | undefined;
   if (!account) {
-    const inserted = await supabase
-      .from("paper_accounts")
-      .insert({ user_id: userId })
-      .select("*")
-      .single();
-    account = inserted.data;
+    account = (
+      await sql`INSERT INTO paper_accounts (user_id) VALUES (${userId}) RETURNING *`
+    )[0] as Record<string, unknown>;
   }
-  const [{ data: open }, { data: closed }, { data: report }, { count: signalCount }] =
-    await Promise.all([
-      supabase
-        .from("paper_trades")
-        .select("*")
-        .eq("user_id", userId)
-        .eq("status", "open")
-        .order("opened_at", { ascending: false }),
-      supabase
-        .from("paper_trades")
-        .select("*")
-        .eq("user_id", userId)
-        .eq("status", "closed")
-        .order("closed_at", { ascending: false })
-        .limit(200),
-      supabase.rpc("edge_report"),
-      supabase.from("signals").select("id", { count: "exact", head: true }).eq("user_id", userId),
-    ]);
+  const open = await sql`
+    SELECT * FROM paper_trades WHERE user_id = ${userId} AND status = 'open'
+    ORDER BY opened_at DESC`;
+  const closed = await sql`
+    SELECT * FROM paper_trades WHERE user_id = ${userId} AND status = 'closed'
+    ORDER BY closed_at DESC LIMIT 200`;
+  const reportRows = await sql`SELECT edge_report(${userId}) AS report`;
+  const signalCountRows =
+    await sql`SELECT count(*)::int AS count FROM signals WHERE user_id = ${userId}`;
+
   return {
     boot: {
       account: {
-        startingBalance: Number(account?.starting_balance ?? 10000),
-        realizedPnl: Number(account?.realized_pnl ?? 0),
-        halted: Boolean(account?.halted),
+        startingBalance: Number(account.starting_balance ?? 10000),
+        realizedPnl: Number(account.realized_pnl ?? 0),
+        halted: Boolean(account.halted),
       },
-      open: (open ?? []).map(mapTradeRow),
-      closed: (closed ?? []).map(mapTradeRow),
+      open: open.map(mapTradeRow),
+      closed: closed.map(mapTradeRow),
     },
-    report: (report as EdgeReport | null) ?? EMPTY_EDGE_REPORT,
-    signalCount: signalCount ?? 0,
+    report: (reportRows[0]?.report as EdgeReport | undefined) ?? EMPTY_EDGE_REPORT,
+    signalCount: (signalCountRows[0]?.count as number | undefined) ?? 0,
   };
 }
 
 // ── Signals (write) ─────────────────────────────────────────────────────
 
 export async function ingestSignals(
-  supabase: SupabaseClient,
+  _supabase: unknown,
   userId: string,
   signals: SignalInput[],
 ): Promise<{ inserted: number }> {
@@ -239,33 +104,13 @@ export async function ingestSignals(
       ${rows.map((s) => s.executed)}::boolean[]
     )`;
 
-  await supabase
-    .from("signals")
-    .insert(
-      rows.map((s) => ({
-        user_id: userId,
-        symbol: s.symbol,
-        side: s.side,
-        price: s.price,
-        confidence: s.confidence,
-        conf_bucket: s.confBucket,
-        regime: s.regime,
-        hour_utc: s.hourUtc,
-        agents: s.agents,
-        executed: s.executed,
-      })),
-    )
-    .then(({ error }) => {
-      if (error) logMirrorError("ingestSignals", error);
-    });
-
   return { inserted: rows.length };
 }
 
 // ── Open trade (write) ──────────────────────────────────────────────────
 
 export async function persistOpenTrade(
-  supabase: SupabaseClient,
+  _supabase: unknown,
   userId: string,
   data: OpenTradeInput,
 ): Promise<{ ok: true }> {
@@ -287,59 +132,38 @@ export async function persistOpenTrade(
       entry_price = EXCLUDED.entry_price, size = EXCLUDED.size, notional = EXCLUDED.notional,
       stop_loss = EXCLUDED.stop_loss, take_profit = EXCLUDED.take_profit, status = 'open'`;
 
-  await supabase
-    .from("paper_trades")
-    .upsert(
-      {
-        user_id: userId,
-        client_id: data.clientId,
-        symbol: data.symbol,
-        side: data.side,
-        entry_price: data.entryPrice,
-        size: data.size,
-        notional: data.notional,
-        stop_loss: data.stopLoss,
-        take_profit: data.takeProfit,
-        confidence: data.confidence,
-        conf_bucket: data.confBucket,
-        regime: data.regime,
-        hour_utc: data.hourUtc,
-        agents: data.agents,
-        status: "open",
-        opened_at: new Date(data.openedAt).toISOString(),
-        signal_price: data.signalPrice ?? data.entryPrice,
-        entry_slip_bps: data.entrySlipBps ?? 0,
-        spread_entry_bps: data.spreadEntryBps ?? 0,
-        latency_ms: data.latencyMs ?? 0,
-        leverage: data.leverage ?? null,
-        liq_price: data.liqPrice ?? null,
-        book_priced: data.bookPriced ?? false,
-      },
-      { onConflict: "user_id,client_id" },
-    )
-    .then(({ error }) => {
-      if (error) logMirrorError("persistOpenTrade", error);
-    });
-
   return { ok: true };
 }
 
 // ── Close trade (write) ─────────────────────────────────────────────────
 
 export async function persistCloseTrade(
-  supabase: SupabaseClient,
+  _supabase: unknown,
   userId: string,
   data: CloseTradeInput,
 ): Promise<{ report: EdgeReport }> {
   const sql = getNeonSqlOrNoop();
-  await sql`
+  const updated = await sql`
     UPDATE paper_trades SET
       exit_price = ${data.exitPrice}, pnl = ${data.pnl}, pnl_pct = ${data.pnlPct},
       reason = ${data.reason}, status = 'closed', closed_at = to_timestamp(${data.closedAt / 1000}),
       trigger_price = ${data.triggerPrice ?? data.exitPrice}, exit_slip_bps = ${data.exitSlipBps ?? 0},
       spread_exit_bps = ${data.spreadExitBps ?? 0}, slip_cost_usd = ${data.slipCostUsd ?? 0},
       gross_pnl = ${data.grossPnl ?? data.pnl}, fees = ${data.fees ?? 0}, funding = ${data.funding ?? 0}
-    WHERE user_id = ${userId} AND client_id = ${data.clientId}`;
+    WHERE user_id = ${userId} AND client_id = ${data.clientId}
+    RETURNING client_id`;
+
+  // A close that matches no row means the open-row write never landed (a
+  // swallowed persist error). realized_pnl below still advances, so the
+  // account total silently outruns the trade table — the same signature as
+  // the pre-Neon carried history, which makes the two indistinguishable
+  // later. Log it loudly; never throw, the engine must keep running.
+  if (neonEnabled() && Array.isArray(updated) && updated.length === 0) {
+    console.error(
+      `[persist] close matched 0 rows for client_id=${data.clientId} — ` +
+        `realized_pnl will include $${data.pnl.toFixed(2)} with no trade row behind it`,
+    );
+  }
 
   await sql`
     INSERT INTO paper_accounts (user_id, realized_pnl, halted, updated_at)
@@ -348,44 +172,7 @@ export async function persistCloseTrade(
       realized_pnl = EXCLUDED.realized_pnl, halted = EXCLUDED.halted, updated_at = now()`;
 
   const reportRows = await sql`SELECT edge_report(${userId}) AS report`;
-  const report =
-    (reportRows[0]?.report as EdgeReport | undefined) ??
-    ((await supabase.rpc("edge_report")).data as EdgeReport | null) ??
-    EMPTY_EDGE_REPORT;
-
-  await (async () => {
-    const { error: updateErr } = await supabase
-      .from("paper_trades")
-      .update({
-        exit_price: data.exitPrice,
-        pnl: data.pnl,
-        pnl_pct: data.pnlPct,
-        reason: data.reason,
-        status: "closed",
-        closed_at: new Date(data.closedAt).toISOString(),
-        trigger_price: data.triggerPrice ?? data.exitPrice,
-        exit_slip_bps: data.exitSlipBps ?? 0,
-        spread_exit_bps: data.spreadExitBps ?? 0,
-        slip_cost_usd: data.slipCostUsd ?? 0,
-        gross_pnl: data.grossPnl ?? data.pnl,
-        fees: data.fees ?? 0,
-        funding: data.funding ?? 0,
-      })
-      .eq("user_id", userId)
-      .eq("client_id", data.clientId);
-    if (updateErr) logMirrorError("persistCloseTrade (trade update)", updateErr);
-
-    const { error: acctErr } = await supabase.from("paper_accounts").upsert(
-      {
-        user_id: userId,
-        realized_pnl: data.realizedPnl,
-        halted: data.halted,
-        updated_at: new Date().toISOString(),
-      },
-      { onConflict: "user_id" },
-    );
-    if (acctErr) logMirrorError("persistCloseTrade (account upsert)", acctErr);
-  })();
+  const report = (reportRows[0]?.report as EdgeReport | undefined) ?? EMPTY_EDGE_REPORT;
 
   return { report };
 }
@@ -393,7 +180,7 @@ export async function persistCloseTrade(
 // ── Reset account (write) ───────────────────────────────────────────────
 
 export async function resetPaperAccount(
-  supabase: SupabaseClient,
+  _supabase: unknown,
   userId: string,
   wipeHistory: boolean,
 ): Promise<{ report: EdgeReport }> {
@@ -409,26 +196,7 @@ export async function resetPaperAccount(
     VALUES (${userId}, 0, false, now())
     ON CONFLICT (user_id) DO UPDATE SET realized_pnl = 0, halted = false, updated_at = now()`;
   const reportRows = await sql`SELECT edge_report(${userId}) AS report`;
-  const report =
-    (reportRows[0]?.report as EdgeReport | undefined) ??
-    ((await supabase.rpc("edge_report")).data as EdgeReport | null) ??
-    EMPTY_EDGE_REPORT;
-
-  await (async () => {
-    if (wipeHistory) {
-      await supabase.from("paper_trades").delete().eq("user_id", userId);
-      await supabase.from("signals").delete().eq("user_id", userId);
-    } else {
-      await supabase.from("paper_trades").delete().eq("user_id", userId).eq("status", "open");
-    }
-    const { error } = await supabase
-      .from("paper_accounts")
-      .upsert(
-        { user_id: userId, realized_pnl: 0, halted: false, updated_at: new Date().toISOString() },
-        { onConflict: "user_id" },
-      );
-    if (error) logMirrorError("resetPaperAccount", error);
-  })();
+  const report = (reportRows[0]?.report as EdgeReport | undefined) ?? EMPTY_EDGE_REPORT;
 
   return { report };
 }
@@ -440,39 +208,22 @@ export interface HeartbeatFields {
   equity: number;
   closedTrades: number;
   ticksPerSec: number;
+  shadow: ShadowStats;
 }
 
 export async function upsertHeartbeat(
-  supabase: SupabaseClient,
+  _supabase: unknown,
   userId: string,
   startedAt: Date,
   fields: HeartbeatFields,
 ): Promise<void> {
   const sql = getNeonSqlOrNoop();
   await sql`
-    INSERT INTO runner_state (user_id, status, equity, closed_trades, ticks_per_sec, started_at, last_seen_at)
-    VALUES (${userId}, ${fields.status}, ${fields.equity}, ${fields.closedTrades}, ${fields.ticksPerSec}, ${startedAt.toISOString()}, now())
+    INSERT INTO runner_state (user_id, status, equity, closed_trades, ticks_per_sec, shadow, started_at, last_seen_at)
+    VALUES (${userId}, ${fields.status}, ${fields.equity}, ${fields.closedTrades}, ${fields.ticksPerSec}, ${JSON.stringify(fields.shadow)}::jsonb, ${startedAt.toISOString()}, now())
     ON CONFLICT (user_id) DO UPDATE SET
       status = EXCLUDED.status, equity = EXCLUDED.equity, closed_trades = EXCLUDED.closed_trades,
-      ticks_per_sec = EXCLUDED.ticks_per_sec, last_seen_at = now()`;
-
-  await supabase
-    .from("runner_state")
-    .upsert(
-      {
-        user_id: userId,
-        status: fields.status,
-        equity: fields.equity,
-        closed_trades: fields.closedTrades,
-        ticks_per_sec: fields.ticksPerSec,
-        started_at: startedAt.toISOString(),
-        last_seen_at: new Date().toISOString(),
-      },
-      { onConflict: "user_id" },
-    )
-    .then(({ error }) => {
-      if (error) logMirrorError("upsertHeartbeat", error);
-    });
+      ticks_per_sec = EXCLUDED.ticks_per_sec, shadow = EXCLUDED.shadow, last_seen_at = now()`;
 }
 
 // ── Runner heartbeat (read) ─────────────────────────────────────────────
@@ -484,15 +235,22 @@ export interface RunnerHeartbeatRow {
   ticksPerSec: number;
   startedAt: number;
   lastSeenAt: number;
+  shadow: ShadowStats | null;
 }
 
 export async function getRunnerHeartbeat(userId: string): Promise<RunnerHeartbeatRow | null> {
   const sql = getNeonSqlOrNoop();
   const rows = await sql`
-    SELECT status, equity, closed_trades, ticks_per_sec, started_at, last_seen_at
+    SELECT status, equity, closed_trades, ticks_per_sec, shadow, started_at, last_seen_at
     FROM runner_state WHERE user_id = ${userId}`;
   const row = rows[0] as Record<string, unknown> | undefined;
   if (!row) return null;
+  const parsedShadow =
+    row.shadow === null || row.shadow === undefined
+      ? null
+      : typeof row.shadow === "string"
+        ? (JSON.parse(row.shadow) as ShadowStats)
+        : (row.shadow as ShadowStats);
   return {
     status: row.status as string,
     equity: Number(row.equity),
@@ -500,5 +258,6 @@ export async function getRunnerHeartbeat(userId: string): Promise<RunnerHeartbea
     ticksPerSec: Number(row.ticks_per_sec),
     startedAt: new Date(row.started_at as string).getTime(),
     lastSeenAt: new Date(row.last_seen_at as string).getTime(),
+    shadow: parsedShadow,
   };
 }

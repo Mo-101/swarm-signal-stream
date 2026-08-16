@@ -11,6 +11,7 @@ import { fetchPerpetualSymbols, setAgentWeights } from "../src/lib/swarm";
 import { deriveEdge, type LearnedEdge } from "../src/lib/edge-model";
 import { DEFAULT_PAPER_CONFIG } from "../src/lib/paper-broker";
 import { createEngineRuntime } from "../src/lib/engine-runtime";
+import { EMPTY_SHADOW_STATS, type ShadowStats } from "../src/lib/shadow-book";
 import {
   createRunnerSupabaseClient,
   signInBotUser,
@@ -71,6 +72,13 @@ async function main() {
     process.env.SUPABASE_URL,
     process.env.SUPABASE_PUBLISHABLE_KEY,
   );
+  const c = DEFAULT_PAPER_CONFIG;
+  console.log(
+    `[paper-broker] riskPerTrade: ${c.riskPerTrade}, leverage: ${c.leverage}, ` +
+      `maxPositions: ${c.maxPositions}, slPct: ${c.slPct}, ` +
+      `startingBalance: ${c.startingBalance}, maxMarginUsage: ${c.maxMarginUsage}`,
+  );
+
   console.log("[runner] signing in...");
   const userId = await signInBotUser(supabase, RUNNER_EMAIL, RUNNER_PASSWORD);
   console.log(`[runner] signed in as ${RUNNER_EMAIL} (${userId})`);
@@ -97,6 +105,7 @@ async function main() {
   );
 
   let lastTickRate = 0;
+  let lastShadow: ShadowStats = EMPTY_SHADOW_STATS;
   const health: HealthStatus = {
     status: "starting",
     startedAt: startedAt.getTime(),
@@ -133,6 +142,7 @@ async function main() {
       },
       onSnapshot: (s) => {
         lastTickRate = s.tickRate;
+        lastShadow = s.shadow;
         if (health.status !== "halted") health.status = "running";
         health.equity = DEFAULT_PAPER_CONFIG.startingBalance + s.realizedPnl;
         health.openPositions = s.positions.length;
@@ -152,6 +162,7 @@ async function main() {
       equity,
       closedTrades: broker.getClosed().length,
       ticksPerSec: lastTickRate,
+      shadow: lastShadow,
     }).catch((e) => console.error("[runner] heartbeat failed:", e));
   }, HEARTBEAT_INTERVAL_MS);
 
@@ -177,6 +188,7 @@ async function main() {
       equity: DEFAULT_PAPER_CONFIG.startingBalance + runtime.getBroker().getRealizedPnl(),
       closedTrades: runtime.getBroker().getClosed().length,
       ticksPerSec: 0,
+      shadow: lastShadow,
     }).catch(() => {});
     // Zero ticksPerSec on stop is intentional — the runner is no longer ticking.
     process.exit(0);

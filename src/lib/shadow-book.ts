@@ -14,11 +14,10 @@
 
 import type { TradeProposal } from "@/lib/swarm";
 
-export type ShadowReason =
-  | "confidence" // below the (learned) minimum confidence gate
-  | "suppressed" // symbol suppressed by the edge model / cost model
-  | "blocked" // broker refused: no slot, thin book, margin, slippage, halt…
-  | "observer"; // dashboard was in read-only mode (a runner owns the account)
+export type ShadowReason = "confidence" | "suppressed" | "blocked" | "observer";
+
+export type ShadowExitReason = "TP" | "SL" | "TIME";
+export type RecommendationMetric = "expectancyBps" | "netUsd";
 
 export const SHADOW_REASON_LABELS: Record<ShadowReason, string> = {
   confidence: "Below confidence gate",
@@ -34,17 +33,25 @@ export interface ShadowTrade {
   reason: ShadowReason;
   confidence: number;
   regime: string;
+
   entryPrice: number;
   stopLoss: number;
   takeProfit: number;
   openedAt: number;
-  /** Best/worst excursion in bps while open — how much room the trade had. */
+
+  /** Last observed executable market price while the trade was open. */
+  lastPrice: number;
+  lastMarkedAt: number;
+
+  /** Excursion in bps from entry, direction-adjusted. */
   maxFavourableBps: number;
   maxAdverseBps: number;
+
   exitPrice: number | null;
   closedAt: number | null;
-  exitReason: "TP" | "SL" | "TIME" | null;
-  /** Net return in bps after both taker fees and approximate funding. */
+  exitReason: ShadowExitReason | null;
+
+  /** Net return after modeled entry/exit fees, slippage and funding carry. */
   netBps: number | null;
   /** Net USD on the fixed shadow notional. */
   netUsd: number | null;
@@ -56,14 +63,12 @@ export interface ShadowBucket {
   closed: number;
   wins: number;
   winRate: number;
-  /** Average net bps per closed shadow trade. */
   expectancyBps: number;
   netUsd: number;
 }
 
 export interface ThresholdRow {
   threshold: number;
-  /** Trades (real + shadow) that would have been taken at this gate. */
   trades: number;
   wins: number;
   winRate: number;
@@ -75,35 +80,68 @@ export interface ShadowStats {
   notional: number;
   openCount: number;
   closedCount: number;
+
+  /** P&L of every closed shadow trade, regardless of rejection reason. */
   totalNetUsd: number;
   expectancyBps: number;
   winRate: number;
+
   byReason: ShadowBucket[];
   byConfidence: ShadowBucket[];
+
+  /**
+   * Counterfactual confidence sweep.
+   * Includes real trades + shadow trades rejected specifically by confidence.
+   * Other rejection reasons are deliberately excluded.
+   */
   sweep: ThresholdRow[];
-  /** Threshold with the best net USD in the sweep, once samples allow. */
+  recommendationMetric: RecommendationMetric;
+  recommendationSampleCount: number;
   recommendedThreshold: number | null;
-  /** Net USD the current gate gave up (positive) or saved (negative). */
+
+  /**
+   * P&L of confidence-rejected shadow trades only.
+   * Positive = the confidence gate skipped profitable trades.
+   * Negative = the confidence gate avoided losses.
+   */
   opportunityUsd: number;
-  /** Samples still needed before the recommendation is trusted. */
+
   samplesToTrust: number;
 }
 
 export interface ShadowConfig {
-  /** Fixed USD notional per shadow trade — comparability over realism. */
+  /** Fixed USD notional per shadow trade. */
   notional: number;
   slPct: number;
   tpPct: number;
+
+  /** Modeled taker fee per fill. 0.00055 = 0.055%. */
   takerFeeRate: number;
+
+  /**
+   * Approximate carry model only.
+   * Real exchange funding settles at symbol-specific intervals and rates.
+   */
   fundingRatePer8h: number;
-  /** Force-close a shadow trade that never hit SL/TP, in ms. */
+
+  /** Optional adverse execution slippage applied to both entry and exit. */
+  slippageBpsPerFill: number;
+
+  /** Force-close a shadow trade that never hit SL/TP. */
   maxHoldMs: number;
-  /** Cap on concurrently open shadow trades (memory guard). */
+
+  /** Memory guards. */
   maxOpen: number;
-  /** Cap on retained closed shadow trades. */
   maxClosed: number;
-  /** One shadow trade per symbol at a time. */
+
+  /** Evidence threshold before a confidence recommendation can be emitted. */
   minSamplesForRecommendation: number;
+
+  /** Each candidate threshold must itself have at least this many samples. */
+  minTradesPerThreshold: number;
+
+  /** Objective used to select the recommended threshold. */
+  recommendationMetric: RecommendationMetric;
 }
 
 export const DEFAULT_SHADOW_CONFIG: ShadowConfig = {
@@ -112,74 +150,299 @@ export const DEFAULT_SHADOW_CONFIG: ShadowConfig = {
   tpPct: 0.04,
   takerFeeRate: 0.00055,
   fundingRatePer8h: 0.0001,
+  slippageBpsPerFill: 0,
   maxHoldMs: 2 * 60 * 60 * 1000,
   maxOpen: 400,
   maxClosed: 4_000,
   minSamplesForRecommendation: 50,
+  minTradesPerThreshold: 20,
+  recommendationMetric: "expectancyBps",
 };
 
-const CONF_BANDS: Array<[string, number, number]> = [
+const CONF_BANDS: ReadonlyArray<readonly [string, number, number]> = [
+  ["<0.60", 0, 0.6],
   ["0.60–0.70", 0.6, 0.7],
   ["0.70–0.80", 0.7, 0.8],
   ["0.80–0.90", 0.8, 0.9],
-  ["0.90–1.00", 0.9, 1.01],
+  ["0.90–1.00", 0.9, 1.0000000001],
 ];
 
-const SWEEP_THRESHOLDS = [0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9];
+const SWEEP_THRESHOLDS = [0.6, 0.65, 0.7, 0.75, 0.8, 0.85, 0.9] as const;
 
-/** A real closed paper trade, projected into shadow-comparable terms. */
+export const EMPTY_SHADOW_STATS: ShadowStats = {
+  notional: DEFAULT_SHADOW_CONFIG.notional,
+  openCount: 0,
+  closedCount: 0,
+  totalNetUsd: 0,
+  expectancyBps: 0,
+  winRate: 0,
+  byReason: [],
+  byConfidence: [],
+  sweep: SWEEP_THRESHOLDS.map((threshold) => ({
+    threshold,
+    trades: 0,
+    wins: 0,
+    winRate: 0,
+    expectancyBps: 0,
+    netUsd: 0,
+  })),
+  recommendationMetric: DEFAULT_SHADOW_CONFIG.recommendationMetric,
+  recommendationSampleCount: 0,
+  recommendedThreshold: null,
+  opportunityUsd: 0,
+  samplesToTrust: DEFAULT_SHADOW_CONFIG.minSamplesForRecommendation,
+};
+
 export interface RealSample {
   confidence: number;
-  /** Net return in bps of notional. */
+  /** Net return in bps. This is the canonical field for counterfactual sweeps. */
   netBps: number;
-  netUsd: number;
+  /**
+   * Optional original P&L for display/audit only.
+   * Sweep P&L is normalized from netBps onto the shadow notional so real and
+   * shadow samples remain comparable even when real position sizes differ.
+   */
+  netUsd?: number;
 }
+
+export interface ShadowBookSnapshot {
+  version: 1;
+  seq: number;
+  /** Economics used to create/open these trades. */
+  economics: Pick<
+    ShadowConfig,
+    | "notional"
+    | "slPct"
+    | "tpPct"
+    | "takerFeeRate"
+    | "fundingRatePer8h"
+    | "slippageBpsPerFill"
+    | "maxHoldMs"
+  >;
+  open: ShadowTrade[];
+  closed: ShadowTrade[];
+}
+
+type BucketAccumulator = {
+  b: ShadowBucket;
+  bpsSum: number;
+};
+
+const EIGHT_HOURS_MS = 8 * 60 * 60 * 1000;
 
 function emptyBucket(key: string): ShadowBucket {
-  return { key, open: 0, closed: 0, wins: 0, winRate: 0, expectancyBps: 0, netUsd: 0 };
+  return {
+    key,
+    open: 0,
+    closed: 0,
+    wins: 0,
+    winRate: 0,
+    expectancyBps: 0,
+    netUsd: 0,
+  };
 }
 
-function finalise(b: ShadowBucket, bpsSum: number): ShadowBucket {
-  b.winRate = b.closed ? (b.wins / b.closed) * 100 : 0;
-  b.expectancyBps = b.closed ? bpsSum / b.closed : 0;
-  return b;
+function finaliseBucket(entry: BucketAccumulator): ShadowBucket {
+  const { b, bpsSum } = entry;
+  return {
+    ...b,
+    winRate: b.closed ? (b.wins / b.closed) * 100 : 0,
+    expectancyBps: b.closed ? bpsSum / b.closed : 0,
+  };
+}
+
+function isFinitePositive(n: number): boolean {
+  return Number.isFinite(n) && n > 0;
+}
+
+function isConfidence(n: number): boolean {
+  return Number.isFinite(n) && n >= 0 && n <= 1;
+}
+
+function cloneTrade(t: ShadowTrade): ShadowTrade {
+  return { ...t };
+}
+
+function bandOf(confidence: number): string {
+  return (
+    CONF_BANDS.find(([, lo, hi]) => confidence >= lo && confidence < hi)?.[0] ?? "out-of-range"
+  );
+}
+
+function validateConfig(cfg: ShadowConfig): void {
+  const positive: Array<[keyof ShadowConfig, number]> = [
+    ["notional", cfg.notional],
+    ["slPct", cfg.slPct],
+    ["tpPct", cfg.tpPct],
+    ["maxHoldMs", cfg.maxHoldMs],
+    ["maxOpen", cfg.maxOpen],
+    ["maxClosed", cfg.maxClosed],
+    ["minSamplesForRecommendation", cfg.minSamplesForRecommendation],
+    ["minTradesPerThreshold", cfg.minTradesPerThreshold],
+  ];
+
+  for (const [name, value] of positive) {
+    if (!isFinitePositive(value)) {
+      throw new RangeError(`${String(name)} must be a finite positive number`);
+    }
+  }
+
+  if (!Number.isInteger(cfg.maxOpen) || !Number.isInteger(cfg.maxClosed)) {
+    throw new RangeError("maxOpen and maxClosed must be integers");
+  }
+
+  if (
+    !Number.isInteger(cfg.minSamplesForRecommendation) ||
+    !Number.isInteger(cfg.minTradesPerThreshold)
+  ) {
+    throw new RangeError("minSamplesForRecommendation and minTradesPerThreshold must be integers");
+  }
+
+  if (!Number.isFinite(cfg.takerFeeRate) || cfg.takerFeeRate < 0) {
+    throw new RangeError("takerFeeRate must be finite and >= 0");
+  }
+
+  if (!Number.isFinite(cfg.fundingRatePer8h)) {
+    throw new RangeError("fundingRatePer8h must be finite");
+  }
+
+  if (!Number.isFinite(cfg.slippageBpsPerFill) || cfg.slippageBpsPerFill < 0) {
+    throw new RangeError("slippageBpsPerFill must be finite and >= 0");
+  }
+}
+
+/**
+ * Apply adverse slippage to a synthetic fill.
+ *
+ * BUY entry  -> higher price
+ * SELL entry -> lower price
+ * BUY exit   -> lower price
+ * SELL exit  -> higher price
+ */
+function slippedFill(
+  price: number,
+  side: "BUY" | "SELL",
+  phase: "ENTRY" | "EXIT",
+  slippageBps: number,
+): number {
+  if (slippageBps === 0) return price;
+
+  const dir = side === "BUY" ? 1 : -1;
+  const phaseSign = phase === "ENTRY" ? 1 : -1;
+  return price * (1 + (dir * phaseSign * slippageBps) / 10_000);
+}
+
+function isValidRealSample(sample: RealSample): boolean {
+  return isConfidence(sample.confidence) && Number.isFinite(sample.netBps);
+}
+
+function isRestorableTrade(t: ShadowTrade): boolean {
+  return (
+    !!t &&
+    typeof t.id === "string" &&
+    typeof t.symbol === "string" &&
+    t.symbol.length > 0 &&
+    typeof t.regime === "string" &&
+    (t.side === "BUY" || t.side === "SELL") &&
+    (t.reason === "confidence" ||
+      t.reason === "suppressed" ||
+      t.reason === "blocked" ||
+      t.reason === "observer") &&
+    isConfidence(t.confidence) &&
+    isFinitePositive(t.entryPrice) &&
+    isFinitePositive(t.stopLoss) &&
+    isFinitePositive(t.takeProfit) &&
+    isFinitePositive(t.lastPrice) &&
+    Number.isFinite(t.openedAt) &&
+    Number.isFinite(t.lastMarkedAt) &&
+    Number.isFinite(t.maxFavourableBps) &&
+    Number.isFinite(t.maxAdverseBps)
+  );
+}
+
+function economicsOf(cfg: ShadowConfig): ShadowBookSnapshot["economics"] {
+  return {
+    notional: cfg.notional,
+    slPct: cfg.slPct,
+    tpPct: cfg.tpPct,
+    takerFeeRate: cfg.takerFeeRate,
+    fundingRatePer8h: cfg.fundingRatePer8h,
+    slippageBpsPerFill: cfg.slippageBpsPerFill,
+    maxHoldMs: cfg.maxHoldMs,
+  };
+}
+
+function sameEconomics(
+  a: ShadowBookSnapshot["economics"],
+  b: ShadowBookSnapshot["economics"],
+): boolean {
+  return (
+    a.notional === b.notional &&
+    a.slPct === b.slPct &&
+    a.tpPct === b.tpPct &&
+    a.takerFeeRate === b.takerFeeRate &&
+    a.fundingRatePer8h === b.fundingRatePer8h &&
+    a.slippageBpsPerFill === b.slippageBpsPerFill &&
+    a.maxHoldMs === b.maxHoldMs
+  );
 }
 
 export class ShadowBook {
-  private cfg: ShadowConfig;
-  private open = new Map<string, ShadowTrade>(); // keyed by symbol
+  private readonly cfg: ShadowConfig;
+  private readonly open = new Map<string, ShadowTrade>();
   private closed: ShadowTrade[] = [];
   private seq = 0;
 
   constructor(cfg: Partial<ShadowConfig> = {}) {
     this.cfg = { ...DEFAULT_SHADOW_CONFIG, ...cfg };
+    validateConfig(this.cfg);
   }
 
+  getConfig(): Readonly<ShadowConfig> {
+    return { ...this.cfg };
+  }
+
+  /** Defensive snapshots: callers cannot mutate internal book state. */
   getOpen(): ShadowTrade[] {
-    return [...this.open.values()];
+    return [...this.open.values()].map(cloneTrade);
   }
 
   getClosed(): ShadowTrade[] {
-    return this.closed;
+    return this.closed.map(cloneTrade);
   }
 
-  /** Record a proposal the real engine declined. No-op if one is already live. */
-  record(p: TradeProposal, reason: ShadowReason, regime: string): void {
-    if (this.open.has(p.symbol)) return;
-    if (this.open.size >= this.cfg.maxOpen) return;
-    if (!Number.isFinite(p.price) || p.price <= 0) return;
+  /**
+   * Record a proposal the real engine declined.
+   * No-op if one shadow trade for the symbol is already open.
+   */
+  record(p: TradeProposal, reason: ShadowReason, regime: string): boolean {
+    const symbol = p.symbol?.trim();
+
+    if (!symbol) return false;
+    if (this.open.has(symbol)) return false;
+    if (this.open.size >= this.cfg.maxOpen) return false;
+    if (!isFinitePositive(p.price)) return false;
+    if (!isConfidence(p.confidence)) return false;
+    if (!Number.isFinite(p.time)) return false;
+    if (p.direction !== "BUY" && p.direction !== "SELL") return false;
+
+    const entryPrice = slippedFill(p.price, p.direction, "ENTRY", this.cfg.slippageBpsPerFill);
+
     const dir = p.direction === "BUY" ? 1 : -1;
-    this.open.set(p.symbol, {
-      id: `shadow-${++this.seq}`,
-      symbol: p.symbol,
+
+    this.open.set(symbol, {
+      id: `shadow-${p.time}-${++this.seq}`,
+      symbol,
       side: p.direction,
       reason,
       confidence: p.confidence,
       regime,
-      entryPrice: p.price,
-      stopLoss: p.price * (1 - dir * this.cfg.slPct),
-      takeProfit: p.price * (1 + dir * this.cfg.tpPct),
+      entryPrice,
+      stopLoss: entryPrice * (1 - dir * this.cfg.slPct),
+      takeProfit: entryPrice * (1 + dir * this.cfg.tpPct),
       openedAt: p.time,
+      lastPrice: entryPrice,
+      lastMarkedAt: p.time,
       maxFavourableBps: 0,
       maxAdverseBps: 0,
       exitPrice: null,
@@ -188,45 +451,120 @@ export class ShadowBook {
       netBps: null,
       netUsd: null,
     });
+
+    return true;
   }
 
-  /** Mark open shadow trades against a live tick; closes on SL/TP/timeout. */
-  mark(symbol: string, price: number, time: number): void {
+  /**
+   * Mark one open shadow trade against a live tick.
+   * Out-of-order ticks are ignored.
+   */
+  mark(symbol: string, price: number, time: number): boolean {
     const t = this.open.get(symbol);
-    if (!t || !Number.isFinite(price) || price <= 0) return;
+
+    if (!t || !isFinitePositive(price) || !Number.isFinite(time)) return false;
+    if (time < t.openedAt || time < t.lastMarkedAt) return false;
+
+    const expiresAt = t.openedAt + this.cfg.maxHoldMs;
+    const expired = time > expiresAt;
+
+    /*
+     * If the next observed tick arrives after expiry, that tick is too late to
+     * prove an SL/TP hit inside the allowed window. Close at the last price
+     * actually observed before expiry and cap elapsed-cost accounting at the
+     * configured expiry time.
+     */
+    if (expired) {
+      this.close(t, t.lastPrice, expiresAt, "TIME");
+      return true;
+    }
+
+    t.lastPrice = price;
+    t.lastMarkedAt = time;
+
     const dir = t.side === "BUY" ? 1 : -1;
     const moveBps = ((price - t.entryPrice) / t.entryPrice) * 10_000 * dir;
-    if (moveBps > t.maxFavourableBps) t.maxFavourableBps = moveBps;
-    if (moveBps < t.maxAdverseBps) t.maxAdverseBps = moveBps;
+
+    t.maxFavourableBps = Math.max(t.maxFavourableBps, moveBps);
+    t.maxAdverseBps = Math.min(t.maxAdverseBps, moveBps);
 
     const hitTp = dir === 1 ? price >= t.takeProfit : price <= t.takeProfit;
     const hitSl = dir === 1 ? price <= t.stopLoss : price >= t.stopLoss;
-    if (hitTp) return this.close(t, t.takeProfit, time, "TP");
-    if (hitSl) return this.close(t, t.stopLoss, time, "SL");
-    if (time - t.openedAt >= this.cfg.maxHoldMs) this.close(t, price, time, "TIME");
-  }
 
-  /** Timeout sweep for symbols that stopped ticking. */
-  sweep(now: number): void {
-    for (const t of [...this.open.values()]) {
-      if (now - t.openedAt >= this.cfg.maxHoldMs) this.close(t, t.entryPrice, now, "TIME");
+    if (hitTp) {
+      this.close(t, t.takeProfit, time, "TP");
+      return true;
     }
+
+    if (hitSl) {
+      this.close(t, t.stopLoss, time, "SL");
+      return true;
+    }
+
+    if (time - t.openedAt >= this.cfg.maxHoldMs) {
+      this.close(t, price, time, "TIME");
+      return true;
+    }
+
+    return true;
   }
 
-  private close(t: ShadowTrade, exitPrice: number, time: number, reason: "TP" | "SL" | "TIME") {
+  /**
+   * Timeout sweep for symbols that stopped ticking.
+   * Uses the last observed price rather than fabricating a flat exit at entry.
+   */
+  sweep(now: number): number {
+    if (!Number.isFinite(now)) return 0;
+
+    let closedCount = 0;
+
+    for (const t of [...this.open.values()]) {
+      const expiresAt = t.openedAt + this.cfg.maxHoldMs;
+      if (now >= expiresAt) {
+        this.close(t, t.lastPrice, expiresAt, "TIME");
+        closedCount += 1;
+      }
+    }
+
+    return closedCount;
+  }
+
+  private close(
+    t: ShadowTrade,
+    rawExitPrice: number,
+    time: number,
+    reason: ShadowExitReason,
+  ): void {
+    if (!this.open.has(t.symbol)) return;
+
+    const exitPrice = slippedFill(rawExitPrice, t.side, "EXIT", this.cfg.slippageBpsPerFill);
+
     const dir = t.side === "BUY" ? 1 : -1;
     const grossBps = ((exitPrice - t.entryPrice) / t.entryPrice) * 10_000 * dir;
+
     const feeBps = this.cfg.takerFeeRate * 2 * 10_000;
-    const intervals = Math.max(0, (time - t.openedAt) / (8 * 60 * 60 * 1000));
-    const fundingBps = this.cfg.fundingRatePer8h * intervals * 10_000 * dir;
+
+    /*
+     * Approximate carry, not exchange-settlement accounting.
+     * Positive rates debit longs and credit shorts; negative rates reverse it.
+     */
+    const elapsed = Math.max(0, time - t.openedAt);
+    const fundingIntervals = elapsed / EIGHT_HOURS_MS;
+    const fundingBps = this.cfg.fundingRatePer8h * fundingIntervals * 10_000 * dir;
+
     const netBps = grossBps - feeBps - fundingBps;
+
     t.exitPrice = exitPrice;
     t.closedAt = time;
     t.exitReason = reason;
     t.netBps = netBps;
     t.netUsd = (netBps / 10_000) * this.cfg.notional;
+    t.lastPrice = rawExitPrice;
+    t.lastMarkedAt = Math.max(t.lastMarkedAt, time);
+
     this.open.delete(t.symbol);
     this.closed.push(t);
+
     if (this.closed.length > this.cfg.maxClosed) {
       this.closed.splice(0, this.closed.length - this.cfg.maxClosed);
     }
@@ -238,102 +576,213 @@ export class ShadowBook {
   }
 
   /**
-   * Combine shadow outcomes with the real closed trades to sweep the
-   * confidence gate: at each candidate threshold, what would the book have
-   * earned if every proposal at or above it had been taken?
+   * Export state so the owner process can persist it.
+   * Persistence transport/storage is intentionally left outside this class.
+   */
+  snapshot(): ShadowBookSnapshot {
+    return {
+      version: 1,
+      seq: this.seq,
+      economics: economicsOf(this.cfg),
+      open: this.getOpen(),
+      closed: this.getClosed(),
+    };
+  }
+
+  /**
+   * Restore a trusted snapshot defensively.
+   * Invalid rows are skipped; configured memory limits still apply.
+   */
+  restore(snapshot: ShadowBookSnapshot): void {
+    if (!snapshot || snapshot.version !== 1) {
+      throw new Error("Unsupported ShadowBook snapshot");
+    }
+
+    if (!snapshot.economics || !sameEconomics(snapshot.economics, economicsOf(this.cfg))) {
+      throw new Error("ShadowBook snapshot economics do not match the active configuration");
+    }
+
+    this.open.clear();
+
+    const openRows = snapshot.open
+      .filter(isRestorableTrade)
+      .filter((t) => t.closedAt === null && t.exitReason === null)
+      .slice(-this.cfg.maxOpen);
+
+    for (const t of openRows) {
+      if (!this.open.has(t.symbol)) {
+        this.open.set(t.symbol, cloneTrade(t));
+      }
+    }
+
+    this.closed = snapshot.closed
+      .filter(isRestorableTrade)
+      .filter(
+        (t) =>
+          t.closedAt !== null &&
+          t.exitReason !== null &&
+          Number.isFinite(t.netBps) &&
+          Number.isFinite(t.netUsd),
+      )
+      .slice(-this.cfg.maxClosed)
+      .map(cloneTrade);
+
+    this.seq = Number.isSafeInteger(snapshot.seq) ? Math.max(this.seq, snapshot.seq) : this.seq;
+  }
+
+  /**
+   * Build dashboard statistics and a confidence-gate counterfactual.
+   *
+   * Important:
+   *   - All shadow reasons contribute to overall shadow performance.
+   *   - Only `confidence` shadow rejections contribute to the threshold sweep.
+   *     A confidence threshold cannot make a halt, suppression rule, margin
+   *     refusal or observer-mode trade executable.
    */
   getStats(real: RealSample[] = []): ShadowStats {
-    const closed = this.closed;
-    const reasonBuckets = new Map<string, { b: ShadowBucket; sum: number }>();
-    const confBuckets = new Map<string, { b: ShadowBucket; sum: number }>();
+    const reasonBuckets = new Map<string, BucketAccumulator>();
+    const confBuckets = new Map<string, BucketAccumulator>();
 
     const bump = (
-      map: Map<string, { b: ShadowBucket; sum: number }>,
+      map: Map<string, BucketAccumulator>,
       key: string,
-      t: ShadowTrade | null,
-    ) => {
-      let e = map.get(key);
-      if (!e) {
-        e = { b: emptyBucket(key), sum: 0 };
-        map.set(key, e);
+      trade: ShadowTrade | null,
+    ): void => {
+      let entry = map.get(key);
+
+      if (!entry) {
+        entry = { b: emptyBucket(key), bpsSum: 0 };
+        map.set(key, entry);
       }
-      if (!t) {
-        e.b.open += 1;
+
+      if (!trade) {
+        entry.b.open += 1;
         return;
       }
-      e.b.closed += 1;
-      e.b.netUsd += t.netUsd ?? 0;
-      e.sum += t.netBps ?? 0;
-      if ((t.netUsd ?? 0) > 0) e.b.wins += 1;
-    };
 
-    const bandOf = (c: number) =>
-      CONF_BANDS.find(([, lo, hi]) => c >= lo && c < hi)?.[0] ?? "<0.60";
+      entry.b.closed += 1;
+      entry.b.netUsd += trade.netUsd ?? 0;
+      entry.bpsSum += trade.netBps ?? 0;
+
+      if ((trade.netUsd ?? 0) > 0) {
+        entry.b.wins += 1;
+      }
+    };
 
     for (const t of this.open.values()) {
       bump(reasonBuckets, SHADOW_REASON_LABELS[t.reason], null);
       bump(confBuckets, bandOf(t.confidence), null);
     }
-    let netUsd = 0;
-    let bpsSum = 0;
+
+    let totalNetUsd = 0;
+    let totalBps = 0;
     let wins = 0;
-    for (const t of closed) {
-      netUsd += t.netUsd ?? 0;
-      bpsSum += t.netBps ?? 0;
-      if ((t.netUsd ?? 0) > 0) wins += 1;
+    let opportunityUsd = 0;
+
+    for (const t of this.closed) {
+      const netUsd = t.netUsd ?? 0;
+      const netBps = t.netBps ?? 0;
+
+      totalNetUsd += netUsd;
+      totalBps += netBps;
+      if (netUsd > 0) wins += 1;
+      if (t.reason === "confidence") opportunityUsd += netUsd;
+
       bump(reasonBuckets, SHADOW_REASON_LABELS[t.reason], t);
       bump(confBuckets, bandOf(t.confidence), t);
     }
 
-    const pool: Array<{ confidence: number; netBps: number; netUsd: number }> = [
-      ...real,
-      ...closed
-        .filter((t) => t.netBps !== null)
-        .map((t) => ({
-          confidence: t.confidence,
-          netBps: t.netBps as number,
-          netUsd: t.netUsd as number,
-        })),
-    ];
+    const validReal = real.filter(isValidRealSample).map((sample) => ({
+      confidence: sample.confidence,
+      netBps: sample.netBps,
+      netUsd: (sample.netBps / 10_000) * this.cfg.notional,
+    }));
+
+    const confidenceShadowSamples = this.closed
+      .filter(
+        (t) =>
+          t.reason === "confidence" &&
+          t.netBps !== null &&
+          t.netUsd !== null &&
+          isConfidence(t.confidence),
+      )
+      .map((t) => ({
+        confidence: t.confidence,
+        netBps: t.netBps as number,
+        netUsd: t.netUsd as number,
+      }));
+
+    const recommendationPool = [...validReal, ...confidenceShadowSamples];
 
     const sweep: ThresholdRow[] = SWEEP_THRESHOLDS.map((threshold) => {
-      const rows = pool.filter((r) => r.confidence >= threshold);
-      const w = rows.filter((r) => r.netUsd > 0).length;
-      const sum = rows.reduce((a, r) => a + r.netBps, 0);
+      const rows = recommendationPool.filter((sample) => sample.confidence >= threshold);
+
+      const winsAtThreshold = rows.reduce((count, row) => count + (row.netUsd > 0 ? 1 : 0), 0);
+
+      const bpsSum = rows.reduce((sum, row) => sum + row.netBps, 0);
+      const usdSum = rows.reduce((sum, row) => sum + row.netUsd, 0);
+
       return {
         threshold,
         trades: rows.length,
-        wins: w,
-        winRate: rows.length ? (w / rows.length) * 100 : 0,
-        expectancyBps: rows.length ? sum / rows.length : 0,
-        netUsd: rows.reduce((a, r) => a + r.netUsd, 0),
+        wins: winsAtThreshold,
+        winRate: rows.length ? (winsAtThreshold / rows.length) * 100 : 0,
+        expectancyBps: rows.length ? bpsSum / rows.length : 0,
+        netUsd: usdSum,
       };
     });
 
-    const enough = pool.length >= this.cfg.minSamplesForRecommendation;
-    const best = sweep
-      .filter((r) => r.trades >= 10)
-      .reduce<ThresholdRow | null>((b, r) => (!b || r.netUsd > b.netUsd ? r : b), null);
+    const enoughOverall = recommendationPool.length >= this.cfg.minSamplesForRecommendation;
+
+    const candidates = enoughOverall
+      ? sweep.filter((row) => row.trades >= this.cfg.minTradesPerThreshold)
+      : [];
+
+    const metric = this.cfg.recommendationMetric;
+
+    const best = candidates.reduce<ThresholdRow | null>((current, row) => {
+      if (!current) return row;
+
+      const rowScore = metric === "expectancyBps" ? row.expectancyBps : row.netUsd;
+      const currentScore = metric === "expectancyBps" ? current.expectancyBps : current.netUsd;
+
+      if (rowScore > currentScore) return row;
+      if (rowScore < currentScore) return current;
+
+      /*
+       * Tie-break toward more evidence, then toward the stricter threshold.
+       */
+      if (row.trades > current.trades) return row;
+      if (row.trades < current.trades) return current;
+      return row.threshold > current.threshold ? row : current;
+    }, null);
+
+    const confidenceOrder = new Map(CONF_BANDS.map(([key], index) => [key, index]));
 
     return {
       notional: this.cfg.notional,
       openCount: this.open.size,
-      closedCount: closed.length,
-      totalNetUsd: netUsd,
-      expectancyBps: closed.length ? bpsSum / closed.length : 0,
-      winRate: closed.length ? (wins / closed.length) * 100 : 0,
-      byReason: [...reasonBuckets.values()]
-        .map((e) => finalise(e.b, e.sum))
-        .sort((a, b) => b.closed - a.closed),
+      closedCount: this.closed.length,
+      totalNetUsd,
+      expectancyBps: this.closed.length ? totalBps / this.closed.length : 0,
+      winRate: this.closed.length ? (wins / this.closed.length) * 100 : 0,
+
+      byReason: [...reasonBuckets.values()].map(finaliseBucket).sort((a, b) => b.closed - a.closed),
+
       byConfidence: [...confBuckets.values()]
-        .map((e) => finalise(e.b, e.sum))
-        .sort((a, b) => a.key.localeCompare(b.key)),
+        .map(finaliseBucket)
+        .sort(
+          (a, b) =>
+            (confidenceOrder.get(a.key) ?? Number.MAX_SAFE_INTEGER) -
+            (confidenceOrder.get(b.key) ?? Number.MAX_SAFE_INTEGER),
+        ),
+
       sweep,
-      recommendedThreshold: enough && best ? best.threshold : null,
-      // Money the gate refused: positive means the skipped trades were, on
-      // net, profitable — the swarm was too shy.
-      opportunityUsd: netUsd,
-      samplesToTrust: Math.max(0, this.cfg.minSamplesForRecommendation - pool.length),
+      recommendationMetric: metric,
+      recommendationSampleCount: recommendationPool.length,
+      recommendedThreshold: best?.threshold ?? null,
+      opportunityUsd,
+      samplesToTrust: Math.max(0, this.cfg.minSamplesForRecommendation - recommendationPool.length),
     };
   }
 }
