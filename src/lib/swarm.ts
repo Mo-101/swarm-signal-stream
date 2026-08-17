@@ -300,6 +300,13 @@ const PING_INTERVAL_MS = 20_000;
 /** An "open" socket with no frame for this long is treated as dead. */
 const STALL_MS = 60_000;
 const WATCHDOG_INTERVAL_MS = 15_000;
+/**
+ * A socket that has not reached "open" this long after we created it is
+ * treated as dead. Without this a handshake that hangs (flaky link, VPN,
+ * happy-eyeballs) parks the chunk in "connecting" forever — readyState stays
+ * CONNECTING, so nothing else in the sweep considers it broken.
+ */
+const CONNECT_TIMEOUT_MS = 30_000;
 const WS_URL = "wss://stream.bybit.com/v5/public/linear";
 
 
@@ -323,6 +330,8 @@ export class SwarmEngine {
   /** Symbol chunks kept so the watchdog can rebuild an individual feed. */
   private chunks: string[][] = [];
   private chunkSockets = new Map<number, WebSocket>();
+  /** When the current attempt for a chunk was created, to time out handshakes. */
+  private chunkAttemptAt = new Map<number, number>();
   private watchdogTimer: ReturnType<typeof setInterval> | null = null;
   private startedAt: number | null = null;
   private watchdogRestarts = 0;
@@ -401,13 +410,24 @@ export class SwarmEngine {
   }
 
   /**
-   * Rebuild any feed that is missing, closed, or "open" but silent past the
-   * stall threshold. Cheap and idempotent — safe to call on any wake event.
+   * Rebuild any feed that is missing, closed, silent past the stall threshold,
+   * or stuck mid-handshake. Cheap and idempotent — safe to call on any wake
+   * event.
+   *
+   * The watchdog rebuilds the socket itself rather than calling close() and
+   * waiting for onclose to schedule the reconnect. A socket the OS has already
+   * torn down does not reliably emit onclose, and when it stayed quiet the
+   * chunk was stranded forever: every later sweep saw the same silent socket,
+   * called close() on it again, and no reconnect was ever attempted. That
+   * killed the whole price feed with the process still healthy-looking —
+   * timers ticking, status logs printing, no TCP connections left.
    */
   private sweep() {
     if (this.stopped) return;
     const now = Date.now();
     for (let chunkId = 0; chunkId < this.chunks.length; chunkId++) {
+      // A pending reconnect timer already owns this chunk.
+      if (this.reconnectTimers.has(chunkId)) continue;
       const st = this.feedStats.get(chunkId);
       const ws = this.chunkSockets.get(chunkId);
       const socketDead =
@@ -415,22 +435,51 @@ export class SwarmEngine {
       const silent =
         st?.state === "open" &&
         now - (st.lastMessageAt ?? st.openedAt ?? now) > STALL_MS;
-      if (!socketDead && !silent) continue;
-      // A pending reconnect timer already owns this chunk.
-      if (this.reconnectTimers.has(chunkId)) continue;
-      if (silent && ws) {
-        this.watchdogRestarts++;
-        try {
-          ws.close();
-        } catch {
-          /* onclose schedules the reconnect */
-        }
-        continue;
-      }
-      if (socketDead && st?.state !== "connecting") {
-        this.watchdogRestarts++;
-        this.openSocket(this.chunks[chunkId], chunkId);
-      }
+      // CONNECTING that never completes: readyState alone never marks this
+      // broken, so age the attempt out explicitly.
+      const handshakeStuck =
+        st?.state === "connecting" &&
+        now - (this.chunkAttemptAt.get(chunkId) ?? now) > CONNECT_TIMEOUT_MS;
+      if (!socketDead && !silent && !handshakeStuck) continue;
+      this.watchdogRestarts++;
+      this.rebuildChunk(chunkId);
+    }
+  }
+
+  /**
+   * Force a chunk back onto a fresh socket. The outgoing socket is detached
+   * first so its late onclose cannot decrement `connected` or overwrite the
+   * replacement's stats.
+   */
+  private rebuildChunk(chunkId: number) {
+    const ws = this.chunkSockets.get(chunkId);
+    if (ws) {
+      this.chunkSockets.delete(chunkId);
+      this.retireSocket(ws);
+    }
+    this.openSocket(this.chunks[chunkId], chunkId);
+  }
+
+  /** Drop a socket from the live set and silence it, best effort. */
+  private retireSocket(ws: WebSocket) {
+    const ping = this.pingTimers.get(ws);
+    if (ping) {
+      clearInterval(ping);
+      this.pingTimers.delete(ws);
+    }
+    if (this.sockets.includes(ws)) {
+      this.sockets = this.sockets.filter((s) => s !== ws);
+      this.connected = Math.max(0, this.connected - 1);
+      this.emitStatus();
+    }
+    try {
+      ws.onopen = null;
+      ws.onclose = null;
+      ws.onerror = null;
+      ws.onmessage = null;
+      ws.close();
+    } catch {
+      /* the replacement socket is already on its way up */
     }
   }
 
@@ -459,6 +508,7 @@ export class SwarmEngine {
     }
     this.sockets = [];
     this.chunkSockets.clear();
+    this.chunkAttemptAt.clear();
     this.connected = 0;
     this.events.onStatus?.({ connected: 0, total: 0 });
   }
@@ -485,11 +535,18 @@ export class SwarmEngine {
     });
     const ws = new WebSocket(WS_URL);
     this.chunkSockets.set(chunkId, ws);
+    this.chunkAttemptAt.set(chunkId, Date.now());
 
+    /** True once the watchdog has replaced this socket for its chunk. */
+    const superseded = () => this.chunkSockets.get(chunkId) !== ws;
 
     ws.onopen = () => {
-      if (this.stopped) {
-        ws.close();
+      if (this.stopped || superseded()) {
+        try {
+          ws.close();
+        } catch {
+          /* noop */
+        }
         return;
       }
       this.connected++;
@@ -526,9 +583,19 @@ export class SwarmEngine {
         clearInterval(ping);
         this.pingTimers.delete(ws);
       }
+      // A socket the watchdog already replaced must not touch chunk state —
+      // its replacement owns the stats, the connected count and the timers.
+      if (superseded()) {
+        if (this.sockets.includes(ws)) {
+          this.sockets = this.sockets.filter((s) => s !== ws);
+          this.connected = Math.max(0, this.connected - 1);
+          this.emitStatus();
+        }
+        return;
+      }
       const st = this.feedStats.get(chunkId);
       if (st) st.state = "closed";
-      if (this.chunkSockets.get(chunkId) === ws) this.chunkSockets.delete(chunkId);
+      this.chunkSockets.delete(chunkId);
       if (this.stopped) return;
 
 
@@ -553,7 +620,12 @@ export class SwarmEngine {
       }
     };
 
-    ws.onmessage = (ev) => this.handleMessage(ev.data as string, chunkId);
+    // A late frame from a retired socket must not refresh the replacement's
+    // lastMessageAt — that would mask a genuine stall from the watchdog.
+    ws.onmessage = (ev) => {
+      if (superseded()) return;
+      this.handleMessage(ev.data as string, chunkId);
+    };
   }
 
   private handleMessage(raw: string, chunkId: number) {

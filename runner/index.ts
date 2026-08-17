@@ -66,6 +66,19 @@ function requireEnv(name: string): string {
 const HEARTBEAT_INTERVAL_MS = 15_000;
 const STATUS_LOG_INTERVAL_MS = 60_000;
 const HEALTH_PORT = Number(process.env.HEALTH_PORT ?? 8090);
+/**
+ * Exit if the engine goes this long without a single tick. Across ~700 perps
+ * even a dead-quiet market ticks many times a second, so silence this long
+ * means the price feed is gone, not that nothing traded.
+ *
+ * A failing HEALTHCHECK does not restart anything on its own — Docker's
+ * `restart: always` acts on process exit, not on health status. Without this
+ * the container sits "unhealthy" indefinitely with its timers still running
+ * and its status log still printing, which is exactly how the swarm stalled
+ * for hours while looking alive. The feed watchdogs should recover first;
+ * this is the backstop for when they cannot.
+ */
+const TICK_STALL_EXIT_MS = Number(process.env.TICK_STALL_EXIT_MS ?? 5 * 60_000);
 
 async function main() {
   requireEnv("DATABASE_URL"); // read directly by src/lib/db/neon.ts
@@ -239,6 +252,25 @@ async function main() {
     );
   }, STATUS_LOG_INTERVAL_MS);
 
+  // Backstop for a price feed the in-process watchdogs could not rebuild.
+  // Exiting non-zero takes the whole container down so `restart: always`
+  // brings back a clean process, rather than leaving a live-but-blind runner
+  // holding open positions it can no longer mark.
+  const stallWatch = setInterval(() => {
+    if (stopping || health.status === "halted") return;
+    const last = health.lastTickAt;
+    const since = last === null ? Date.now() - startedAt.getTime() : Date.now() - last;
+    if (since <= TICK_STALL_EXIT_MS) return;
+    clearInterval(stallWatch);
+    console.error(
+      `[runner] no tick for ${Math.round(since / 1000)}s (limit ${Math.round(
+        TICK_STALL_EXIT_MS / 1000,
+      )}s) — price feed is dead, exiting so the supervisor restarts us`,
+    );
+    health.status = "stopped";
+    process.exit(1);
+  }, 30_000);
+
   const shutdown = async (signal: string) => {
     if (stopping) return;
     stopping = true;
@@ -246,6 +278,7 @@ async function main() {
     health.status = "stopped";
     clearInterval(heartbeat);
     clearInterval(statusLog);
+    clearInterval(stallWatch);
     gridCoordinator.stop();
     runtime.stop();
     await upsertHeartbeat(supabase, userId, startedAt, {

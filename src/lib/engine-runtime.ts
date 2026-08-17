@@ -53,6 +53,9 @@ import type {
  * a caller can load a persisted book under the identical terms — restore()
  * rejects any snapshot whose economics disagree.
  */
+/** Floor between durable grid-state writes for one symbol, in ms. */
+const GRID_SAVE_INTERVAL_MS = 5_000;
+
 export const ENGINE_SHADOW_CONFIG = resolveShadowConfig({
   slPct: DEFAULT_PAPER_CONFIG.slPct,
   tpPct: DEFAULT_PAPER_CONFIG.tpPct,
@@ -501,6 +504,8 @@ export function createEngineRuntime(opts: EngineRuntimeOptions): EngineRuntime {
   // so several grids can run side by side without contending on one row.
   const gridConfigs = new Map<string, FuturesGridConfig>();
   const gridStates = new Map<string, GridRuntimeState>();
+  /** Last durable write per symbol, to rate-limit per-tick grid persistence. */
+  const lastGridSaveAt = new Map<string, number>();
 
   const saveGrid = (config: FuturesGridConfig, state: GridRuntimeState) =>
     void persistence
@@ -573,7 +578,22 @@ export function createEngineRuntime(opts: EngineRuntimeOptions): EngineRuntime {
     }
 
     gridStates.set(symbol, next);
-    saveGrid(config, next);
+
+    // Mark-to-market runs on every tick, so persisting unconditionally here
+    // fired a DB write per tick per gridded symbol — enough concurrent
+    // requests to exhaust the connection and fail every one of them. The
+    // in-memory state above is always current; only the durable copy is
+    // rate-limited, and anything that changes the grid's disposition
+    // (halting, clearing a halt, going inactive) still writes immediately.
+    const dispositionChanged =
+      next.active !== current.active ||
+      (next.haltReasons ?? []).join("|") !== (current.haltReasons ?? []).join("|");
+    const now = update.now ?? Date.now();
+    const lastSave = lastGridSaveAt.get(symbol) ?? 0;
+    if (dispositionChanged || now - lastSave >= GRID_SAVE_INTERVAL_MS) {
+      lastGridSaveAt.set(symbol, now);
+      saveGrid(config, next);
+    }
 
     return { state: structuredClone(next), risk };
   }

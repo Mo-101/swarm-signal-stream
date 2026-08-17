@@ -61,6 +61,11 @@ const WS_URL = "wss://stream.bybit.com/v5/public/linear";
 const DEPTH = 50;
 const SUB_BATCH = 10;
 const PING_INTERVAL_MS = 20_000;
+/** A connected depth feed with no frame for this long is treated as dead. */
+const MICRO_STALL_MS = 60_000;
+/** A socket that never reaches "open" this long after creation is dead. */
+const CONNECT_TIMEOUT_MS = 30_000;
+const WATCHDOG_INTERVAL_MS = 15_000;
 /** Bybit allows a generous topic count per connection; stay well inside it. */
 export const MAX_TRACKED = 60;
 /** A book older than this is treated as unusable for execution. */
@@ -273,6 +278,8 @@ export class MicrostructureFeed {
   private ws: WebSocket | null = null;
   private ping: ReturnType<typeof setInterval> | null = null;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private watchdogTimer: ReturnType<typeof setInterval> | null = null;
+  private connectAttemptAt: number | null = null;
   private stopped = false;
   private connectedFlag = false;
 
@@ -302,10 +309,58 @@ export class MicrostructureFeed {
   start() {
     this.stopped = false;
     this.connect();
+    // The depth book prices every fill, so losing this feed silently stops
+    // trading outright. onclose is not a reliable enough recovery path on its
+    // own: a socket the OS tore down may never emit it, and one that stays
+    // "open" but silent never emits it at all. Sweep on a timer instead.
+    this.watchdogTimer = setInterval(() => this.sweep(), WATCHDOG_INTERVAL_MS);
+  }
+
+  /** Force a rebuild when the socket is missing, dead, silent or stuck. */
+  private sweep() {
+    if (this.stopped || this.reconnectTimer) return;
+    const now = Date.now();
+    const ws = this.ws;
+    const dead = !ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING;
+    const silent = this.connectedFlag && now - (this.lastMessageAt ?? now) > MICRO_STALL_MS;
+    const handshakeStuck =
+      !this.connectedFlag &&
+      this.connectAttemptAt !== null &&
+      now - this.connectAttemptAt > CONNECT_TIMEOUT_MS;
+    if (!dead && !silent && !handshakeStuck) return;
+    this.reconnects += 1;
+    this.rebuild();
+  }
+
+  /** Detach the current socket so its late events cannot fight the new one. */
+  private rebuild() {
+    const ws = this.ws;
+    this.ws = null;
+    if (this.ping) clearInterval(this.ping);
+    this.ping = null;
+    this.connectedFlag = false;
+    this.subscribed.clear();
+    this.raw.clear();
+    this.books.clear();
+    if (ws) {
+      try {
+        ws.onopen = null;
+        ws.onclose = null;
+        ws.onerror = null;
+        ws.onmessage = null;
+        ws.close();
+      } catch {
+        /* the replacement is already on its way up */
+      }
+    }
+    this.events.onStatus?.(false);
+    this.connect();
   }
 
   stop() {
     this.stopped = true;
+    if (this.watchdogTimer) clearInterval(this.watchdogTimer);
+    this.watchdogTimer = null;
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     this.reconnectTimer = null;
     if (this.ping) clearInterval(this.ping);
@@ -432,10 +487,15 @@ export class MicrostructureFeed {
     if (this.stopped) return;
     const ws = new WebSocket(WS_URL);
     this.ws = ws;
+    this.connectAttemptAt = Date.now();
 
     ws.onopen = () => {
-      if (this.stopped) {
-        ws.close();
+      if (this.stopped || this.ws !== ws) {
+        try {
+          ws.close();
+        } catch {
+          /* noop */
+        }
         return;
       }
       this.connectedFlag = true;
@@ -454,6 +514,8 @@ export class MicrostructureFeed {
     };
 
     ws.onclose = () => {
+      // Superseded by the watchdog — the replacement owns the state now.
+      if (this.ws !== ws) return;
       if (this.ping) clearInterval(this.ping);
       this.ping = null;
       this.connectedFlag = false;
@@ -474,7 +536,10 @@ export class MicrostructureFeed {
       }
     };
 
-    ws.onmessage = (ev) => this.handle(ev.data as string);
+    ws.onmessage = (ev) => {
+      if (this.ws !== ws) return;
+      this.handle(ev.data as string);
+    };
   }
 
   private handle(raw: string) {
