@@ -539,7 +539,16 @@ function SwarmDashboard() {
   useEffect(() => {
     let cancelled = false;
     const poll = async () => {
-      const row = await fetchRunnerHeartbeat();
+      let row: Awaited<ReturnType<typeof fetchRunnerHeartbeat>> | null = null;
+      try {
+        row = await fetchRunnerHeartbeat();
+      } catch {
+        // Heartbeat is diagnostic only — a failed read (e.g. no session yet)
+        // must never reject unhandled and take the dashboard down.
+        if (!cancelled) setRunnerHeartbeat(null);
+        return;
+      }
+
       if (cancelled) return;
       if (!row) {
         setRunnerHeartbeat(null);
