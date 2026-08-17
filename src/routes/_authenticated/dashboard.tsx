@@ -714,7 +714,7 @@ function SwarmDashboard() {
       engineRef.current = null;
       brokerRef.current = null;
     };
-  }, [symbols, boot, runnerActive, saveOpen, saveClose, sendSignals]);
+  }, [symbols, boot, runnerActive, saveOpen, saveClose, sendSignals, canPersist]);
 
   const equity = DEFAULT_PAPER_CONFIG.startingBalance + realized + unrealized;
   const equityPct =
