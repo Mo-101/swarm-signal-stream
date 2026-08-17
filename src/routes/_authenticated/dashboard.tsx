@@ -44,7 +44,7 @@ import { ShadowPanel } from "@/components/ShadowPanel";
 import { GridPanel } from "@/components/GridPanel";
 import { EMPTY_SHADOW_STATS, type ShadowStats } from "@/lib/shadow-book";
 
-import { clearLocalSession } from "@/lib/auth/local-session";
+import { clearLocalSession, getLocalSession } from "@/lib/auth/local-session";
 import { useNavigate } from "@tanstack/react-router";
 import { setAgentWeights } from "@/lib/swarm";
 import { deriveEdge, EMPTY_EDGE_REPORT, type EdgeReport, type LearnedEdge } from "@/lib/edge-model";
@@ -293,6 +293,35 @@ function SwarmDashboard() {
   const resetAccount = useServerFn(resetPaperAccount);
   const fetchRunnerHeartbeat = useServerFn(getRunnerHeartbeat);
 
+  // Guest sessions carry no bearer token, so every server function would throw
+  // "Unauthorized: No bearer token provided". Detect that once and run the
+  // engine in-memory instead of firing doomed RPCs.
+  const [canPersist, setCanPersist] = useState<boolean | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (getLocalSession()) {
+        if (!cancelled) setCanPersist(true);
+        return;
+      }
+      let authed = false;
+      try {
+        const { supabase } = await import("@/integrations/supabase/client");
+        const { data } = await supabase.auth.getSession();
+        authed = Boolean(data.session?.access_token);
+      } catch {
+        authed = false;
+      }
+      if (cancelled) return;
+      setCanPersist(authed);
+      if (!authed) setPersistError("Guest session — trades run in memory and are not saved.");
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+
   const learned: LearnedEdge = useMemo(
     () => deriveEdge(edgeReport, DEFAULT_PAPER_CONFIG.minConfidence),
     [edgeReport],
@@ -504,7 +533,23 @@ function SwarmDashboard() {
 
   // Load the persisted account, open positions, history and edge report.
   useEffect(() => {
+    if (canPersist === null) return;
     let cancelled = false;
+    const fallbackBoot = {
+      account: {
+        startingBalance: DEFAULT_PAPER_CONFIG.startingBalance,
+        realizedPnl: 0,
+        halted: false,
+      },
+      open: [],
+      closed: [],
+      report: EMPTY_EDGE_REPORT,
+      signalCount: 0,
+    };
+    if (!canPersist) {
+      setBoot(fallbackBoot);
+      return;
+    }
     loadState()
       .then((state) => {
         if (cancelled) return;
@@ -516,29 +561,22 @@ function SwarmDashboard() {
       .catch((e: unknown) => {
         if (cancelled) return;
         setPersistError(e instanceof Error ? e.message : "Could not load stored state");
-        setBoot({
-          account: {
-            startingBalance: DEFAULT_PAPER_CONFIG.startingBalance,
-            realizedPnl: 0,
-            halted: false,
-          },
-          open: [],
-          closed: [],
-          report: EMPTY_EDGE_REPORT,
-          signalCount: 0,
-        });
+        setBoot(fallbackBoot);
       });
     return () => {
       cancelled = true;
     };
-  }, [loadState]);
+  }, [loadState, canPersist]);
+
 
   // Detect a headless runner (see runner/) trading this same account — when
   // its heartbeat is fresh, this tab stops opening/closing paper trades
   // itself so the two never race on the same positions.
   useEffect(() => {
+    if (!canPersist) return;
     let cancelled = false;
     const poll = async () => {
+
       let row: Awaited<ReturnType<typeof fetchRunnerHeartbeat>> | null = null;
       try {
         row = await fetchRunnerHeartbeat();
@@ -570,7 +608,7 @@ function SwarmDashboard() {
       cancelled = true;
       clearInterval(iv);
     };
-  }, [fetchRunnerHeartbeat]);
+  }, [fetchRunnerHeartbeat, canPersist]);
 
   const runnerActive =
     runnerHeartbeat !== null &&
@@ -615,14 +653,18 @@ function SwarmDashboard() {
       readOnly: runnerActive,
       getLearned: () => learnedRef.current,
       persistence: {
-        saveOpenTrade: (data) => saveOpen({ data }),
-        saveCloseTrade: (data) => saveClose({ data }),
+        saveOpenTrade: (data) => (canPersist ? saveOpen({ data }) : Promise.resolve(null)),
+        saveCloseTrade: (data) =>
+          canPersist ? saveClose({ data }) : Promise.resolve({ report: EMPTY_EDGE_REPORT }),
         sendSignals: (signals) =>
-          sendSignals({ data: { signals } }).then(() => {
-            setStoredSignals((n: number) => n + signals.length);
-          }),
+          canPersist
+            ? sendSignals({ data: { signals } }).then(() => {
+                setStoredSignals((n: number) => n + signals.length);
+              })
+            : Promise.resolve(),
         onPersistError: (message) => setPersistError(message),
       },
+
       hooks: {
         onTick: (t) => marksRef.current.set(t.symbol, t.price),
         onHalt: (msg) => setHalted(msg),
@@ -672,7 +714,7 @@ function SwarmDashboard() {
       engineRef.current = null;
       brokerRef.current = null;
     };
-  }, [symbols, boot, runnerActive, saveOpen, saveClose, sendSignals]);
+  }, [symbols, boot, runnerActive, saveOpen, saveClose, sendSignals, canPersist]);
 
   const equity = DEFAULT_PAPER_CONFIG.startingBalance + realized + unrealized;
   const equityPct =
