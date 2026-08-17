@@ -44,7 +44,7 @@ import { ShadowPanel } from "@/components/ShadowPanel";
 import { GridPanel } from "@/components/GridPanel";
 import { EMPTY_SHADOW_STATS, type ShadowStats } from "@/lib/shadow-book";
 
-import { clearLocalSession } from "@/lib/auth/local-session";
+import { clearLocalSession, getLocalSession } from "@/lib/auth/local-session";
 import { useNavigate } from "@tanstack/react-router";
 import { setAgentWeights } from "@/lib/swarm";
 import { deriveEdge, EMPTY_EDGE_REPORT, type EdgeReport, type LearnedEdge } from "@/lib/edge-model";
