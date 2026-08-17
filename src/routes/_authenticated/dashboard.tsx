@@ -573,8 +573,10 @@ function SwarmDashboard() {
   // its heartbeat is fresh, this tab stops opening/closing paper trades
   // itself so the two never race on the same positions.
   useEffect(() => {
+    if (!canPersist) return;
     let cancelled = false;
     const poll = async () => {
+
       let row: Awaited<ReturnType<typeof fetchRunnerHeartbeat>> | null = null;
       try {
         row = await fetchRunnerHeartbeat();
