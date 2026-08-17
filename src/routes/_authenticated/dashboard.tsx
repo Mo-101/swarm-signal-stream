@@ -653,14 +653,18 @@ function SwarmDashboard() {
       readOnly: runnerActive,
       getLearned: () => learnedRef.current,
       persistence: {
-        saveOpenTrade: (data) => saveOpen({ data }),
-        saveCloseTrade: (data) => saveClose({ data }),
+        saveOpenTrade: (data) => (canPersist ? saveOpen({ data }) : Promise.resolve(null)),
+        saveCloseTrade: (data) =>
+          canPersist ? saveClose({ data }) : Promise.resolve({ report: EMPTY_EDGE_REPORT }),
         sendSignals: (signals) =>
-          sendSignals({ data: { signals } }).then(() => {
-            setStoredSignals((n: number) => n + signals.length);
-          }),
+          canPersist
+            ? sendSignals({ data: { signals } }).then(() => {
+                setStoredSignals((n: number) => n + signals.length);
+              })
+            : Promise.resolve(),
         onPersistError: (message) => setPersistError(message),
       },
+
       hooks: {
         onTick: (t) => marksRef.current.set(t.symbol, t.price),
         onHalt: (msg) => setHalted(msg),
