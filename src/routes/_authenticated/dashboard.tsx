@@ -293,6 +293,35 @@ function SwarmDashboard() {
   const resetAccount = useServerFn(resetPaperAccount);
   const fetchRunnerHeartbeat = useServerFn(getRunnerHeartbeat);
 
+  // Guest sessions carry no bearer token, so every server function would throw
+  // "Unauthorized: No bearer token provided". Detect that once and run the
+  // engine in-memory instead of firing doomed RPCs.
+  const [canPersist, setCanPersist] = useState<boolean | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      if (getLocalSession()) {
+        if (!cancelled) setCanPersist(true);
+        return;
+      }
+      let authed = false;
+      try {
+        const { supabase } = await import("@/integrations/supabase/client");
+        const { data } = await supabase.auth.getSession();
+        authed = Boolean(data.session?.access_token);
+      } catch {
+        authed = false;
+      }
+      if (cancelled) return;
+      setCanPersist(authed);
+      if (!authed) setPersistError("Guest session — trades run in memory and are not saved.");
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+
   const learned: LearnedEdge = useMemo(
     () => deriveEdge(edgeReport, DEFAULT_PAPER_CONFIG.minConfidence),
     [edgeReport],
