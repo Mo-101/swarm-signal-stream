@@ -25,6 +25,14 @@ export interface TradeProposal {
   price: number;
   time: number;
   contributions: Record<string, AgentSignal>;
+  /** Number of agents voting the winning side. */
+  agreement?: number;
+  /** Number of agents voting the opposite side. */
+  dissent?: number;
+  /** Expected favourable move over the trade horizon, in bps. */
+  expectedMoveBps?: number;
+  /** Recent realized volatility of the symbol, in bps. */
+  volBps?: number;
 }
 
 export interface SymbolState {
