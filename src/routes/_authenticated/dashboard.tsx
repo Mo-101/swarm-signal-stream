@@ -608,7 +608,7 @@ function SwarmDashboard() {
       cancelled = true;
       clearInterval(iv);
     };
-  }, [fetchRunnerHeartbeat]);
+  }, [fetchRunnerHeartbeat, canPersist]);
 
   const runnerActive =
     runnerHeartbeat !== null &&
