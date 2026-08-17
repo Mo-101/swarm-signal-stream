@@ -533,7 +533,23 @@ function SwarmDashboard() {
 
   // Load the persisted account, open positions, history and edge report.
   useEffect(() => {
+    if (canPersist === null) return;
     let cancelled = false;
+    const fallbackBoot = {
+      account: {
+        startingBalance: DEFAULT_PAPER_CONFIG.startingBalance,
+        realizedPnl: 0,
+        halted: false,
+      },
+      open: [],
+      closed: [],
+      report: EMPTY_EDGE_REPORT,
+      signalCount: 0,
+    };
+    if (!canPersist) {
+      setBoot(fallbackBoot);
+      return;
+    }
     loadState()
       .then((state) => {
         if (cancelled) return;
@@ -545,22 +561,13 @@ function SwarmDashboard() {
       .catch((e: unknown) => {
         if (cancelled) return;
         setPersistError(e instanceof Error ? e.message : "Could not load stored state");
-        setBoot({
-          account: {
-            startingBalance: DEFAULT_PAPER_CONFIG.startingBalance,
-            realizedPnl: 0,
-            halted: false,
-          },
-          open: [],
-          closed: [],
-          report: EMPTY_EDGE_REPORT,
-          signalCount: 0,
-        });
+        setBoot(fallbackBoot);
       });
     return () => {
       cancelled = true;
     };
-  }, [loadState]);
+  }, [loadState, canPersist]);
+
 
   // Detect a headless runner (see runner/) trading this same account — when
   // its heartbeat is fresh, this tab stops opening/closing paper trades
