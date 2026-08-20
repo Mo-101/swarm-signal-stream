@@ -493,6 +493,25 @@ function SwarmDashboard() {
   // Probe the venue continuously — readiness must be proven before arming,
   // not discovered by firing orders at it.
   useEffect(() => {
+    // All venue account functions are protected because they can expose
+    // balances, positions, history, and ultimately place orders. Wait for
+    // session detection before polling and never call them in guest mode.
+    if (canPersist !== true) {
+      liveReadyRef.current = false;
+      setLivePositions([]);
+      livePositionsRef.current = [];
+      setLiveHistory([]);
+      if (canPersist === false) {
+        setLiveMode(false);
+        liveModeRef.current = false;
+        setLiveStatus({
+          configured: false,
+          message: "Sign in to access private exchange account data.",
+        });
+      }
+      return;
+    }
+
     let cancelled = false;
     const load = async () => {
       try {
@@ -531,7 +550,7 @@ function SwarmDashboard() {
       cancelled = true;
       clearInterval(iv);
     };
-  }, [liveMode, fetchLiveStatus, fetchLivePositions, fetchLiveHistory]);
+  }, [canPersist, liveMode, fetchLiveStatus, fetchLivePositions, fetchLiveHistory]);
 
   // Load the persisted account, open positions, history and edge report.
   useEffect(() => {
