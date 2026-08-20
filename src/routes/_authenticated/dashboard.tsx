@@ -178,6 +178,7 @@ type Tab =
   | "board"
   | "execution"
   | "edge"
+  | "diagnostics"
   | "shadow"
   | "grid"
   | "live"
