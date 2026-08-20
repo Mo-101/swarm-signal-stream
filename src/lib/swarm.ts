@@ -29,6 +29,12 @@ export interface TradeProposal {
   agreement?: number;
   /** Number of agents voting the opposite side. */
   dissent?: number;
+  /** Weighted conviction of the winning side, before dissent is subtracted. */
+  rawConfidence?: number;
+  /** Weighted conviction of the opposing side. */
+  opposeConfidence?: number;
+  /** agreeWeight / (agreeWeight + opposeWeight), 1 = unanimous. */
+  consensus?: number;
   /** Expected favourable move over the trade horizon, in bps. */
   expectedMoveBps?: number;
   /** Recent realized volatility of the symbol, in bps. */
