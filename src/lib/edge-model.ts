@@ -147,7 +147,7 @@ export const BASE_AGENT_WEIGHTS: Record<string, number> = {
 };
 
 /** Round-trip taker fee in bps (Bybit USDT perp: 0.055% each leg). */
-const ROUND_TRIP_FEE_BPS = 11;
+export const ROUND_TRIP_FEE_BPS = 11;
 
 export function deriveEdge(report: EdgeReport, baseMinConfidence = 0.6): LearnedEdge {
   const agentWeights: Record<string, number> = { ...BASE_AGENT_WEIGHTS };
