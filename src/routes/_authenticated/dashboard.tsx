@@ -41,6 +41,7 @@ import { EdgePanel } from "@/components/EdgePanel";
 import { ExecutionPanel } from "@/components/ExecutionPanel";
 import { ReviewProgress } from "@/components/ReviewProgress";
 import { ShadowPanel } from "@/components/ShadowPanel";
+import { EdgeDiagnosticsPanel } from "@/components/EdgeDiagnosticsPanel";
 import { GridPanel } from "@/components/GridPanel";
 import { EMPTY_SHADOW_STATS, type ShadowStats } from "@/lib/shadow-book";
 
@@ -1075,6 +1076,7 @@ function SwarmDashboard() {
                 "board",
                 "execution",
                 "edge",
+                "diagnostics",
                 "shadow",
                 "grid",
                 "live",
@@ -1151,6 +1153,9 @@ function SwarmDashboard() {
                 closedTrades={closed}
               />
             </div>
+          )}
+          {tab === "diagnostics" && (
+            <EdgeDiagnosticsPanel proposals={proposals} report={edgeReport} learned={learned} />
           )}
           {tab === "system" && (
             <SystemPanel
