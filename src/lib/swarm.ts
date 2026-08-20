@@ -193,38 +193,48 @@ export function combine(
 ): TradeProposal | null {
   let buy = 0;
   let sell = 0;
+  let buyVotes = 0;
+  let sellVotes = 0;
   const contributions: Record<string, AgentSignal> = {};
   for (const a of agents) {
     const sig = a.evaluate(prices, vols);
     contributions[a.name] = sig;
     const w = AGENT_WEIGHTS[a.name] ?? 1;
-    if (sig.direction === "BUY") buy += sig.confidence * w;
-    else if (sig.direction === "SELL") sell += sig.confidence * w;
+    if (sig.direction === "BUY") {
+      buy += sig.confidence * w;
+      buyVotes += 1;
+    } else if (sig.direction === "SELL") {
+      sell += sig.confidence * w;
+      sellVotes += 1;
+    }
   }
   const net = buy - sell;
-  if (net > threshold) {
-    return {
-      id: `${symbol}-${time}`,
-      symbol,
-      direction: "BUY",
-      confidence: Math.min(net, 1),
-      price,
-      time,
-      contributions,
-    };
-  }
-  if (net < -threshold) {
-    return {
-      id: `${symbol}-${time}`,
-      symbol,
-      direction: "SELL",
-      confidence: Math.min(-net, 1),
-      price,
-      time,
-      contributions,
-    };
-  }
-  return null;
+  if (Math.abs(net) <= threshold) return null;
+
+  const isBuy = net > 0;
+  const agreeWeight = isBuy ? buy : sell;
+  const opposeWeight = isBuy ? sell : buy;
+  const total = agreeWeight + opposeWeight;
+  // Realized volatility of the recent window, expressed in bps of last price.
+  const volBps = price > 0 ? (stddev(prices.slice(-20)) / price) * 10_000 : 0;
+  const confidence = Math.min(Math.abs(net), 1);
+  return {
+    id: `${symbol}-${time}`,
+    symbol,
+    direction: isBuy ? "BUY" : "SELL",
+    confidence,
+    price,
+    time,
+    contributions,
+    agreement: isBuy ? buyVotes : sellVotes,
+    dissent: isBuy ? sellVotes : buyVotes,
+    rawConfidence: Number(agreeWeight.toFixed(4)),
+    opposeConfidence: Number(opposeWeight.toFixed(4)),
+    consensus: total > 0 ? Number((agreeWeight / total).toFixed(4)) : 1,
+    volBps: Number(volBps.toFixed(2)),
+    // Conviction scaled by the size of the moves this market actually makes.
+    expectedMoveBps: Number((confidence * volBps * 2).toFixed(2)),
+  };
 }
 
 // ─── Symbol discovery (Bybit linear USDT perpetuals) ─────────────────────
