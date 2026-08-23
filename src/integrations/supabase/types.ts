@@ -75,6 +75,7 @@ export type Database = {
           spread_exit_bps: number | null
           status: string
           stop_loss: number
+          strategy_epoch: string
           symbol: string
           take_profit: number
           trigger_price: number | null
@@ -113,6 +114,7 @@ export type Database = {
           spread_exit_bps?: number | null
           status?: string
           stop_loss: number
+          strategy_epoch?: string
           symbol: string
           take_profit: number
           trigger_price?: number | null
@@ -151,6 +153,7 @@ export type Database = {
           spread_exit_bps?: number | null
           status?: string
           stop_loss?: number
+          strategy_epoch?: string
           symbol?: string
           take_profit?: number
           trigger_price?: number | null
@@ -208,7 +211,7 @@ export type Database = {
       [_ in never]: never
     }
     Functions: {
-      edge_report: { Args: never; Returns: Json }
+      edge_report: { Args: { p_epoch?: string }; Returns: Json }
     }
     Enums: {
       [_ in never]: never
