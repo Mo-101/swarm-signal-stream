@@ -65,6 +65,7 @@ import {
 } from "@/lib/bybit-trader.functions";
 import type { LiveTradeRow } from "@/lib/db/live-store.server";
 import { SystemPanel, type DiscoveryHealth } from "@/components/SystemPanel";
+import { HealthCard, useHealthMonitor } from "@/components/HealthCard";
 import { EdgePanel } from "@/components/EdgePanel";
 import { ExecutionPanel } from "@/components/ExecutionPanel";
 import { FundingPanel } from "@/components/FundingPanel";
@@ -910,6 +911,7 @@ function SwarmDashboard() {
   const lastTickAgo = metrics?.lastMessageAt
     ? Math.round((Date.now() - metrics.lastMessageAt) / 1000)
     : null;
+  const health = useHealthMonitor(metrics);
 
   return (
     <main className="min-h-screen bg-background text-foreground">
@@ -1244,8 +1246,13 @@ function SwarmDashboard() {
             <EdgeDiagnosticsPanel proposals={proposals} report={edgeReport} learned={learned} />
           )}
           {tab === "system" && (
+            <>
+            <div className="grid gap-3 border-b border-border p-4 md:grid-cols-2">
+              <HealthCard health={health} />
+            </div>
             <SystemPanel
               metrics={metrics}
+
               tickRate={tickRate}
               peakTickRate={peakTickRate}
               discovery={discovery}
@@ -1270,6 +1277,7 @@ function SwarmDashboard() {
                 lastUpdated: liveUpdatedAt,
               }}
             />
+            </>
           )}
           {tab === "shadow" && (
             <ShadowPanel shadow={activeShadow} currentThreshold={learned.minConfidence} />
