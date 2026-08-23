@@ -287,7 +287,10 @@ export const DEFAULT_PAPER_CONFIG: PaperConfig = {
   riskPerTrade: envNum("RISK_PER_TRADE", 0.005, 0.0001, 0.1),
   slPct: envNum("SL_PCT", 0.02, 0.001, 0.2),
   tpPct: 0.04,
-  minConfidence: 0.7,
+  // Confidence is now normalized to 0.5–1.0 (see swarm.combine): 0.62 here is
+  // roughly the old "net vote > 0.9" gate, and the edge model raises it from
+  // measured bucket expectancy once the new epoch has enough closed trades.
+  minConfidence: 0.62,
   maxDailyDrawdown: 0.05,
   // https://www.bybit.com/en/help-center/article/Futures-Contracts-Fees-Explained
   takerFeeRate: 0.00055,

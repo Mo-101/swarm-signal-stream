@@ -216,7 +216,7 @@ ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS trailing_distance numeric;
 CREATE INDEX IF NOT EXISTS live_trades_user_status_idx
   ON live_trades (user_id, provider, status, opened_at DESC);
 
-CREATE OR REPLACE FUNCTION edge_report(p_user_id uuid)
+CREATE OR REPLACE FUNCTION edge_report(p_user_id uuid, p_epoch text DEFAULT NULL)
 RETURNS jsonb
 LANGUAGE sql
 STABLE
@@ -224,6 +224,7 @@ AS $$
 WITH closed AS (
   SELECT * FROM paper_trades
   WHERE user_id = p_user_id AND status = 'closed' AND pnl IS NOT NULL
+    AND (p_epoch IS NULL OR strategy_epoch = p_epoch)
 ),
 agents AS (
   SELECT a.key AS name,
