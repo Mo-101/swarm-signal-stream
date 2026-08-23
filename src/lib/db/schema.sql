@@ -65,9 +65,12 @@ CREATE TABLE IF NOT EXISTS paper_trades (
   leverage numeric,
   liq_price numeric,
   book_priced boolean,
+  strategy_epoch text NOT NULL DEFAULT 'v1',
   UNIQUE (user_id, client_id)
 );
+ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS strategy_epoch text NOT NULL DEFAULT 'v1';
 CREATE INDEX IF NOT EXISTS paper_trades_user_status_idx ON paper_trades (user_id, status, opened_at DESC);
+CREATE INDEX IF NOT EXISTS paper_trades_epoch_idx ON paper_trades (user_id, strategy_epoch, status);
 
 CREATE TABLE IF NOT EXISTS signals (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
