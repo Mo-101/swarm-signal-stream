@@ -1214,10 +1214,6 @@ export class PaperBroker {
     let fillPrice: number;
     let levelsUsed = 0;
     let bookPriced = false;
-    // ── Fill ──
-    let fillPrice: number;
-    let levelsUsed = 0;
-    let bookPriced = false;
     if (maker) {
       // Post-only: the fill happens at our own resting price, so no spread is
       // crossed and no depth is walked. This is the whole point of the mode.
