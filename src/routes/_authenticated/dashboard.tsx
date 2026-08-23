@@ -67,6 +67,7 @@ import type { LiveTradeRow } from "@/lib/db/live-store.server";
 import { SystemPanel, type DiscoveryHealth } from "@/components/SystemPanel";
 import { EdgePanel } from "@/components/EdgePanel";
 import { ExecutionPanel } from "@/components/ExecutionPanel";
+import { FundingPanel } from "@/components/FundingPanel";
 import { ReviewProgress } from "@/components/ReviewProgress";
 import { ShadowPanel } from "@/components/ShadowPanel";
 import { EdgeDiagnosticsPanel } from "@/components/EdgeDiagnosticsPanel";
