@@ -17,8 +17,8 @@ export const getEdgeReport = createServerFn({ method: "GET" })
   .middleware([requireAuth])
   .handler(async ({ context }) => {
     try {
-      const { neonEnabled, getNeonSql } = await import("@/lib/db/neon");
-      if (neonEnabled()) {
+      const { neonDataEnabled, getNeonSql } = await import("@/lib/db/neon");
+      if (neonDataEnabled()) {
         const rows = await getNeonSql()`SELECT edge_report(${context.userId}) AS report`;
         const report = rows[0]?.report as EdgeReport | undefined;
         if (report) return report;

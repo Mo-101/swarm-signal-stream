@@ -1,4 +1,6 @@
-// Neon-only data layer. Reads and writes go through Neon (DATABASE_URL).
+// Trade/edge data layer. Supabase is the default database; set DATA_STORE=neon
+// to route reads/writes through Neon (DATABASE_URL) instead. Neon stays the
+// canonical auth store either way.
 //
 // Server-only (imports the Neon client, which reads process.env.DATABASE_URL)
 // — dynamically import this from edge.functions.ts handlers, same convention
