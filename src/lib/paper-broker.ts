@@ -1607,6 +1607,27 @@ export class PaperBroker {
     }
   }
 
+  /**
+   * Update the symbol's measured round-trip execution cost from a closed trade:
+   * entry slip + exit slip + both fees, expressed in bps of entry notional.
+   * EWMA (alpha 0.3) so the gate tracks current liquidity, not ancient history.
+   */
+  private recordSymbolCost(t: ClosedTrade) {
+    const notional = t.entryPrice * t.size;
+    if (!(notional > 0)) return;
+    const feeBps = (t.fees / notional) * 10_000;
+    const costBps = Math.max(0, t.entrySlipBps) + Math.max(0, t.exitSlipBps) + feeBps;
+    const prev = this.symbolCosts.get(t.symbol);
+    const alpha = 0.3;
+    this.symbolCosts.set(t.symbol, {
+      symbol: t.symbol,
+      costBps: prev ? prev.costBps * (1 - alpha) + costBps * alpha : costBps,
+      samples: (prev?.samples ?? 0) + 1,
+      lastExpectedMoveBps: prev?.lastExpectedMoveBps ?? 0,
+      blocked: prev?.blocked ?? 0,
+    });
+  }
+
   closeAll(marks: Map<string, number>, time: number) {
     for (const p of Array.from(this.positions.values())) {
       const exit = this.markFor(p.symbol, marks) ?? p.entryPrice;
