@@ -414,6 +414,17 @@ export const DEFAULT_PAPER_CONFIG: PaperConfig = {
   maxFundingShareOfReward: 0.35,
   maxSameSide: envNum("MAX_SAME_SIDE", 3, 1, 50),
   cooldownAfterStopMs: envNum("COOLDOWN_MINUTES", 45, 0, 1440) * 60_000,
+
+  // Measured round-trip slippage was ~59bps vs an 11bps fee hurdle, so the
+  // default posture is passive: only cross when the edge is time-sensitive.
+  passiveEntries: true,
+  passiveMinSpreadBps: envNum("PASSIVE_MIN_SPREAD_BPS", 3, 0, 100),
+  passiveUrgentMoveBps: envNum("PASSIVE_URGENT_MOVE_BPS", 120, 0, 5000),
+  passiveMaxWaitMs: envNum("PASSIVE_MAX_WAIT_MS", 4000, 250, 120_000),
+  passiveChaseOnExpiry: false,
+  symbolCostGate: true,
+  costGateMult: envNum("COST_GATE_MULT", 1.5, 0.5, 20),
+  costGateMinSamples: envNum("COST_GATE_MIN_SAMPLES", 4, 1, 200),
 };
 
 /**
