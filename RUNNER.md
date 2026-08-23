@@ -36,8 +36,9 @@ cp runner/.env.example runner/.env
 # repo-root .env.example); add RUNNER_EMAIL / RUNNER_PASSWORD for the bot
 # account from step 2, plus Bybit keys if you trade live.
 #
-# DATABASE_URL (Neon) is OPTIONAL — leave it empty and the runner persists to
-# the Lovable Cloud / Supabase tables the dashboard already reads.
+# Neon + Supabase run together: DATABASE_URL (Neon) powers login (app_users)
+# and the live_trades ledger; Supabase stays the trade database. Leave
+# DATA_STORE=supabase unless you want trade data written to Neon instead.
 ```
 
 ## 4. Run it
