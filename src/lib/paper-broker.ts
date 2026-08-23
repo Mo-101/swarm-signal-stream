@@ -680,7 +680,31 @@ export class PaperBroker {
       slipCostUsd: this.slipCostUsd,
       bookPricedFills: this.bookPricedFills,
       modelPricedFills: this.modelPricedFills,
+      slippageControl: this.getSlippageControl(),
     };
+  }
+
+  /** Post-only / cost-gate telemetry for the execution panel. */
+  getSlippageControl(): SlippageControlStats {
+    return {
+      passiveSubmitted: this.passiveSubmitted,
+      makerFills: this.makerFills,
+      passiveExpired: this.passiveExpiredCount,
+      chased: this.chased,
+      takerFills: this.takerFills,
+      savedUsd: this.makerSavedUsd,
+      costGated: this.costGated,
+      symbols: Array.from(this.symbolCosts.values())
+        .sort((a, b) => b.costBps - a.costBps)
+        .slice(0, 12),
+    };
+  }
+
+  /** Measured round-trip cost for a symbol, or null when untrusted/unknown. */
+  symbolCostBps(symbol: string): number | null {
+    const rec = this.symbolCosts.get(symbol);
+    if (!rec || rec.samples < this.cfg.costGateMinSamples) return null;
+    return rec.costBps;
   }
 
   /** Margin usage / liquidation-risk snapshot for the whole account. */
