@@ -1,6 +1,7 @@
 // Public health probe for uptime monitors, the VPS orchestrator and the
-// dashboard status card. Returns 200 when everything configured is healthy,
-// 503 as soon as any component is degraded or down. No credentials, no
+// dashboard status card. Returns 200 while the system is serving (including
+// "degraded", which is a warning state the caller reads from `status`), and
+// 503 only when a critical component is fully down. No credentials, no
 // account values and no user data are ever included in the response.
 import { createFileRoute } from "@tanstack/react-router";
 
