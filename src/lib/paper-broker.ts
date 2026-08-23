@@ -184,6 +184,66 @@ export type RejectReason =
   /** Too many concurrent positions already facing the same way. */
   | "side-cap";
 
+/** Reject reasons that are portfolio-risk limits rather than market mechanics. */
+export const RISK_LIMIT_REASONS: RejectReason[] = ["max-positions", "side-cap", "cooldown", "halted"];
+
+export interface RiskAlert {
+  id: string;
+  at: number;
+  symbol: string;
+  side: "BUY" | "SELL";
+  /** Which portfolio limit blocked the trade. */
+  limit: Extract<RejectReason, "max-positions" | "side-cap" | "cooldown" | "halted">;
+  detail: string;
+  /** Book state at the moment the limit fired, for the alert feed. */
+  openPositions: number;
+  sameSide: number;
+}
+
+/** One settled 8h funding boundary for one position. */
+export interface FundingEvent {
+  at: number;
+  symbol: string;
+  side: "BUY" | "SELL";
+  /** Funding rate per interval used for the charge. */
+  rate: number;
+  /** Number of 8h boundaries settled in this accrual. */
+  intervals: number;
+  /** Notional the charge was applied to. */
+  notional: number;
+  /** USD paid (positive) or received (negative). */
+  amount: number;
+  /** Position's cumulative funding after this accrual. */
+  cumulative: number;
+  /** Whether the live exchange rate was used, or the configured default. */
+  liveRate: boolean;
+}
+
+export interface FundingStats {
+  /** Net USD paid to (or received from) the funding mechanism. */
+  totalFunding: number;
+  paid: number;
+  received: number;
+  accruals: number;
+  /** Symbols with a live funding rate loaded from the exchange. */
+  liveRates: number;
+  /** Mean live rate across currently open positions, per 8h interval. */
+  avgOpenRate: number;
+  /** Projected funding cost of the open book over the next 8h boundary. */
+  projectedNext8hUsd: number;
+  /** Funding already accrued by positions still open. */
+  openCarryUsd: number;
+  /** Positions closed by the funding-aware CARRY rule. */
+  carryExits: number;
+  /** Positions closed by the max-hold rule. */
+  timeExits: number;
+  /** Funding those CARRY exits avoided, assuming they ran to max hold. */
+  carrySavedUsd: number;
+  /** Funding drag as a share of gross PnL, in percent. */
+  dragPctOfGross: number;
+  recent: FundingEvent[];
+}
+
 export interface PendingOrder {
   id: string;
   symbol: string;
@@ -423,6 +483,10 @@ export interface PaperEvents {
   onHalt?: (reason: string) => void;
   onLiquidate?: (t: ClosedTrade) => void;
   onReject?: (r: RejectRecord) => void;
+  /** A portfolio risk limit blocked a trade (slot cap, side cap, cooldown). */
+  onRiskAlert?: (a: RiskAlert) => void;
+  /** A funding boundary was settled against an open position. */
+  onFunding?: (e: FundingEvent) => void;
 }
 
 export class PaperBroker {
@@ -442,6 +506,16 @@ export class PaperBroker {
   private totalFees = 0;
   private totalFunding = 0;
   private liquidations = 0;
+  // ── funding telemetry ──
+  private fundingEvents: FundingEvent[] = [];
+  private fundingAccruals = 0;
+  private fundingPaidUsd = 0;
+  private fundingReceivedUsd = 0;
+  private carryExits = 0;
+  private timeExits = 0;
+  private carrySavedUsd = 0;
+  // ── risk-limit telemetry ──
+  private riskAlerts: RiskAlert[] = [];
 
   private market: MarketAccess = NO_MARKET;
   private pending = new Map<string, PendingOrder>();
@@ -578,12 +652,75 @@ export class PaperBroker {
       const intervals = Math.round((boundary - p.lastFundingAt) / FUNDING_INTERVAL_MS);
       const mark = this.markFor(p.symbol, marks) ?? p.entryPrice;
       const rate = this.rateFor(p.symbol);
-      const fee = fundingPayment(mark * p.size * intervals, rate, p.side);
+      const notional = mark * p.size;
+      const fee = fundingPayment(notional * intervals, rate, p.side);
       p.fundingPaid += fee;
       p.lastFundingAt = boundary;
       this.realizedPnl -= fee;
       this.totalFunding += fee;
+
+      this.fundingAccruals += 1;
+      if (fee >= 0) this.fundingPaidUsd += fee;
+      else this.fundingReceivedUsd += -fee;
+      const ev: FundingEvent = {
+        at: boundary,
+        symbol: p.symbol,
+        side: p.side,
+        rate,
+        intervals,
+        notional,
+        amount: fee,
+        cumulative: p.fundingPaid,
+        liveRate: this.fundingRates.has(p.symbol),
+      };
+      this.fundingEvents = [ev, ...this.fundingEvents].slice(0, 200);
+      this.events.onFunding?.(ev);
+      console.info(
+        `[funding] ${p.symbol} ${p.side} ${intervals}×8h rate=${(rate * 100).toFixed(4)}%` +
+          ` notional=$${notional.toFixed(2)} → ${fee >= 0 ? "paid" : "received"} $${Math.abs(fee).toFixed(4)}` +
+          ` (cum $${p.fundingPaid.toFixed(4)}, ${ev.liveRate ? "live" : "default"} rate)`,
+      );
     }
+  }
+
+  /** Funding / carry telemetry, used to verify the CARRY exit reduces drag. */
+  getFundingStats(marks?: Map<string, number>): FundingStats {
+    let openCarry = 0;
+    let projected = 0;
+    let rateSum = 0;
+    let rateCount = 0;
+    for (const p of this.positions.values()) {
+      openCarry += p.fundingPaid;
+      const mark = this.markFor(p.symbol, marks) ?? p.entryPrice;
+      const rate = this.rateFor(p.symbol);
+      projected += fundingPayment(mark * p.size, rate, p.side);
+      if (this.fundingRates.has(p.symbol)) {
+        rateSum += rate;
+        rateCount += 1;
+      }
+    }
+    let grossSum = 0;
+    for (const t of this.closed) grossSum += t.grossPnl;
+    return {
+      totalFunding: this.totalFunding,
+      paid: this.fundingPaidUsd,
+      received: this.fundingReceivedUsd,
+      accruals: this.fundingAccruals,
+      liveRates: this.fundingRates.size,
+      avgOpenRate: rateCount ? rateSum / rateCount : 0,
+      projectedNext8hUsd: projected,
+      openCarryUsd: openCarry,
+      carryExits: this.carryExits,
+      timeExits: this.timeExits,
+      carrySavedUsd: this.carrySavedUsd,
+      dragPctOfGross: grossSum !== 0 ? (this.totalFunding / Math.abs(grossSum)) * 100 : 0,
+      recent: this.fundingEvents.slice(0, 40),
+    };
+  }
+
+  /** Most recent portfolio risk-limit blocks, newest first. */
+  getRiskAlerts(): RiskAlert[] {
+    return this.riskAlerts;
   }
 
   getUnrealizedPnl(marks: Map<string, number>): number {
@@ -737,6 +874,30 @@ export class PaperBroker {
     };
     this.rejects = [rec, ...this.rejects].slice(0, 60);
     this.events.onReject?.(rec);
+
+    // Portfolio-risk blocks are operationally interesting in a way that a thin
+    // book is not: they mean the swarm wanted exposure the mandate refused.
+    if (RISK_LIMIT_REASONS.includes(reason)) {
+      let sameSide = 0;
+      for (const p of this.positions.values()) if (p.side === order.side) sameSide += 1;
+      for (const o of this.pending.values()) if (o.side === order.side) sameSide += 1;
+      const alert: RiskAlert = {
+        id: rec.id,
+        at: rec.at,
+        symbol: order.symbol,
+        side: order.side,
+        limit: reason as RiskAlert["limit"],
+        detail,
+        openPositions: this.positions.size + this.pending.size,
+        sameSide,
+      };
+      this.riskAlerts = [alert, ...this.riskAlerts].slice(0, 60);
+      this.events.onRiskAlert?.(alert);
+      console.warn(
+        `[risk] ${reason} blocked ${order.side} ${order.symbol} — ${detail}` +
+          ` (open ${alert.openPositions}/${this.cfg.maxPositions}, same-side ${sameSide}/${this.cfg.maxSameSide})`,
+      );
+    }
   }
 
   /**
@@ -1059,12 +1220,37 @@ export class PaperBroker {
       const mark = this.markFor(p.symbol, marks);
       if (mark === null) continue;
 
-      if (now - p.openedAt >= this.cfg.maxHoldMs) {
+      const heldMs = now - p.openedAt;
+      if (heldMs >= this.cfg.maxHoldMs) {
+        this.timeExits += 1;
+        console.info(
+          `[exit:TIME] ${p.symbol} ${p.side} held ${(heldMs / 3_600_000).toFixed(1)}h ` +
+            `≥ ${(this.cfg.maxHoldMs / 3_600_000).toFixed(1)}h · funding paid $${p.fundingPaid.toFixed(4)}`,
+        );
         this.closePosition(p, mark, now, "TIME");
         continue;
       }
       const reward = Math.abs(p.takeProfit - p.entryPrice) * p.size;
-      if (reward > 0 && p.fundingPaid >= this.cfg.maxFundingShareOfReward * reward) {
+      const budget = this.cfg.maxFundingShareOfReward * reward;
+      if (reward > 0 && p.fundingPaid >= budget) {
+        this.carryExits += 1;
+        // What staying to max hold would have cost on top, at the current rate.
+        const remainingIntervals = Math.max(
+          0,
+          Math.floor((this.cfg.maxHoldMs - heldMs) / FUNDING_INTERVAL_MS),
+        );
+        const wouldPay = fundingPayment(
+          mark * p.size * remainingIntervals,
+          this.rateFor(p.symbol),
+          p.side,
+        );
+        if (wouldPay > 0) this.carrySavedUsd += wouldPay;
+        console.info(
+          `[exit:CARRY] ${p.symbol} ${p.side} funding $${p.fundingPaid.toFixed(4)} ` +
+            `≥ ${(this.cfg.maxFundingShareOfReward * 100).toFixed(0)}% of reward $${reward.toFixed(2)} ` +
+            `(budget $${budget.toFixed(4)}) · avoided ~$${Math.max(wouldPay, 0).toFixed(4)} over ` +
+            `${remainingIntervals} further interval(s)`,
+        );
         this.closePosition(p, mark, now, "CARRY");
       }
     }
@@ -1241,6 +1427,14 @@ export class PaperBroker {
     this.totalFees = 0;
     this.totalFunding = 0;
     this.liquidations = 0;
+    this.fundingEvents = [];
+    this.fundingAccruals = 0;
+    this.fundingPaidUsd = 0;
+    this.fundingReceivedUsd = 0;
+    this.carryExits = 0;
+    this.timeExits = 0;
+    this.carrySavedUsd = 0;
+    this.riskAlerts = [];
     this.pending.clear();
     this.cooldowns.clear();
     this.rejects = [];

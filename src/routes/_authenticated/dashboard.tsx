@@ -17,7 +17,35 @@ import {
   type ExecutionStats,
   type PendingOrder,
   type RejectRecord,
+  type RiskAlert,
+  type FundingStats,
 } from "@/lib/paper-broker";
+import type { RegimeStyle } from "@/lib/regime";
+import { toast } from "sonner";
+
+/** Human labels for the portfolio limits that can block a proposal. */
+const RISK_ALERT_LABELS: Record<RiskAlert["limit"], string> = {
+  "max-positions": "Position slots full",
+  "side-cap": "Same-direction exposure cap",
+  cooldown: "Symbol cooldown active",
+  halted: "Trading halted (drawdown)",
+};
+
+const EMPTY_FUNDING_STATS: FundingStats = {
+  totalFunding: 0,
+  paid: 0,
+  received: 0,
+  accruals: 0,
+  liveRates: 0,
+  avgOpenRate: 0,
+  projectedNext8hUsd: 0,
+  openCarryUsd: 0,
+  carryExits: 0,
+  timeExits: 0,
+  carrySavedUsd: 0,
+  dragPctOfGross: 0,
+  recent: [],
+};
 import { MicrostructureFeed, type MicroMetrics } from "@/lib/microstructure";
 import { createEngineRuntime } from "@/lib/engine-runtime";
 
@@ -39,6 +67,7 @@ import type { LiveTradeRow } from "@/lib/db/live-store.server";
 import { SystemPanel, type DiscoveryHealth } from "@/components/SystemPanel";
 import { EdgePanel } from "@/components/EdgePanel";
 import { ExecutionPanel } from "@/components/ExecutionPanel";
+import { FundingPanel } from "@/components/FundingPanel";
 import { ReviewProgress } from "@/components/ReviewProgress";
 import { ShadowPanel } from "@/components/ShadowPanel";
 import { EdgeDiagnosticsPanel } from "@/components/EdgeDiagnosticsPanel";
@@ -178,6 +207,7 @@ type Tab =
   | "history"
   | "board"
   | "execution"
+  | "funding"
   | "edge"
   | "diagnostics"
   | "shadow"
@@ -267,6 +297,15 @@ function SwarmDashboard() {
   const [execStats, setExecStats] = useState<ExecutionStats>(EMPTY_EXEC_STATS);
   const [pendingOrders, setPendingOrders] = useState<PendingOrder[]>([]);
   const [rejects, setRejects] = useState<RejectRecord[]>([]);
+  const [riskAlerts, setRiskAlerts] = useState<RiskAlert[]>([]);
+  const [funding, setFunding] = useState<FundingStats>(EMPTY_FUNDING_STATS);
+  const [regimeMix, setRegimeMix] = useState<Record<RegimeStyle, number>>({
+    trend: 0,
+    meanRevert: 0,
+    breakout: 0,
+    chop: 0,
+  });
+  const lastRiskToastRef = useRef(0);
   const [microMetrics, setMicroMetrics] = useState<MicroMetrics | null>(null);
   const [shadow, setShadow] = useState<ShadowStats>(EMPTY_SHADOW_STATS);
   const microRef = useRef<MicrostructureFeed | null>(null);
@@ -690,6 +729,17 @@ function SwarmDashboard() {
         onTick: (t) => marksRef.current.set(t.symbol, t.price),
         onHalt: (msg) => setHalted(msg),
         onReject: (r) => setRejects((prev: any) => [r, ...prev].slice(0, 60)),
+        onRiskAlert: (a) => {
+          setRiskAlerts((prev: RiskAlert[]) => [a, ...prev].slice(0, 60));
+          // Throttled so a burst of blocked signals can't bury the screen.
+          const now = Date.now();
+          if (now - lastRiskToastRef.current > 15_000) {
+            lastRiskToastRef.current = now;
+            toast.warning(`Risk limit: ${RISK_ALERT_LABELS[a.limit]}`, {
+              description: `${a.side} ${a.symbol} blocked — ${a.detail}`,
+            });
+          }
+        },
         onOpen: () => {
           setPaperOpens((n: number) => n + 1);
           setLastPaperEventAt(Date.now());
@@ -721,6 +771,9 @@ function SwarmDashboard() {
           setPendingOrders(s.pendingOrders);
           setMicroMetrics(s.microMetrics);
           setShadow(s.shadow);
+          setFunding(s.funding);
+          setRiskAlerts(s.riskAlerts);
+          setRegimeMix(s.regimeMix);
         },
       },
     });
@@ -1094,6 +1147,7 @@ function SwarmDashboard() {
                 "history",
                 "board",
                 "execution",
+                "funding",
                 "edge",
                 "diagnostics",
                 "shadow",
@@ -1158,8 +1212,11 @@ function SwarmDashboard() {
               pending={pendingOrders}
               rejects={rejects}
               closed={closed}
+              riskAlerts={riskAlerts}
             />
           )}
+
+          {tab === "funding" && <FundingPanel funding={funding} regimeMix={regimeMix} />}
 
           {tab === "edge" && (
             <div className="p-3">

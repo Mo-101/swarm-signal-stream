@@ -3,6 +3,7 @@ import type {
   PendingOrder,
   RejectRecord,
   ClosedTrade,
+  RiskAlert,
 } from "@/lib/paper-broker";
 import type { MicroMetrics } from "@/lib/microstructure";
 
@@ -44,12 +45,14 @@ export function ExecutionPanel({
   pending,
   rejects,
   closed,
+  riskAlerts = [],
 }: {
   stats: ExecutionStats;
   micro: MicroMetrics | null;
   pending: PendingOrder[];
   rejects: RejectRecord[];
   closed: ClosedTrade[];
+  riskAlerts?: RiskAlert[];
 }) {
   const attempted = stats.filled + stats.rejected;
   const fillRate = attempted ? (stats.filled / attempted) * 100 : 0;
@@ -193,6 +196,39 @@ export function ExecutionPanel({
           )}
         </section>
       </div>
+
+      <section className="rounded-lg border border-border">
+        <Header
+          title="Portfolio risk limits"
+          subtitle="Trades the mandate refused — slot cap, same-direction exposure, cooldown, drawdown halt"
+        />
+        {riskAlerts.length === 0 ? (
+          <Empty label="No risk limits hit. The swarm has had every slot it asked for." />
+        ) : (
+          <ul className="max-h-64 divide-y divide-border overflow-y-auto">
+            {riskAlerts.slice(0, 25).map((a) => (
+              <li key={a.id + a.at} className="px-4 py-2">
+                <div className="flex items-baseline justify-between gap-2">
+                  <span className="font-mono text-xs">
+                    <span className={a.side === "BUY" ? "text-bull" : "text-bear"}>{a.side}</span>{" "}
+                    {a.symbol}
+                  </span>
+                  <span className="font-mono text-[10px] text-muted-foreground">{time(a.at)}</span>
+                </div>
+                <p className="mt-0.5 text-[11px] text-muted-foreground">
+                  <span className="text-accent">{REJECT_LABELS[a.limit] ?? a.limit}</span>
+                  {" — "}
+                  {a.detail}
+                  <span className="ml-1 opacity-70">
+                    (open {a.openPositions} · same-side {a.sameSide})
+                  </span>
+                </p>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
 
       <section className="rounded-lg border border-border">
         <Header

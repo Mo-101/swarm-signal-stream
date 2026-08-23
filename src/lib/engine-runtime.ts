@@ -24,7 +24,10 @@ import {
   type PendingOrder,
   type RejectRecord,
   type MarginSummary,
+  type RiskAlert,
+  type FundingStats,
 } from "@/lib/paper-broker";
+import type { RegimeStyle } from "@/lib/regime";
 import { MicrostructureFeed, fetchInstrumentFilters, type MicroMetrics } from "@/lib/microstructure";
 import {
   ShadowBook,
@@ -98,6 +101,12 @@ export interface EngineSnapshot {
   microMetrics: MicroMetrics | null;
   margin: MarginSummary;
   costs: { fees: number; funding: number };
+  /** Funding-rate, carry and CARRY-exit telemetry. */
+  funding: FundingStats;
+  /** Portfolio risk-limit blocks, newest first. */
+  riskAlerts: RiskAlert[];
+  /** How many recent proposals fell in each detected market style. */
+  regimeMix: Record<RegimeStyle, number>;
   liquidations: number;
   ticks: number;
   tickRate: number;
@@ -115,6 +124,8 @@ export interface EngineHooks {
   onReportUpdate?: (report: EdgeReport) => void;
   onHalt?: (reason: string) => void;
   onReject?: (r: RejectRecord) => void;
+  /** A portfolio risk limit (slot cap, side cap, cooldown, halt) blocked a trade. */
+  onRiskAlert?: (a: RiskAlert) => void;
   onStatus?: (s: { connected: number; total: number }) => void;
 }
 
@@ -240,6 +251,13 @@ export function createEngineRuntime(opts: EngineRuntimeOptions): EngineRuntime {
 
   const marksRef = new Map<string, number>();
   const regimeMap = new Map<string, string>();
+  /** Running count of detected market styles across proposals this session. */
+  const regimeMix: Record<RegimeStyle, number> = {
+    trend: 0,
+    meanRevert: 0,
+    breakout: 0,
+    chop: 0,
+  };
   const signalBuffer: SignalInput[] = [];
   const tickCounterRef = { current: 0 };
 
@@ -272,6 +290,7 @@ export function createEngineRuntime(opts: EngineRuntimeOptions): EngineRuntime {
   const broker = new PaperBroker(DEFAULT_PAPER_CONFIG, {
     onHalt: (msg) => hooks.onHalt?.(msg),
     onReject: (r) => hooks.onReject?.(r),
+    onRiskAlert: (a) => hooks.onRiskAlert?.(a),
     onOpen: (pos) => {
       hooks.onOpen?.(pos);
       void persistence
@@ -359,7 +378,13 @@ export function createEngineRuntime(opts: EngineRuntimeOptions): EngineRuntime {
       hooks.onTick?.(t);
     },
     onProposal: (p) => {
-      const regime = regimeMap.get(p.symbol) ?? "unknown";
+      // Two orthogonal axes, stored together: the detected market *style*
+      // (which decided the agent gating) and the volatility bucket. The edge
+      // model then learns per style×vol cell, e.g. "breakout|vol:violent".
+      const volRegime = regimeMap.get(p.symbol) ?? "unknown";
+      const style = p.regime?.style ?? "chop";
+      regimeMix[style] = (regimeMix[style] ?? 0) + 1;
+      const regime = `${style}|${volRegime}`;
       const edge = getLearned();
       const suppressed =
         readOnly ||
@@ -481,6 +506,9 @@ export function createEngineRuntime(opts: EngineRuntimeOptions): EngineRuntime {
         microMetrics: micro.getMetrics(),
         margin: broker.getMarginSummary(marksRef),
         costs: broker.getCosts(),
+        funding: broker.getFundingStats(marksRef),
+        riskAlerts: broker.getRiskAlerts(),
+        regimeMix: { ...regimeMix },
         liquidations: broker.getLiquidations(),
         ticks: tickCounterRef.current,
         tickRate,
