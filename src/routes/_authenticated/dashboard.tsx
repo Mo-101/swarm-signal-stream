@@ -267,6 +267,15 @@ function SwarmDashboard() {
   const [execStats, setExecStats] = useState<ExecutionStats>(EMPTY_EXEC_STATS);
   const [pendingOrders, setPendingOrders] = useState<PendingOrder[]>([]);
   const [rejects, setRejects] = useState<RejectRecord[]>([]);
+  const [riskAlerts, setRiskAlerts] = useState<RiskAlert[]>([]);
+  const [funding, setFunding] = useState<FundingStats>(EMPTY_FUNDING_STATS);
+  const [regimeMix, setRegimeMix] = useState<Record<RegimeStyle, number>>({
+    trend: 0,
+    meanRevert: 0,
+    breakout: 0,
+    chop: 0,
+  });
+  const lastRiskToastRef = useRef(0);
   const [microMetrics, setMicroMetrics] = useState<MicroMetrics | null>(null);
   const [shadow, setShadow] = useState<ShadowStats>(EMPTY_SHADOW_STATS);
   const microRef = useRef<MicrostructureFeed | null>(null);
