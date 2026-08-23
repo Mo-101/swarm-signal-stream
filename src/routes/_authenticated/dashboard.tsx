@@ -911,6 +911,7 @@ function SwarmDashboard() {
   const lastTickAgo = metrics?.lastMessageAt
     ? Math.round((Date.now() - metrics.lastMessageAt) / 1000)
     : null;
+  const health = useHealthMonitor(metrics);
 
   return (
     <main className="min-h-screen bg-background text-foreground">
