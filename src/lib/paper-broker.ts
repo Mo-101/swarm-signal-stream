@@ -1100,6 +1100,36 @@ export class PaperBroker {
   processPending(now = Date.now()) {
     for (const order of Array.from(this.pending.values())) {
       if (now < order.readyAt) continue;
+
+      if (order.mode === "passive" && order.limitPrice) {
+        const book = this.market.book(order.symbol);
+        // A resting bid fills when the offer trades down to it (and vice versa).
+        const crossed = book
+          ? order.side === "BUY"
+            ? book.ask <= order.limitPrice
+            : book.bid >= order.limitPrice
+          : false;
+        if (crossed) {
+          this.pending.delete(order.symbol);
+          this.tryFill(order, now, { maker: true, price: order.limitPrice });
+          continue;
+        }
+        if (now < (order.expiresAt ?? now)) continue; // still queued
+        this.pending.delete(order.symbol);
+        this.passiveExpiredCount += 1;
+        if (this.cfg.passiveChaseOnExpiry) {
+          this.chased += 1;
+          this.tryFill(order, now);
+        } else {
+          this.reject(
+            order,
+            "passive-expired",
+            `post-only rest at ${order.limitPrice.toPrecision(6)} never filled in ${this.cfg.passiveMaxWaitMs}ms`,
+          );
+        }
+        continue;
+      }
+
       this.pending.delete(order.symbol);
       this.tryFill(order, now);
     }
