@@ -34,6 +34,8 @@ const REJECT_LABELS: Record<string, string> = {
   "max-positions": "No free slot",
   confidence: "Below confidence",
   "no-filter": "No instrument filters",
+  cooldown: "Symbol cooling off",
+  "side-cap": "Same-side cap hit",
 };
 
 export function ExecutionPanel({
