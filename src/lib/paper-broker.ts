@@ -1043,9 +1043,40 @@ export class PaperBroker {
         `${sameSide} positions already ${proposal.direction === "BUY" ? "long" : "short"}`,
       );
 
+    // ── Symbol cost gate ──
+    // Once a symbol has enough closed trades, its measured round-trip cost
+    // (entry slip + exit slip + fees) must be small relative to the move the
+    // swarm expects, or the trade is structurally unprofitable before it opens.
+    const expectedMoveBps = proposal.expectedMoveBps ?? 0;
+    const measuredCost = this.symbolCostBps(proposal.symbol);
+    if (this.cfg.symbolCostGate && measuredCost !== null && expectedMoveBps > 0) {
+      const rec = this.symbolCosts.get(proposal.symbol)!;
+      rec.lastExpectedMoveBps = expectedMoveBps;
+      if (expectedMoveBps < measuredCost * this.cfg.costGateMult) {
+        rec.blocked += 1;
+        this.costGated += 1;
+        return this.reject(
+          base,
+          "cost-gate",
+          `expected ${expectedMoveBps.toFixed(1)}bps < ${this.cfg.costGateMult}× measured cost ${measuredCost.toFixed(1)}bps`,
+        );
+      }
+    }
+
+    // ── Passive vs aggressive entry ──
+    // Crossing the spread is only worth it when the edge is time-sensitive.
+    // Otherwise we rest at the touch, pay maker instead of taker, and give up
+    // the fill rather than the spread.
+    const book = this.market.book(proposal.symbol);
+    const spreadBps = book?.spreadBps ?? this.cfg.fallbackSpreadBps;
+    const urgent = expectedMoveBps > 0 && expectedMoveBps >= this.cfg.passiveUrgentMoveBps;
+    const passive =
+      this.cfg.passiveEntries && !urgent && Boolean(book) && spreadBps >= this.cfg.passiveMinSpreadBps;
+
     const jitter = (Math.random() * 2 - 1) * this.cfg.latencyJitterMs;
     const latency = Math.max(20, this.cfg.latencyMs + jitter);
     this.submitted += 1;
+    if (passive) this.passiveSubmitted += 1;
     this.pending.set(proposal.symbol, {
       id: proposal.id,
       symbol: proposal.symbol,
@@ -1057,6 +1088,11 @@ export class PaperBroker {
       createdAt: now,
       readyAt: now + latency,
       volBps: proposal.volBps ?? 0,
+      expectedMoveBps,
+      mode: passive ? "passive" : "taker",
+      // Post-only: join the near side of the book instead of lifting the offer.
+      limitPrice: passive ? (proposal.direction === "BUY" ? book!.bid : book!.ask) : undefined,
+      expiresAt: passive ? now + latency + this.cfg.passiveMaxWaitMs : undefined,
     });
   }
 
