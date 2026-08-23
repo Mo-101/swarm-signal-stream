@@ -1209,6 +1209,10 @@ export class PaperBroker {
     };
     this.closed = [trade, ...this.closed].slice(0, 200);
     this.positions.delete(p.symbol);
+    // Cool off a symbol that just took money off us: back-to-back re-entries
+    // into the same failing move were the biggest source of paired losses.
+    if ((reason === "SL" || reason === "LIQ" || (reason === "TRAIL" && pnl < 0)) && this.cfg.cooldownAfterStopMs > 0)
+      this.cooldowns.set(p.symbol, time + this.cfg.cooldownAfterStopMs);
     this.events.onClose?.(trade);
     if (reason === "LIQ") this.events.onLiquidate?.(trade);
 
@@ -1235,6 +1239,7 @@ export class PaperBroker {
     this.totalFunding = 0;
     this.liquidations = 0;
     this.pending.clear();
+    this.cooldowns.clear();
     this.rejects = [];
     this.submitted = 0;
     this.fills = 0;
