@@ -147,7 +147,10 @@ async function checkExecution(): Promise<HealthComponent> {
     : {
         id: "execution",
         label: "Order execution",
-        state: "down",
+        // Rejected credentials only block LIVE orders — paper execution keeps
+        // running — so that is a degradation, not a full outage. A network
+        // failure to the venue is a real outage.
+        state: /401|403|retCode/.test(r.error) ? "degraded" : "down",
         detail: `${venue} signed request failed — ${r.error}`,
         latencyMs: r.ms,
       };
