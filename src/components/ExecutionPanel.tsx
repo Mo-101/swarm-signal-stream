@@ -44,12 +44,14 @@ export function ExecutionPanel({
   pending,
   rejects,
   closed,
+  riskAlerts = [],
 }: {
   stats: ExecutionStats;
   micro: MicroMetrics | null;
   pending: PendingOrder[];
   rejects: RejectRecord[];
   closed: ClosedTrade[];
+  riskAlerts?: RiskAlert[];
 }) {
   const attempted = stats.filled + stats.rejected;
   const fillRate = attempted ? (stats.filled / attempted) * 100 : 0;
