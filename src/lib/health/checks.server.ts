@@ -125,7 +125,14 @@ async function checkExecution(): Promise<HealthComponent> {
         "X-BAPI-SIGN": sign,
       },
     });
-    const body = (await res.json()) as { retCode?: number; retMsg?: string };
+    const text = await res.text();
+    if (!text) throw new Error(`empty response (HTTP ${res.status})`);
+    let body: { retCode?: number; retMsg?: string };
+    try {
+      body = JSON.parse(text) as { retCode?: number; retMsg?: string };
+    } catch {
+      throw new Error(`non-JSON response (HTTP ${res.status})`);
+    }
     if (body.retCode !== 0) throw new Error(`retCode ${body.retCode}: ${body.retMsg}`);
     return true;
   });
