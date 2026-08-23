@@ -1304,6 +1304,7 @@ export class PaperBroker {
       latencyMs: now - order.createdAt,
       entryLevels: levelsUsed,
       bookPriced,
+      makerEntry: Boolean(maker),
     };
 
     this.fills += 1;
