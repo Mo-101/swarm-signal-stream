@@ -11,13 +11,13 @@ import { EMPTY_EDGE_REPORT, type EdgeReport } from "@/lib/edge-model";
 import type { ShadowBookSnapshot, ShadowStats, ShadowTrade } from "@/lib/shadow-book";
 import type { FuturesGridConfig, GridRuntimeState } from "@/lib/futures-grid";
 import type {
-import { STRATEGY_EPOCH } from "@/lib/strategy-epoch";
   StoredTrade,
   SignalInput,
   OpenTradeInput,
   CloseTradeInput,
   EngineBootState,
 } from "./types";
+import { STRATEGY_EPOCH } from "@/lib/strategy-epoch";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function mapTradeRow(row: any): StoredTrade {
