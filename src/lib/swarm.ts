@@ -3,6 +3,8 @@
 // runs a swarm of stateless agents, and emits consensus trade proposals.
 // Signal generation only — execution is handled by the paper/live brokers.
 
+import { detectRegime, agentGate, type RegimeRead } from "@/lib/regime";
+
 export type Direction = "BUY" | "SELL" | "NEUTRAL";
 
 export interface Tick {
@@ -25,6 +27,10 @@ export interface TradeProposal {
   price: number;
   time: number;
   contributions: Record<string, AgentSignal>;
+  /** Regime multiplier applied to each agent for this symbol (0 = gated out). */
+  agentGates?: Record<string, number>;
+  /** Detected market style for this symbol at proposal time. */
+  regime?: RegimeRead;
   /** Number of agents voting the winning side. */
   agreement?: number;
   /** Number of agents voting the opposite side. */
@@ -191,15 +197,28 @@ export function combine(
   agents: Agent[] = ALL_AGENTS,
   threshold = 0.6,
 ): TradeProposal | null {
+  // Per-symbol regime read. Agents are gated/demoted for the style of market
+  // this symbol is actually in, so the swarm switches technique instead of
+  // voting with one fixed panel everywhere.
+  const regime = detectRegime(prices);
+
   let buy = 0;
   let sell = 0;
   let buyVotes = 0;
   let sellVotes = 0;
   const contributions: Record<string, AgentSignal> = {};
+  const gates: Record<string, number> = {};
+  let maxWeight = 0;
   for (const a of agents) {
+    const gate = agentGate(regime.style, a.name, regime.strength);
+    gates[a.name] = Number(gate.toFixed(3));
+    const w = (AGENT_WEIGHTS[a.name] ?? 1) * gate;
+    maxWeight += w;
+    // A fully gated agent still reports its raw opinion for diagnostics, but
+    // contributes no weight to the vote.
     const sig = a.evaluate(prices, vols);
     contributions[a.name] = sig;
-    const w = AGENT_WEIGHTS[a.name] ?? 1;
+    if (w <= 0) continue;
     if (sig.direction === "BUY") {
       buy += sig.confidence * w;
       buyVotes += 1;
@@ -221,10 +240,9 @@ export function combine(
   // The old `min(|net|, 1)` saturated at 1 for almost every proposal (measured
   // mean 0.93, corr(confidence, pnl) ≈ 0.06), which made confidence useless for
   // sizing AND collapsed every trade into one calibration bucket. Dividing by
-  // the total available weight keeps the number monotone in conviction and
-  // spread across the 0.5–1.0 band the edge model buckets on.
-  const maxWeight = agents.reduce((sum, a) => sum + (AGENT_WEIGHTS[a.name] ?? 1), 0) || 1;
-  const conviction = Math.min(Math.abs(net) / maxWeight, 1);
+  // the total available (gated) weight keeps the number monotone in conviction
+  // and spread across the 0.5–1.0 band the edge model buckets on.
+  const conviction = Math.min(Math.abs(net) / (maxWeight || 1), 1);
   const confidence = Number((0.5 + 0.5 * conviction).toFixed(4));
   return {
     id: `${symbol}-${time}`,
@@ -234,6 +252,8 @@ export function combine(
     price,
     time,
     contributions,
+    agentGates: gates,
+    regime,
     agreement: isBuy ? buyVotes : sellVotes,
     dissent: isBuy ? sellVotes : buyVotes,
     rawConfidence: Number(agreeWeight.toFixed(4)),
