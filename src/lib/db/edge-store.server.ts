@@ -46,6 +46,10 @@ export async function loadBootState(
   _supabase: unknown,
   userId: string,
 ): Promise<{ boot: EngineBootState; report: EdgeReport; signalCount: number }> {
+  if (!neonEnabled()) {
+    const { sbLoadBootState } = await import("./supabase-store.server");
+    return sbLoadBootState(_supabase, userId);
+  }
   const sql = getNeonSql();
   let account = (await sql`SELECT * FROM paper_accounts WHERE user_id = ${userId}`)[0] as
     Record<string, unknown> | undefined;
@@ -89,6 +93,10 @@ export async function ingestSignals(
   const rows = signals.slice(0, 1000);
   if (rows.length === 0) return { inserted: 0 };
 
+  if (!neonEnabled()) {
+    const { sbIngestSignals } = await import("./supabase-store.server");
+    return sbIngestSignals(_supabase, userId, rows);
+  }
   const sql = getNeonSqlOrNoop();
   await sql`
     INSERT INTO signals (user_id, symbol, side, price, confidence, conf_bucket, regime, hour_utc, agents, executed)
@@ -115,6 +123,10 @@ export async function persistOpenTrade(
   userId: string,
   data: OpenTradeInput,
 ): Promise<{ ok: true }> {
+  if (!neonEnabled()) {
+    const { sbPersistOpenTrade } = await import("./supabase-store.server");
+    return sbPersistOpenTrade(_supabase, userId, data);
+  }
   const sql = getNeonSqlOrNoop();
   await sql`
     INSERT INTO paper_trades (
@@ -143,6 +155,10 @@ export async function persistCloseTrade(
   userId: string,
   data: CloseTradeInput,
 ): Promise<{ report: EdgeReport }> {
+  if (!neonEnabled()) {
+    const { sbPersistCloseTrade } = await import("./supabase-store.server");
+    return sbPersistCloseTrade(_supabase, userId, data);
+  }
   const sql = getNeonSqlOrNoop();
   const updated = await sql`
     UPDATE paper_trades SET
@@ -185,6 +201,10 @@ export async function resetPaperAccount(
   userId: string,
   wipeHistory: boolean,
 ): Promise<{ report: EdgeReport }> {
+  if (!neonEnabled()) {
+    const { sbResetPaperAccount } = await import("./supabase-store.server");
+    return sbResetPaperAccount(_supabase, userId, wipeHistory);
+  }
   const sql = getNeonSqlOrNoop();
   if (wipeHistory) {
     await sql`DELETE FROM paper_trades WHERE user_id = ${userId}`;
