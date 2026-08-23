@@ -1275,6 +1275,7 @@ function SwarmDashboard() {
                 lastUpdated: liveUpdatedAt,
               }}
             />
+            </>
           )}
           {tab === "shadow" && (
             <ShadowPanel shadow={activeShadow} currentThreshold={learned.minConfidence} />
