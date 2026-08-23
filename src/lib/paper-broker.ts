@@ -1135,7 +1135,11 @@ export class PaperBroker {
     }
   }
 
-  private tryFill(order: PendingOrder, now: number) {
+  private tryFill(
+    order: PendingOrder,
+    now: number,
+    maker?: { maker: true; price: number },
+  ) {
     if (this.halted) return this.reject(order, "halted", "Risk halt active during flight");
     if (this.positions.has(order.symbol)) return;
 
