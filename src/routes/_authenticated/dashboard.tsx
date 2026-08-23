@@ -1145,6 +1145,7 @@ function SwarmDashboard() {
                 "history",
                 "board",
                 "execution",
+                "funding",
                 "edge",
                 "diagnostics",
                 "shadow",
