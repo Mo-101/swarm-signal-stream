@@ -1670,5 +1670,13 @@ export class PaperBroker {
     this.slipCostUsd = 0;
     this.bookPricedFills = 0;
     this.modelPricedFills = 0;
+    this.passiveSubmitted = 0;
+    this.makerFills = 0;
+    this.passiveExpiredCount = 0;
+    this.chased = 0;
+    this.takerFills = 0;
+    this.makerSavedUsd = 0;
+    this.costGated = 0;
+    this.symbolCosts.clear();
   }
 }
