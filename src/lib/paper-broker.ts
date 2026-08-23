@@ -616,6 +616,17 @@ export class PaperBroker {
   private bookPricedFills = 0;
   private modelPricedFills = 0;
 
+  // ── slippage control telemetry ──
+  private passiveSubmitted = 0;
+  private makerFills = 0;
+  private passiveExpiredCount = 0;
+  private chased = 0;
+  private takerFills = 0;
+  private makerSavedUsd = 0;
+  private costGated = 0;
+  /** symbol → measured round-trip execution cost. */
+  private symbolCosts = new Map<string, SymbolCost>();
+
   constructor(
     private cfg: PaperConfig = DEFAULT_PAPER_CONFIG,
     private events: PaperEvents = {},
