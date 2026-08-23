@@ -1260,7 +1260,8 @@ export class PaperBroker {
     const tier = riskLimitTier(notional);
     const leverage = Math.min(this.cfg.leverage, tier.maxLeverage, filters.maxLeverage);
     const initialMargin = notional / leverage;
-    const entryFee = takerFee(notional, this.cfg.takerFeeRate);
+    // A resting post-only entry earns the maker rate instead of paying taker.
+    const entryFee = takerFee(notional, maker ? this.cfg.makerFeeRate : this.cfg.takerFeeRate);
     if (initialMargin + entryFee > marginBudget)
       return this.reject(order, "margin", `IM $${initialMargin.toFixed(2)} exceeds free margin`);
 
