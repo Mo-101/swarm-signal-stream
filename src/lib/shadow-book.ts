@@ -13,6 +13,7 @@
 // Nothing here can move real or paper money. It only observes.
 
 import type { TradeProposal } from "@/lib/swarm";
+import { stopPrice, targetPrice } from "@/lib/math/perp";
 
 export type ShadowReason = "confidence" | "suppressed" | "blocked" | "observer";
 
@@ -470,8 +471,6 @@ export class ShadowBook {
 
     const entryPrice = slippedFill(p.price, p.direction, "ENTRY", this.cfg.slippageBpsPerFill);
 
-    const dir = p.direction === "BUY" ? 1 : -1;
-
     const trade: ShadowTrade = {
       id: `shadow-${p.time}-${++this.seq}`,
       symbol,
@@ -481,8 +480,8 @@ export class ShadowBook {
       regime,
       notional: this.cfg.notional,
       entryPrice,
-      stopLoss: entryPrice * (1 - dir * this.cfg.slPct),
-      takeProfit: entryPrice * (1 + dir * this.cfg.tpPct),
+      stopLoss: stopPrice(entryPrice, p.direction, this.cfg.slPct),
+      takeProfit: targetPrice(entryPrice, p.direction, this.cfg.tpPct),
       openedAt: p.time,
       lastPrice: entryPrice,
       lastMarkedAt: p.time,

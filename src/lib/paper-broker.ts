@@ -14,6 +14,22 @@ import {
   type BookSnapshot,
   type InstrumentFilter,
 } from "@/lib/microstructure";
+import {
+  FUNDING_INTERVAL_MS as PERP_FUNDING_INTERVAL_MS,
+  bankruptcyPrice,
+  fundingPayment,
+  grossPnl as grossPnlOf,
+  lastFundingBoundary as lastFundingBoundaryOf,
+  liquidationPrice,
+  marginRatio as marginRatioOf,
+  netPnl as netPnlOf,
+  roePct,
+  roiPct,
+  stopPrice,
+  takerFee,
+  targetPrice,
+} from "@/lib/math/perp";
+import { UsdLedger, round } from "@/lib/math/rounding";
 
 // ── risk overrides ──
 // This module is imported by the dashboard bundle as well as the runner, so
@@ -94,7 +110,10 @@ export interface ClosedTrade {
   exitPrice: number;
   size: number;
   pnl: number;
+  /** Net return on ENTRY NOTIONAL, in percent (leverage-independent ROI). */
   pnlPct: number;
+  /** Net return on POSTED MARGIN, in percent (ROE). */
+  roePct?: number;
   reason: ExitReason;
   /** Gross price PnL before costs. */
   grossPnl: number;
@@ -203,12 +222,9 @@ export interface PaperConfig {
   allowPartialFills: boolean;
 }
 
-/** Bybit settles funding at 00:00, 08:00 and 16:00 UTC. */
-export const FUNDING_INTERVAL_MS = 8 * 60 * 60 * 1000;
-
-export function lastFundingBoundary(t: number): number {
-  return Math.floor(t / FUNDING_INTERVAL_MS) * FUNDING_INTERVAL_MS;
-}
+/** Bybit settles funding at 00:00, 08:00 and 16:00 UTC. (canonical: math/perp) */
+export const FUNDING_INTERVAL_MS = PERP_FUNDING_INTERVAL_MS;
+export const lastFundingBoundary = lastFundingBoundaryOf;
 
 export const DEFAULT_PAPER_CONFIG: PaperConfig = {
   startingBalance: envNum("STARTING_BALANCE", 10_000, 1, 10_000_000),
@@ -267,10 +283,7 @@ export function liquidationPriceFor(
   mmr: number,
   takerFeeRate: number,
 ): number {
-  const imr = 1 / leverage;
-  const buffer = imr - mmr - takerFeeRate;
-  const price = side === "BUY" ? entryPrice * (1 - buffer) : entryPrice * (1 + buffer);
-  return Math.max(price, 0);
+  return liquidationPrice(entryPrice, side, leverage, mmr, takerFeeRate);
 }
 
 export function bankruptcyPriceFor(
@@ -278,8 +291,7 @@ export function bankruptcyPriceFor(
   side: "BUY" | "SELL",
   leverage: number,
 ): number {
-  const imr = 1 / leverage;
-  return Math.max(side === "BUY" ? entryPrice * (1 - imr) : entryPrice * (1 + imr), 0);
+  return bankruptcyPrice(entryPrice, side, leverage);
 }
 
 export interface MarginSummary {
@@ -343,7 +355,14 @@ export interface PaperEvents {
 export class PaperBroker {
   private positions = new Map<string, Position>();
   private closed: ClosedTrade[] = [];
-  private realizedPnl = 0;
+  /** Drift-free accumulator: realized PnL never accrues binary float error. */
+  private pnlLedger = new UsdLedger(0);
+  private get realizedPnl(): number {
+    return this.pnlLedger.value;
+  }
+  private set realizedPnl(v: number) {
+    this.pnlLedger.set(v);
+  }
   private halted = false;
   /** Live funding rate per symbol (per interval), when the feed provides one. */
   private fundingRates = new Map<string, number>();
@@ -449,7 +468,7 @@ export class PaperBroker {
       maintenanceMargin,
       availableMargin: Math.max(walletBalance - usedMargin, 0),
       equity,
-      marginRatio: equity > 0 ? maintenanceMargin / equity : 1,
+      marginRatio: marginRatioOf(maintenanceMargin, equity),
       atRisk,
     };
   }
@@ -484,7 +503,7 @@ export class PaperBroker {
       const intervals = Math.round((boundary - p.lastFundingAt) / FUNDING_INTERVAL_MS);
       const mark = this.markFor(p.symbol, marks) ?? p.entryPrice;
       const rate = this.rateFor(p.symbol);
-      const fee = mark * p.size * rate * intervals * (p.side === "BUY" ? 1 : -1);
+      const fee = fundingPayment(mark * p.size * intervals, rate, p.side);
       p.fundingPaid += fee;
       p.lastFundingAt = boundary;
       this.realizedPnl -= fee;
@@ -497,11 +516,11 @@ export class PaperBroker {
     for (const p of this.positions.values()) {
       const m = this.markFor(p.symbol, marks);
       if (!m) continue;
-      const gross = p.side === "BUY" ? (m - p.entryPrice) * p.size : (p.entryPrice - m) * p.size;
+      const gross = grossPnlOf(p.entryPrice, m, p.size, p.side);
       // Net of the taker fee and modelled exit slippage that closing would cost.
       const exitSpreadBps = this.market.book(p.symbol)?.spreadBps ?? this.cfg.fallbackSpreadBps;
       const exitSlipCost = ((m * p.size * exitSpreadBps) / 2) / 10_000;
-      u += gross - m * p.size * this.cfg.takerFeeRate - exitSlipCost;
+      u += gross - takerFee(m * p.size, this.cfg.takerFeeRate) - exitSlipCost;
     }
     return u;
   }
@@ -780,18 +799,12 @@ export class PaperBroker {
     const tier = riskLimitTier(notional);
     const leverage = Math.min(this.cfg.leverage, tier.maxLeverage, filters.maxLeverage);
     const initialMargin = notional / leverage;
-    const entryFee = notional * this.cfg.takerFeeRate;
+    const entryFee = takerFee(notional, this.cfg.takerFeeRate);
     if (initialMargin + entryFee > marginBudget)
       return this.reject(order, "margin", `IM $${initialMargin.toFixed(2)} exceeds free margin`);
 
-    const sl = roundPrice(
-      order.side === "BUY" ? fillPrice * (1 - this.cfg.slPct) : fillPrice * (1 + this.cfg.slPct),
-      filters.tickSize,
-    );
-    const tp = roundPrice(
-      order.side === "BUY" ? fillPrice * (1 + this.cfg.tpPct) : fillPrice * (1 - this.cfg.tpPct),
-      filters.tickSize,
-    );
+    const sl = roundPrice(stopPrice(fillPrice, order.side, this.cfg.slPct), filters.tickSize);
+    const tp = roundPrice(targetPrice(fillPrice, order.side, this.cfg.tpPct), filters.tickSize);
 
     // Slippage cost vs a frictionless fill at the signal price.
     const slipCost = Math.abs(fillPrice - order.signalPrice) * size;
@@ -948,16 +961,27 @@ export class PaperBroker {
       if (exitSlipBps > this.worstSlipBps) this.worstSlipBps = exitSlipBps;
     }
 
-    const grossPnl =
-      p.side === "BUY" ? (exitPrice - p.entryPrice) * p.size : (p.entryPrice - exitPrice) * p.size;
-    const exitFee = exitPrice * p.size * this.cfg.takerFeeRate;
+    const grossPnl = grossPnlOf(p.entryPrice, exitPrice, p.size, p.side);
+    const exitFee = takerFee(exitPrice * p.size, this.cfg.takerFeeRate);
     const fees = p.entryFee + exitFee;
-    let pnl = grossPnl - exitFee - p.fundingPaid;
+    let pnl = netPnlOf({
+      entryPrice: p.entryPrice,
+      exitPrice,
+      size: p.size,
+      side: p.side,
+      entryFee: p.entryFee,
+      exitFee,
+      funding: p.fundingPaid,
+    });
+    // NOTE: trade-level PnL is now FULLY net (entry fee included). It used to
+    // omit the entry fee, which understated cost in every edge statistic.
     if (reason === "LIQ") {
       pnl = -p.initialMargin;
       this.liquidations += 1;
     }
-    const pnlPct = (pnl / (p.entryPrice * p.size)) * 100;
+    // ROI on entry notional (leverage-independent). ROE is reported alongside.
+    const pnlPct = roiPct(pnl, p.entryPrice * p.size);
+    const pnlRoePct = roePct(pnl, p.initialMargin);
 
     const exitSlipCost = Math.abs(exitPrice - triggerPrice) * p.size;
     const entrySlipCost = Math.abs(p.entryPrice - p.signalPrice) * p.size;
@@ -975,8 +999,9 @@ export class PaperBroker {
       entryPrice: p.entryPrice,
       exitPrice,
       size: p.size,
-      pnl,
+      pnl: round(pnl, 8),
       pnlPct,
+      roePct: pnlRoePct,
       reason,
       grossPnl,
       fees,

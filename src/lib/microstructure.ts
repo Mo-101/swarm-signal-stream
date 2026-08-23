@@ -127,27 +127,11 @@ export async function fetchInstrumentFilters(
 
 // ─── Rounding helpers (exchange filters) ──────────────────────────────────
 
-function decimalsOf(step: number): number {
-  if (!Number.isFinite(step) || step <= 0) return 8;
-  const s = step.toExponential();
-  const exp = Number(s.slice(s.indexOf("e") + 1));
-  return Math.max(0, Math.min(12, -exp + (s.includes(".") ? s.indexOf("e") - 2 : 0)));
-}
+// Tick/lot rounding lives in the canonical math layer; re-exported here so
+// existing call sites keep working and there is only ONE implementation.
+export { decimalsOf, roundPrice, roundQty } from "@/lib/math/rounding";
+import { moveBps } from "@/lib/math/perp";
 
-/** Round a quantity DOWN to the instrument's lot step. */
-export function roundQty(qty: number, step: number): number {
-  if (!Number.isFinite(qty) || qty <= 0) return 0;
-  if (!Number.isFinite(step) || step <= 0) return qty;
-  const n = Math.floor(qty / step) * step;
-  return Number(n.toFixed(decimalsOf(step)));
-}
-
-/** Round a price to the instrument's tick size (away from zero-safe). */
-export function roundPrice(price: number, tick: number): number {
-  if (!Number.isFinite(price) || price <= 0) return price;
-  if (!Number.isFinite(tick) || tick <= 0) return price;
-  return Number((Math.round(price / tick) * tick).toFixed(decimalsOf(tick)));
-}
 
 // ─── Fill math ─────────────────────────────────────────────────────────────
 
@@ -257,8 +241,8 @@ export function slippageBps(
   side: "BUY" | "SELL",
 ): number {
   if (!(refPrice > 0)) return 0;
-  const diff = side === "BUY" ? fillPrice - refPrice : refPrice - fillPrice;
-  return (diff / refPrice) * 10_000;
+  // Canonical definition: adverse move relative to the reference, in bps.
+  return -moveBps(refPrice, fillPrice, side);
 }
 
 // ─── Live depth + mark feed ───────────────────────────────────────────────
