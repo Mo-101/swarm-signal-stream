@@ -1457,7 +1457,11 @@ function HistoryPanel({ closed }: { closed: ClosedTrade[] }) {
                       ? "bg-bear/15 text-bear"
                       : t.reason === "LIQ"
                         ? "bg-bear/30 text-bear font-semibold"
-                        : "bg-muted text-muted-foreground";
+                        : t.reason === "TRAIL"
+                          ? t.pnl >= 0
+                            ? "bg-bull/10 text-bull"
+                            : "bg-bear/10 text-bear"
+                          : "bg-muted text-muted-foreground";
                 return (
                   <tr key={t.id + t.closedAt} className="border-b border-border/50">
                     <td className="px-4 py-1.5 font-mono text-[11px] text-muted-foreground">

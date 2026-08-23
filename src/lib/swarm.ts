@@ -217,7 +217,15 @@ export function combine(
   const total = agreeWeight + opposeWeight;
   // Realized volatility of the recent window, expressed in bps of last price.
   const volBps = price > 0 ? (stddev(prices.slice(-20)) / price) * 10_000 : 0;
-  const confidence = Math.min(Math.abs(net), 1);
+  // Conviction, normalized by the maximum weight the panel can express.
+  // The old `min(|net|, 1)` saturated at 1 for almost every proposal (measured
+  // mean 0.93, corr(confidence, pnl) ≈ 0.06), which made confidence useless for
+  // sizing AND collapsed every trade into one calibration bucket. Dividing by
+  // the total available weight keeps the number monotone in conviction and
+  // spread across the 0.5–1.0 band the edge model buckets on.
+  const maxWeight = agents.reduce((sum, a) => sum + (AGENT_WEIGHTS[a.name] ?? 1), 0) || 1;
+  const conviction = Math.min(Math.abs(net) / maxWeight, 1);
+  const confidence = Number((0.5 + 0.5 * conviction).toFixed(4));
   return {
     id: `${symbol}-${time}`,
     symbol,

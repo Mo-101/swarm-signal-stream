@@ -459,6 +459,7 @@ export function createEngineRuntime(opts: EngineRuntimeOptions): EngineRuntime {
       lastSample = now;
 
       broker.accrueFunding(now, marksRef);
+      broker.manageOpen(now, marksRef);
       shadow.sweep(now);
       const realSamples = broker.getClosed().map((t) => ({
         confidence: t.confidence,

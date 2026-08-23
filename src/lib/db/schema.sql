@@ -65,9 +65,12 @@ CREATE TABLE IF NOT EXISTS paper_trades (
   leverage numeric,
   liq_price numeric,
   book_priced boolean,
+  strategy_epoch text NOT NULL DEFAULT 'v1',
   UNIQUE (user_id, client_id)
 );
+ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS strategy_epoch text NOT NULL DEFAULT 'v1';
 CREATE INDEX IF NOT EXISTS paper_trades_user_status_idx ON paper_trades (user_id, status, opened_at DESC);
+CREATE INDEX IF NOT EXISTS paper_trades_epoch_idx ON paper_trades (user_id, strategy_epoch, status);
 
 CREATE TABLE IF NOT EXISTS signals (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -216,7 +219,7 @@ ALTER TABLE live_trades ADD COLUMN IF NOT EXISTS trailing_distance numeric;
 CREATE INDEX IF NOT EXISTS live_trades_user_status_idx
   ON live_trades (user_id, provider, status, opened_at DESC);
 
-CREATE OR REPLACE FUNCTION edge_report(p_user_id uuid)
+CREATE OR REPLACE FUNCTION edge_report(p_user_id uuid, p_epoch text DEFAULT NULL)
 RETURNS jsonb
 LANGUAGE sql
 STABLE
@@ -224,6 +227,7 @@ AS $$
 WITH closed AS (
   SELECT * FROM paper_trades
   WHERE user_id = p_user_id AND status = 'closed' AND pnl IS NOT NULL
+    AND (p_epoch IS NULL OR strategy_epoch = p_epoch)
 ),
 agents AS (
   SELECT a.key AS name,

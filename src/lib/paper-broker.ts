@@ -98,9 +98,29 @@ export interface Position {
   entryLevels: number;
   /** True when the entry was priced off a real L2 book rather than the model. */
   bookPriced: boolean;
+
+  // ── trade management ──
+  /** Distance from entry to the ORIGINAL stop, in price. This is 1R. */
+  riskDistance: number;
+  /** Best price reached in our favour since entry (for the trailing stop). */
+  bestPrice: number;
+  /** True once the stop has been pulled to breakeven or trailed. */
+  stopMoved: boolean;
+  /** Realized volatility of the symbol at signal time, in bps. */
+  volBps: number;
 }
 
-export type ExitReason = "TP" | "SL" | "MANUAL" | "LIQ";
+export type ExitReason =
+  | "TP"
+  | "SL"
+  | "MANUAL"
+  | "LIQ"
+  /** Trailing / breakeven stop was hit (the stop had been moved from entry). */
+  | "TRAIL"
+  /** Max holding time elapsed without resolving. */
+  | "TIME"
+  /** Funding carry ate too much of the remaining expected reward. */
+  | "CARRY";
 
 export interface ClosedTrade {
   id: string;
@@ -158,7 +178,11 @@ export type RejectReason =
   | "halted"
   | "max-positions"
   | "confidence"
-  | "no-filter";
+  | "no-filter"
+  /** Symbol is cooling off after a recent stop-out. */
+  | "cooldown"
+  /** Too many concurrent positions already facing the same way. */
+  | "side-cap";
 
 export interface PendingOrder {
   id: string;
@@ -171,6 +195,8 @@ export interface PendingOrder {
   createdAt: number;
   /** Wall-clock time the order reaches the matching engine. */
   readyAt: number;
+  /** Realized volatility of the symbol at signal time, in bps. */
+  volBps: number;
 }
 
 export interface RejectRecord {
@@ -220,6 +246,35 @@ export interface PaperConfig {
   fallbackSpreadBps: number;
   /** Allow the book to fill less than the requested size. */
   allowPartialFills: boolean;
+
+  // ── trade management ──
+  /** Bybit USDT perp maker fee rate, used when a TP rests as a limit order. */
+  makerFeeRate: number;
+  /** Post the take-profit as a reduce-only limit at the touch instead of crossing. */
+  takeProfitAsLimit: boolean;
+  /** Scale stops off realized vol instead of a flat percentage. */
+  volScaledBrackets: boolean;
+  /** Stop distance = volBps × this multiple. */
+  volStopMult: number;
+  /** Floor / ceiling for the vol-scaled stop, in bps. */
+  minStopBps: number;
+  maxStopBps: number;
+  /** Take-profit distance as a multiple of the stop distance (reward:risk). */
+  rewardRiskRatio: number;
+  /** Pull the stop to breakeven once the trade is this many R in profit. */
+  breakevenAtR: number;
+  /** Start trailing once the trade is this many R in profit. */
+  trailStartR: number;
+  /** Trail this many R behind the best price reached. */
+  trailDistanceR: number;
+  /** Close a position that has not resolved within this many ms. */
+  maxHoldMs: number;
+  /** Close when cumulative funding paid exceeds this share of the TP reward. */
+  maxFundingShareOfReward: number;
+  /** Max concurrent positions facing the same direction. */
+  maxSameSide: number;
+  /** Block new entries on a symbol for this long after it stops us out. */
+  cooldownAfterStopMs: number;
 }
 
 /** Bybit settles funding at 00:00, 08:00 and 16:00 UTC. (canonical: math/perp) */
@@ -232,7 +287,10 @@ export const DEFAULT_PAPER_CONFIG: PaperConfig = {
   riskPerTrade: envNum("RISK_PER_TRADE", 0.005, 0.0001, 0.1),
   slPct: envNum("SL_PCT", 0.02, 0.001, 0.2),
   tpPct: 0.04,
-  minConfidence: 0.7,
+  // Confidence is now normalized to 0.5–1.0 (see swarm.combine): 0.62 here is
+  // roughly the old "net vote > 0.9" gate, and the edge model raises it from
+  // measured bucket expectancy once the new epoch has enough closed trades.
+  minConfidence: 0.62,
   maxDailyDrawdown: 0.05,
   // https://www.bybit.com/en/help-center/article/Futures-Contracts-Fees-Explained
   takerFeeRate: 0.00055,
@@ -251,6 +309,21 @@ export const DEFAULT_PAPER_CONFIG: PaperConfig = {
   requireBook: true,
   fallbackSpreadBps: 8,
   allowPartialFills: true,
+
+  makerFeeRate: 0.0002,
+  takeProfitAsLimit: true,
+  volScaledBrackets: true,
+  volStopMult: 2.5,
+  minStopBps: 60,
+  maxStopBps: 320,
+  rewardRiskRatio: 2,
+  breakevenAtR: 1,
+  trailStartR: 1.5,
+  trailDistanceR: 0.75,
+  maxHoldMs: envNum("MAX_HOLD_HOURS", 8, 0.25, 240) * 3_600_000,
+  maxFundingShareOfReward: 0.35,
+  maxSameSide: envNum("MAX_SAME_SIDE", 3, 1, 50),
+  cooldownAfterStopMs: envNum("COOLDOWN_MINUTES", 45, 0, 1440) * 60_000,
 };
 
 /**
@@ -372,6 +445,8 @@ export class PaperBroker {
 
   private market: MarketAccess = NO_MARKET;
   private pending = new Map<string, PendingOrder>();
+  /** symbol → timestamp until which new entries are blocked after a stop-out. */
+  private cooldowns = new Map<string, number>();
   private rejects: RejectRecord[] = [];
   private lastMark = new Map<string, number>();
 
@@ -599,6 +674,10 @@ export class PaperBroker {
         latencyMs: p.latencyMs ?? this.cfg.latencyMs,
         entryLevels: p.entryLevels ?? 0,
         bookPriced: p.bookPriced ?? false,
+        riskDistance: p.riskDistance ?? Math.abs(p.entryPrice - p.stopLoss),
+        bestPrice: p.bestPrice ?? p.entryPrice,
+        stopMoved: p.stopMoved ?? false,
+        volBps: p.volBps ?? 0,
       });
     }
     this.closed = state.closed.map((t) => ({
@@ -674,6 +753,26 @@ export class PaperBroker {
     if (this.positions.size + this.pending.size >= this.cfg.maxPositions)
       return this.reject(base, "max-positions", `${this.cfg.maxPositions} slots in use`);
 
+    const now = Date.now();
+    const coolUntil = this.cooldowns.get(proposal.symbol) ?? 0;
+    if (now < coolUntil)
+      return this.reject(
+        base,
+        "cooldown",
+        `stopped out recently — ${Math.ceil((coolUntil - now) / 60_000)}m left`,
+      );
+
+    // Correlation cap: a swarm that is 5/5 long is one trade, not five.
+    let sameSide = 0;
+    for (const p of this.positions.values()) if (p.side === proposal.direction) sameSide += 1;
+    for (const o of this.pending.values()) if (o.side === proposal.direction) sameSide += 1;
+    if (sameSide >= this.cfg.maxSameSide)
+      return this.reject(
+        base,
+        "side-cap",
+        `${sameSide} positions already ${proposal.direction === "BUY" ? "long" : "short"}`,
+      );
+
     const jitter = (Math.random() * 2 - 1) * this.cfg.latencyJitterMs;
     const latency = Math.max(20, this.cfg.latencyMs + jitter);
     this.submitted += 1;
@@ -685,8 +784,9 @@ export class PaperBroker {
       confidence: proposal.confidence,
       regime: meta.regime,
       agents: proposal.contributions,
-      createdAt: Date.now(),
-      readyAt: Date.now() + latency,
+      createdAt: now,
+      readyAt: now + latency,
+      volBps: proposal.volBps ?? 0,
     });
   }
 
@@ -721,9 +821,19 @@ export class PaperBroker {
       return this.reject(order, "signal-stale", `moved ${adverse.toFixed(1)}bps against us in ${(now - order.createdAt).toFixed(0)}ms`);
 
     // ── Risk sizing ──
+    // Brackets scale with the volatility the symbol actually prints: a flat 2%
+    // stop is noise on a memecoin and a canyon on BTC. Reward:risk is held
+    // constant so the required hit-rate does not drift between symbols.
     const equity = this.cfg.startingBalance + this.realizedPnl;
-    const riskAmount = equity * this.cfg.riskPerTrade * order.confidence;
-    const stopDistance = touch * this.cfg.slPct;
+    const rawStopBps = order.volBps > 0 ? order.volBps * this.cfg.volStopMult : this.cfg.slPct * 10_000;
+    const stopPct = this.cfg.volScaledBrackets
+      ? Math.min(Math.max(rawStopBps, this.cfg.minStopBps), this.cfg.maxStopBps) / 10_000
+      : this.cfg.slPct;
+    const tpPct = this.cfg.volScaledBrackets ? stopPct * this.cfg.rewardRiskRatio : this.cfg.tpPct;
+    // Confidence now spans 0.5–1.0, so conviction is the half above the coin flip.
+    const conviction = Math.min(Math.max((order.confidence - 0.5) * 2, 0.2), 1);
+    const riskAmount = equity * this.cfg.riskPerTrade * conviction;
+    const stopDistance = touch * stopPct;
     if (!(stopDistance > 0)) return this.reject(order, "min-qty", "Invalid stop distance");
 
     let usedMargin = 0;
@@ -803,8 +913,8 @@ export class PaperBroker {
     if (initialMargin + entryFee > marginBudget)
       return this.reject(order, "margin", `IM $${initialMargin.toFixed(2)} exceeds free margin`);
 
-    const sl = roundPrice(stopPrice(fillPrice, order.side, this.cfg.slPct), filters.tickSize);
-    const tp = roundPrice(targetPrice(fillPrice, order.side, this.cfg.tpPct), filters.tickSize);
+    const sl = roundPrice(stopPrice(fillPrice, order.side, stopPct), filters.tickSize);
+    const tp = roundPrice(targetPrice(fillPrice, order.side, tpPct), filters.tickSize);
 
     // Slippage cost vs a frictionless fill at the signal price.
     const slipCost = Math.abs(fillPrice - order.signalPrice) * size;
@@ -831,6 +941,10 @@ export class PaperBroker {
       maintenanceMargin: notional * tier.mmr,
       liquidationPrice: liquidationPriceFor(fillPrice, order.side, leverage, tier.mmr, this.cfg.takerFeeRate),
       bankruptcyPrice: bankruptcyPriceFor(fillPrice, order.side, leverage),
+      riskDistance: Math.abs(fillPrice - sl),
+      bestPrice: fillPrice,
+      stopMoved: false,
+      volBps: order.volBps,
       signalPrice: order.signalPrice,
       entrySlipBps: entrySlip,
       spreadAtEntryBps: book?.spreadBps ?? this.cfg.fallbackSpreadBps,
@@ -874,8 +988,11 @@ export class PaperBroker {
       return;
     }
 
-    // 2. TP/SL, triggered on LAST price (Bybit default trigger source).
-    let reason: "TP" | "SL" | null = null;
+    // 2. Trade management: ratchet the stop as the trade proves itself.
+    this.manageStop(p, price);
+
+    // 3. TP/SL, triggered on LAST price (Bybit default trigger source).
+    let reason: ExitReason | null = null;
     let trigger = price;
     if (p.side === "BUY") {
       if (price <= p.stopLoss) {
@@ -894,7 +1011,63 @@ export class PaperBroker {
         trigger = p.takeProfit;
       }
     }
+    if (reason === "SL" && p.stopMoved) reason = "TRAIL";
     if (reason) this.closePosition(p, trigger, time, reason);
+  }
+
+  /**
+   * Breakeven + trailing stop. Once a trade is `breakevenAtR` in profit the
+   * stop moves to entry (plus the round-trip fee, so "breakeven" is actually
+   * breakeven); past `trailStartR` it trails `trailDistanceR` behind the best
+   * price seen. Stops only ever move in our favour.
+   */
+  private manageStop(p: Position, price: number) {
+    if (!(p.riskDistance > 0)) return;
+    const long = p.side === "BUY";
+    p.bestPrice = long ? Math.max(p.bestPrice, price) : Math.min(p.bestPrice, price);
+
+    const favourable = long ? p.bestPrice - p.entryPrice : p.entryPrice - p.bestPrice;
+    const rMultiple = favourable / p.riskDistance;
+    if (rMultiple < this.cfg.breakevenAtR) return;
+
+    // Cover the round-trip taker fee so a "breakeven" exit is not a small loss.
+    const feeCushion = p.entryPrice * this.cfg.takerFeeRate * 2;
+    let candidate = long ? p.entryPrice + feeCushion : p.entryPrice - feeCushion;
+
+    if (rMultiple >= this.cfg.trailStartR) {
+      const trail = this.cfg.trailDistanceR * p.riskDistance;
+      const trailed = long ? p.bestPrice - trail : p.bestPrice + trail;
+      candidate = long ? Math.max(candidate, trailed) : Math.min(candidate, trailed);
+    }
+
+    const filters = this.market.filter(p.symbol);
+    const next = filters ? roundPrice(candidate, filters.tickSize) : candidate;
+    if (long ? next > p.stopLoss : next < p.stopLoss) {
+      p.stopLoss = next;
+      p.stopMoved = true;
+    }
+  }
+
+  /**
+   * Time- and carry-based exits, swept on the slow loop. A position that has
+   * neither hit its target nor its stop within `maxHoldMs` is dead money paying
+   * funding every 8h; the same is true once accrued funding has eaten a large
+   * share of the reward the trade was opened for.
+   */
+  manageOpen(now: number, marks: Map<string, number>) {
+    for (const p of Array.from(this.positions.values())) {
+      const mark = this.markFor(p.symbol, marks);
+      if (mark === null) continue;
+
+      if (now - p.openedAt >= this.cfg.maxHoldMs) {
+        this.closePosition(p, mark, now, "TIME");
+        continue;
+      }
+      const reward = Math.abs(p.takeProfit - p.entryPrice) * p.size;
+      if (reward > 0 && p.fundingPaid >= this.cfg.maxFundingShareOfReward * reward) {
+        this.closePosition(p, mark, now, "CARRY");
+      }
+    }
   }
 
   /**
@@ -946,10 +1119,23 @@ export class PaperBroker {
     let spreadAtExitBps = 0;
     let exitBookPriced = false;
 
+    // A take-profit does not need to cross the spread: it can rest as a
+    // reduce-only limit at the target and earn the maker fee. Measured exit
+    // slippage on market TPs was ~79bps — this removes that bleed entirely.
+    const makerExit = reason === "TP" && this.cfg.takeProfitAsLimit;
+    const feeRate = makerExit ? this.cfg.makerFeeRate : this.cfg.takerFeeRate;
+
     if (reason === "LIQ") {
       // Liquidation is executed by the exchange's liquidation engine at the
       // bankruptcy price; the trader's loss is the posted margin regardless.
       exitPrice = p.liquidationPrice;
+    } else if (makerExit) {
+      const filters = this.market.filter(p.symbol);
+      exitPrice = filters ? roundPrice(p.takeProfit, filters.tickSize) : p.takeProfit;
+      const book = this.market.book(p.symbol);
+      spreadAtExitBps = book?.spreadBps ?? this.cfg.fallbackSpreadBps;
+      exitBookPriced = Boolean(book);
+      this.exitSlipCount += 1;
     } else {
       const res = this.resolveExitPrice(p, triggerPrice);
       exitPrice = res.price;
@@ -962,7 +1148,7 @@ export class PaperBroker {
     }
 
     const grossPnl = grossPnlOf(p.entryPrice, exitPrice, p.size, p.side);
-    const exitFee = takerFee(exitPrice * p.size, this.cfg.takerFeeRate);
+    const exitFee = takerFee(exitPrice * p.size, feeRate);
     const fees = p.entryFee + exitFee;
     let pnl = netPnlOf({
       entryPrice: p.entryPrice,
@@ -1026,6 +1212,10 @@ export class PaperBroker {
     };
     this.closed = [trade, ...this.closed].slice(0, 200);
     this.positions.delete(p.symbol);
+    // Cool off a symbol that just took money off us: back-to-back re-entries
+    // into the same failing move were the biggest source of paired losses.
+    if ((reason === "SL" || reason === "LIQ" || (reason === "TRAIL" && pnl < 0)) && this.cfg.cooldownAfterStopMs > 0)
+      this.cooldowns.set(p.symbol, time + this.cfg.cooldownAfterStopMs);
     this.events.onClose?.(trade);
     if (reason === "LIQ") this.events.onLiquidate?.(trade);
 
@@ -1052,6 +1242,7 @@ export class PaperBroker {
     this.totalFunding = 0;
     this.liquidations = 0;
     this.pending.clear();
+    this.cooldowns.clear();
     this.rejects = [];
     this.submitted = 0;
     this.fills = 0;
