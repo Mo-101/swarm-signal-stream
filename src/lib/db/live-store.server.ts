@@ -3,7 +3,10 @@
 // never bleed into each other through a shared query.
 //
 // Server-only — dynamically import from *.functions.ts handlers.
-import { getNeonSql } from "./neon";
+import { getNeonSql, neonEnabled } from "./neon";
+
+const NO_DB =
+  "Live trading persistence is unavailable: no live-trade database is configured (DATABASE_URL).";
 
 export type LiveProvider = "binance" | "bybit";
 
@@ -87,6 +90,7 @@ export async function persistLiveOpenTrade(
   userId: string,
   data: OpenLiveTradeInput,
 ): Promise<{ clientId: string }> {
+  if (!neonEnabled()) throw new Error(NO_DB);
   const clientId = crypto.randomUUID();
   const openedAt = Date.now();
   const sql = getNeonSql();
@@ -128,6 +132,7 @@ export async function persistLiveCloseTrade(
   userId: string,
   data: CloseLiveTradeInput,
 ): Promise<{ closed: boolean }> {
+  if (!neonEnabled()) throw new Error(NO_DB);
   const sql = getNeonSql();
   const closedAt = Date.now();
 
@@ -157,6 +162,7 @@ export async function loadLiveTrades(
   userId: string,
   provider: LiveProvider,
 ): Promise<{ open: LiveTradeRow[]; closed: LiveTradeRow[]; realizedPnl: number }> {
+  if (!neonEnabled()) return { open: [], closed: [], realizedPnl: 0 };
   const sql = getNeonSql();
   const account = (
     await sql`SELECT realized_pnl FROM live_accounts WHERE user_id = ${userId} AND provider = ${provider}`
