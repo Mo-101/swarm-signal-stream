@@ -531,6 +531,8 @@ export interface ExecutionStats {
   slipCostUsd: number;
   bookPricedFills: number;
   modelPricedFills: number;
+  /** Post-only / cost-gate telemetry. */
+  slippageControl: SlippageControlStats;
 }
 
 /** Live market data the broker needs to price executions. */
