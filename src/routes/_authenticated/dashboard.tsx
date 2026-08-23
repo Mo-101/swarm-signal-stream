@@ -1211,8 +1211,11 @@ function SwarmDashboard() {
               pending={pendingOrders}
               rejects={rejects}
               closed={closed}
+              riskAlerts={riskAlerts}
             />
           )}
+
+          {tab === "funding" && <FundingPanel funding={funding} regimeMix={regimeMix} />}
 
           {tab === "edge" && (
             <div className="p-3">
