@@ -206,6 +206,7 @@ type Tab =
   | "history"
   | "board"
   | "execution"
+  | "funding"
   | "edge"
   | "diagnostics"
   | "shadow"
