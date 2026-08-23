@@ -302,6 +302,85 @@ export function ExecutionPanel({
 }
 
 
+/** Post-only routing and per-symbol cost gating — the two levers against slippage drag. */
+function SlippageControl({ stats }: { stats: ExecutionStats }) {
+  const s = stats.slippageControl;
+  const routed = s.makerFills + s.takerFills;
+  const makerShare = routed ? (s.makerFills / routed) * 100 : 0;
+  const passiveFillRate = s.passiveSubmitted
+    ? (s.makerFills / s.passiveSubmitted) * 100
+    : 0;
+
+  return (
+    <section className="rounded-lg border border-border">
+      <Header
+        title="Slippage control"
+        subtitle="Post-only entries instead of crossing, and symbols gated when measured cost outruns the edge"
+      />
+      <div className="grid gap-3 p-4 sm:grid-cols-2 lg:grid-cols-4">
+        <Card
+          title="Maker share"
+          value={`${makerShare.toFixed(0)}%`}
+          sub={`${s.makerFills} maker · ${s.takerFills} taker fills`}
+          tone={makerShare >= 40 ? "bull" : makerShare >= 15 ? "neutral" : "bear"}
+        />
+        <Card
+          title="Spread saved"
+          value={usd(s.savedUsd)}
+          sub="crossing avoided by resting at the touch"
+          tone={s.savedUsd > 0 ? "bull" : "neutral"}
+        />
+        <Card
+          title="Passive fill rate"
+          value={`${passiveFillRate.toFixed(0)}%`}
+          sub={`${s.passiveSubmitted} rested · ${s.passiveExpired} expired · ${s.chased} chased`}
+          tone={passiveFillRate >= 50 ? "bull" : passiveFillRate >= 25 ? "neutral" : "bear"}
+        />
+        <Card
+          title="Cost-gated"
+          value={`${s.costGated}`}
+          sub="entries refused: measured cost exceeded expected move"
+          tone={s.costGated > 0 ? "neutral" : "bull"}
+        />
+      </div>
+      {s.symbols.length > 0 && (
+        <div className="max-h-56 overflow-y-auto border-t border-border">
+          <table className="w-full text-sm">
+            <thead className="sticky top-0 bg-card text-xs text-muted-foreground">
+              <tr className="border-b border-border">
+                <th className="px-4 py-2 text-left font-medium">Symbol</th>
+                <th className="px-4 py-2 text-right font-medium">Round-trip cost</th>
+                <th className="px-4 py-2 text-right font-medium">Last expected move</th>
+                <th className="px-4 py-2 text-right font-medium">Samples</th>
+                <th className="px-4 py-2 text-right font-medium">Blocked</th>
+              </tr>
+            </thead>
+            <tbody>
+              {s.symbols.map((c) => (
+                <tr key={c.symbol} className="border-b border-border/50">
+                  <td className="px-4 py-1.5 font-mono text-xs">{c.symbol}</td>
+                  <td className="px-4 py-1.5 text-right font-mono text-[11px] tabular text-bear">
+                    {bps(c.costBps)}
+                  </td>
+                  <td className="px-4 py-1.5 text-right font-mono text-[11px] tabular text-muted-foreground">
+                    {c.lastExpectedMoveBps ? bps(c.lastExpectedMoveBps) : "—"}
+                  </td>
+                  <td className="px-4 py-1.5 text-right font-mono text-[11px] tabular text-muted-foreground">
+                    {c.samples}
+                  </td>
+                  <td className="px-4 py-1.5 text-right font-mono text-[11px] tabular text-muted-foreground">
+                    {c.blocked}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </section>
+  );
+}
+
 function AlphaVsFills({ closed, stats }: { closed: ClosedTrade[]; stats: ExecutionStats }) {
   const n = closed.length;
   const gross = closed.reduce((a, t) => a + t.grossPnl, 0);
