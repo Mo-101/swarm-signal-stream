@@ -81,7 +81,16 @@ const HEALTH_PORT = Number(process.env.HEALTH_PORT ?? 8090);
 const TICK_STALL_EXIT_MS = Number(process.env.TICK_STALL_EXIT_MS ?? 5 * 60_000);
 
 async function main() {
-  requireEnv("DATABASE_URL"); // read directly by src/lib/db/neon.ts
+  // DATABASE_URL (Neon) is optional: when it is absent the shared store falls
+  // back to the Supabase/Lovable Cloud tables, which is what the dashboard
+  // uses locally. Only warn so a VPS box with just Supabase creds still runs.
+  if (!process.env.DATABASE_URL) {
+    console.warn(
+      "[runner] DATABASE_URL not set — using the Supabase/Lovable Cloud store as the persistence backend.",
+    );
+    requireEnv("SUPABASE_URL");
+    requireEnv("SUPABASE_PUBLISHABLE_KEY");
+  }
   const RUNNER_EMAIL = requireEnv("RUNNER_EMAIL");
   const RUNNER_PASSWORD = requireEnv("RUNNER_PASSWORD");
 

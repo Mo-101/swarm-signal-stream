@@ -32,8 +32,12 @@ in as this same account** to see them and to flip into Observer mode.
 
 ```bash
 cp runner/.env.example runner/.env
-# fill in SUPABASE_URL, SUPABASE_PUBLISHABLE_KEY (same as the app's .env),
-# and RUNNER_EMAIL / RUNNER_PASSWORD for the bot account from step 2.
+# SUPABASE_URL / SUPABASE_PUBLISHABLE_KEY are pre-filled (same values as the
+# repo-root .env.example); add RUNNER_EMAIL / RUNNER_PASSWORD for the bot
+# account from step 2, plus Bybit keys if you trade live.
+#
+# DATABASE_URL (Neon) is OPTIONAL — leave it empty and the runner persists to
+# the Lovable Cloud / Supabase tables the dashboard already reads.
 ```
 
 ## 4. Run it
