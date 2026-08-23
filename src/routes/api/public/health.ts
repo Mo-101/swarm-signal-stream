@@ -19,7 +19,7 @@ export const Route = createFileRoute("/api/public/health")({
         const { runHealthChecks } = await import("@/lib/health/checks.server");
         const report = await runHealthChecks();
         return Response.json(report, {
-          status: report.status === "ok" ? 200 : 503,
+          status: report.status === "down" ? 503 : 200,
           headers: { ...CORS, "Cache-Control": "no-store" },
         });
       },
