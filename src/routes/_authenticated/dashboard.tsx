@@ -690,6 +690,17 @@ function SwarmDashboard() {
         onTick: (t) => marksRef.current.set(t.symbol, t.price),
         onHalt: (msg) => setHalted(msg),
         onReject: (r) => setRejects((prev: any) => [r, ...prev].slice(0, 60)),
+        onRiskAlert: (a) => {
+          setRiskAlerts((prev: RiskAlert[]) => [a, ...prev].slice(0, 60));
+          // Throttled so a burst of blocked signals can't bury the screen.
+          const now = Date.now();
+          if (now - lastRiskToastRef.current > 15_000) {
+            lastRiskToastRef.current = now;
+            toast.warning(`Risk limit: ${RISK_ALERT_LABELS[a.limit]}`, {
+              description: `${a.side} ${a.symbol} blocked — ${a.detail}`,
+            });
+          }
+        },
         onOpen: () => {
           setPaperOpens((n: number) => n + 1);
           setLastPaperEventAt(Date.now());
