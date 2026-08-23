@@ -182,7 +182,11 @@ export type RejectReason =
   /** Symbol is cooling off after a recent stop-out. */
   | "cooldown"
   /** Too many concurrent positions already facing the same way. */
-  | "side-cap";
+  | "side-cap"
+  /** Measured round-trip execution cost on this symbol exceeds the edge. */
+  | "cost-gate"
+  /** A passive (post-only) entry never got filled before it expired. */
+  | "passive-expired";
 
 /** Reject reasons that are portfolio-risk limits rather than market mechanics. */
 export const RISK_LIMIT_REASONS: RejectReason[] = ["max-positions", "side-cap", "cooldown", "halted"];
