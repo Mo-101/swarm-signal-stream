@@ -347,6 +347,24 @@ export interface PaperConfig {
   maxSameSide: number;
   /** Block new entries on a symbol for this long after it stops us out. */
   cooldownAfterStopMs: number;
+
+  // ── slippage control ──
+  /** Rest non-urgent entries as post-only limits at the touch instead of crossing. */
+  passiveEntries: boolean;
+  /** Only rest passively when the book is at least this wide (bps) — otherwise crossing is cheap. */
+  passiveMinSpreadBps: number;
+  /** Signals whose expected move exceeds this are urgent: cross immediately. */
+  passiveUrgentMoveBps: number;
+  /** How long a passive entry rests before it is cancelled. */
+  passiveMaxWaitMs: number;
+  /** After a passive order expires, cross the spread anyway instead of cancelling. */
+  passiveChaseOnExpiry: boolean;
+  /** Gate symbols whose measured round-trip cost is too large for the expected move. */
+  symbolCostGate: boolean;
+  /** Required expectedMove / symbolCost ratio for an entry to pass the gate. */
+  costGateMult: number;
+  /** Closed trades needed on a symbol before its cost estimate is trusted. */
+  costGateMinSamples: number;
 }
 
 /** Bybit settles funding at 00:00, 08:00 and 16:00 UTC. (canonical: math/perp) */
