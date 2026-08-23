@@ -120,6 +120,8 @@ export function ExecutionPanel({
           tone={stats.worstSlipBps > 30 ? "bear" : "neutral"}
         />
       </div>
+      <AlphaVsFills closed={closed} stats={stats} />
+
       <SlippageControl stats={stats} />
 
       <div className="grid gap-3 lg:grid-cols-2">
