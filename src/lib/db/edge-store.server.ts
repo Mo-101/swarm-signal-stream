@@ -4,7 +4,7 @@
 // — dynamically import this from edge.functions.ts handlers, same convention
 // as integrations/supabase/client.server.ts. The runner imports it directly
 // since it's a plain Node process with no client bundle to worry about.
-import { getNeonSql, getNeonSqlOrNoop, neonEnabled } from "./neon";
+import { getNeonSql, getNeonSqlOrNoop, neonDataEnabled } from "./neon";
 import { EMPTY_EDGE_REPORT, type EdgeReport } from "@/lib/edge-model";
 import type { ShadowBookSnapshot, ShadowStats, ShadowTrade } from "@/lib/shadow-book";
 import type { FuturesGridConfig, GridRuntimeState } from "@/lib/futures-grid";
@@ -46,7 +46,7 @@ export async function loadBootState(
   _supabase: unknown,
   userId: string,
 ): Promise<{ boot: EngineBootState; report: EdgeReport; signalCount: number }> {
-  if (!neonEnabled()) {
+  if (!neonDataEnabled()) {
     const { sbLoadBootState } = await import("./supabase-store.server");
     return sbLoadBootState(_supabase, userId);
   }
@@ -93,7 +93,7 @@ export async function ingestSignals(
   const rows = signals.slice(0, 1000);
   if (rows.length === 0) return { inserted: 0 };
 
-  if (!neonEnabled()) {
+  if (!neonDataEnabled()) {
     const { sbIngestSignals } = await import("./supabase-store.server");
     return sbIngestSignals(_supabase, userId, rows);
   }
@@ -123,7 +123,7 @@ export async function persistOpenTrade(
   userId: string,
   data: OpenTradeInput,
 ): Promise<{ ok: true }> {
-  if (!neonEnabled()) {
+  if (!neonDataEnabled()) {
     const { sbPersistOpenTrade } = await import("./supabase-store.server");
     return sbPersistOpenTrade(_supabase, userId, data);
   }
@@ -155,7 +155,7 @@ export async function persistCloseTrade(
   userId: string,
   data: CloseTradeInput,
 ): Promise<{ report: EdgeReport }> {
-  if (!neonEnabled()) {
+  if (!neonDataEnabled()) {
     const { sbPersistCloseTrade } = await import("./supabase-store.server");
     return sbPersistCloseTrade(_supabase, userId, data);
   }
@@ -175,7 +175,7 @@ export async function persistCloseTrade(
   // account total silently outruns the trade table — the same signature as
   // the pre-Neon carried history, which makes the two indistinguishable
   // later. Log it loudly; never throw, the engine must keep running.
-  if (neonEnabled() && Array.isArray(updated) && updated.length === 0) {
+  if (neonDataEnabled() && Array.isArray(updated) && updated.length === 0) {
     console.error(
       `[persist] close matched 0 rows for client_id=${data.clientId} — ` +
         `realized_pnl will include $${data.pnl.toFixed(2)} with no trade row behind it`,
@@ -201,7 +201,7 @@ export async function resetPaperAccount(
   userId: string,
   wipeHistory: boolean,
 ): Promise<{ report: EdgeReport }> {
-  if (!neonEnabled()) {
+  if (!neonDataEnabled()) {
     const { sbResetPaperAccount } = await import("./supabase-store.server");
     return sbResetPaperAccount(_supabase, userId, wipeHistory);
   }
@@ -328,7 +328,7 @@ export async function loadShadowBook(
   economics: ShadowBookSnapshot["economics"],
   limits: { maxOpen: number; maxClosed: number },
 ): Promise<ShadowBookSnapshot> {
-  if (!neonEnabled()) {
+  if (!neonDataEnabled()) {
     return { version: 1, seq: 0, economics, open: [], closed: [] };
   }
 
@@ -436,7 +436,7 @@ export async function upsertGridConfig(args: {
 }
 
 export async function loadGridStatesForUser(userId: string): Promise<PersistedGridState[]> {
-  if (!neonEnabled()) return [];
+  if (!neonDataEnabled()) return [];
   const sql = getNeonSql();
   const rows = await sql`
     SELECT * FROM futures_grid_state WHERE user_id = ${userId} ORDER BY updated_at DESC`;
@@ -452,7 +452,7 @@ export async function loadGridStatesForUser(userId: string): Promise<PersistedGr
  * query would have it reconciling grids it has no business touching.
  */
 export async function loadRunnableGridStates(userId: string): Promise<PersistedGridState[]> {
-  if (!neonEnabled()) return [];
+  if (!neonDataEnabled()) return [];
   const sql = getNeonSql();
   const rows = await sql`
     SELECT * FROM futures_grid_state
