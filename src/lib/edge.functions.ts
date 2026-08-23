@@ -17,15 +17,21 @@ export const getEdgeReport = createServerFn({ method: "GET" })
   .middleware([requireAuth])
   .handler(async ({ context }) => {
     try {
-      const { getNeonSql } = await import("@/lib/db/neon");
-      const rows = await getNeonSql()`SELECT edge_report(${context.userId}) AS report`;
-      const report = rows[0]?.report as EdgeReport | undefined;
-      if (report) return report;
+      const { neonEnabled, getNeonSql } = await import("@/lib/db/neon");
+      if (neonEnabled()) {
+        const rows = await getNeonSql()`SELECT edge_report(${context.userId}) AS report`;
+        const report = rows[0]?.report as EdgeReport | undefined;
+        if (report) return report;
+      } else {
+        const { sbEdgeReport } = await import("@/lib/db/supabase-store.server");
+        return await sbEdgeReport(context.supabase);
+      }
     } catch (e) {
-      console.error("[edge] Neon edge_report failed:", e);
+      console.error("[edge] edge_report failed:", e);
     }
     return EMPTY_EDGE_REPORT;
   });
+
 
 export const ingestSignals = createServerFn({ method: "POST" })
   .middleware([requireAuth])
