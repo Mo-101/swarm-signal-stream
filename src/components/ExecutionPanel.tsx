@@ -3,6 +3,7 @@ import type {
   PendingOrder,
   RejectRecord,
   ClosedTrade,
+  RiskAlert,
 } from "@/lib/paper-broker";
 import type { MicroMetrics } from "@/lib/microstructure";
 
