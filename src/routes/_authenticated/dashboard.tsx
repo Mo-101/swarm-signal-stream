@@ -17,7 +17,35 @@ import {
   type ExecutionStats,
   type PendingOrder,
   type RejectRecord,
+  type RiskAlert,
+  type FundingStats,
 } from "@/lib/paper-broker";
+import type { RegimeStyle } from "@/lib/regime";
+import { toast } from "sonner";
+
+/** Human labels for the portfolio limits that can block a proposal. */
+const RISK_ALERT_LABELS: Record<RiskAlert["limit"], string> = {
+  "max-positions": "Position slots full",
+  "side-cap": "Same-direction exposure cap",
+  cooldown: "Symbol cooldown active",
+  halted: "Trading halted (drawdown)",
+};
+
+const EMPTY_FUNDING_STATS: FundingStats = {
+  totalFunding: 0,
+  paid: 0,
+  received: 0,
+  accruals: 0,
+  liveRates: 0,
+  avgOpenRate: 0,
+  projectedNext8hUsd: 0,
+  openCarryUsd: 0,
+  carryExits: 0,
+  timeExits: 0,
+  carrySavedUsd: 0,
+  dragPctOfGross: 0,
+  recent: [],
+};
 import { MicrostructureFeed, type MicroMetrics } from "@/lib/microstructure";
 import { createEngineRuntime } from "@/lib/engine-runtime";
 
