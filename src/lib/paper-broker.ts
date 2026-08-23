@@ -248,6 +248,14 @@ export interface PendingOrder {
   id: string;
   symbol: string;
   side: "BUY" | "SELL";
+  /** "taker" crosses the spread on arrival; "passive" rests at the touch. */
+  mode?: "taker" | "passive";
+  /** Resting limit price for passive orders. */
+  limitPrice?: number;
+  /** Passive orders are cancelled (or chased) after this time. */
+  expiresAt?: number;
+  /** Expected favourable move at signal time, in bps. */
+  expectedMoveBps?: number;
   signalPrice: number;
   confidence: number;
   regime: string;
