@@ -231,6 +231,16 @@ const EMPTY_EXEC_STATS: ExecutionStats = {
   slipCostUsd: 0,
   bookPricedFills: 0,
   modelPricedFills: 0,
+  slippageControl: {
+    passiveSubmitted: 0,
+    makerFills: 0,
+    passiveExpired: 0,
+    chased: 0,
+    takerFills: 0,
+    savedUsd: 0,
+    costGated: 0,
+    symbols: [],
+  },
 };
 
 /** Max signals retained in memory for review. */
