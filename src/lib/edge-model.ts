@@ -166,8 +166,8 @@ export function deriveEdge(report: EdgeReport, baseMinConfidence = 0.6): Learned
     // Evidence shrinkage: a bucket only moves its weight as far as its
     // statistical confidence allows. With a win-rate CI that straddles 50%,
     // the deviation from the base weight is pulled back toward 1.
-    const wr = winRateStats(row.wins, row.trades);
-    const proven = wr.provenEdge || wr.ci95.high < 0.5;
+    const ev = winRateStats(row.wins, row.trades);
+    const proven = ev.provenEdge || ev.ci95.high < 0.5;
     const shrink = proven ? 1 : Math.min(1, row.trades / (MIN_BUCKET_SAMPLE * 2));
     factor = 1 + (factor - 1) * shrink;
     return Number((base * Math.max(0.15, Math.min(2, factor))).toFixed(3));
