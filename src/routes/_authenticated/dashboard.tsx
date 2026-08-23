@@ -769,6 +769,9 @@ function SwarmDashboard() {
           setPendingOrders(s.pendingOrders);
           setMicroMetrics(s.microMetrics);
           setShadow(s.shadow);
+          setFunding(s.funding);
+          setRiskAlerts(s.riskAlerts);
+          setRegimeMix(s.regimeMix);
         },
       },
     });
