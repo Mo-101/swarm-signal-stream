@@ -1244,8 +1244,13 @@ function SwarmDashboard() {
             <EdgeDiagnosticsPanel proposals={proposals} report={edgeReport} learned={learned} />
           )}
           {tab === "system" && (
+            <>
+            <div className="grid gap-3 border-b border-border p-4 md:grid-cols-2">
+              <HealthCard health={health} />
+            </div>
             <SystemPanel
               metrics={metrics}
+
               tickRate={tickRate}
               peakTickRate={peakTickRate}
               discovery={discovery}
