@@ -1,3 +1,4 @@
+import { winRateStats } from "./math/stats";
 // Edge model — pure, client-safe helpers for bucketing outcomes and turning
 // stored trade history into live agent/symbol/regime/confidence weights.
 
@@ -162,6 +163,13 @@ export function deriveEdge(report: EdgeReport, baseMinConfidence = 0.6): Learned
     const gross = row.gross_expectancy ?? row.expectancy;
     if (gross > 0 && row.expectancy <= 0) factor *= 0.5;
     if (row.expectancy > 0) factor *= 1.1;
+    // Evidence shrinkage: a bucket only moves its weight as far as its
+    // statistical confidence allows. With a win-rate CI that straddles 50%,
+    // the deviation from the base weight is pulled back toward 1.
+    const wr = winRateStats(row.wins, row.trades);
+    const proven = wr.provenEdge || wr.ci95.high < 0.5;
+    const shrink = proven ? 1 : Math.min(1, row.trades / (MIN_BUCKET_SAMPLE * 2));
+    factor = 1 + (factor - 1) * shrink;
     return Number((base * Math.max(0.15, Math.min(2, factor))).toFixed(3));
   };
 

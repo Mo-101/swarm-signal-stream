@@ -10,7 +10,8 @@
     "preview": "vite preview",
     "lint": "eslint .",
     "format": "prettier --write .",
-    "runner": "tsx runner/index.ts"
+    "runner": "tsx runner/index.ts",
+    "test": "vitest run"
   },
   "dependencies": {
     "@neondatabase/serverless": "^0.10.4",
