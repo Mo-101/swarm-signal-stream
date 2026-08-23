@@ -98,6 +98,8 @@ export interface Position {
   entryLevels: number;
   /** True when the entry was priced off a real L2 book rather than the model. */
   bookPriced: boolean;
+  /** True when the entry filled as a resting post-only limit (maker fee, no spread crossed). */
+  makerEntry?: boolean;
 
   // ── trade management ──
   /** Distance from entry to the ORIGINAL stop, in price. This is 1R. */
