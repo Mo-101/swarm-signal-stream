@@ -483,6 +483,37 @@ export interface MarginSummary {
   atRisk: number;
 }
 
+/** Per-symbol measured execution cost, used by the cost gate. */
+export interface SymbolCost {
+  symbol: string;
+  /** EWMA of realized round-trip cost (entry slip + exit slip + fees), in bps. */
+  costBps: number;
+  samples: number;
+  /** Latest expected move that was compared against this cost, in bps. */
+  lastExpectedMoveBps: number;
+  /** Entries this symbol has had refused by the gate. */
+  blocked: number;
+}
+
+export interface SlippageControlStats {
+  /** Entries that rested as post-only limits. */
+  passiveSubmitted: number;
+  /** Passive entries that were filled at the touch (maker fee, no crossing). */
+  makerFills: number;
+  /** Passive entries that expired unfilled. */
+  passiveExpired: number;
+  /** Passive entries that expired and then crossed anyway. */
+  chased: number;
+  /** Entries that crossed the spread immediately (urgent or tight book). */
+  takerFills: number;
+  /** USD of spread-crossing avoided by maker entries, vs the touch cross. */
+  savedUsd: number;
+  /** Entries refused because measured symbol cost exceeded the expected move. */
+  costGated: number;
+  /** Worst-cost symbols currently tracked. */
+  symbols: SymbolCost[];
+}
+
 export interface ExecutionStats {
   submitted: number;
   filled: number;
