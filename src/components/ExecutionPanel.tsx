@@ -37,6 +37,8 @@ const REJECT_LABELS: Record<string, string> = {
   "no-filter": "No instrument filters",
   cooldown: "Symbol cooling off",
   "side-cap": "Same-side cap hit",
+  "cost-gate": "Cost exceeds edge",
+  "passive-expired": "Post-only never filled",
 };
 
 export function ExecutionPanel({
