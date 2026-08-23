@@ -98,6 +98,8 @@ export interface Position {
   entryLevels: number;
   /** True when the entry was priced off a real L2 book rather than the model. */
   bookPriced: boolean;
+  /** True when the entry filled as a resting post-only limit (maker fee, no spread crossed). */
+  makerEntry?: boolean;
 
   // ── trade management ──
   /** Distance from entry to the ORIGINAL stop, in price. This is 1R. */
@@ -182,7 +184,11 @@ export type RejectReason =
   /** Symbol is cooling off after a recent stop-out. */
   | "cooldown"
   /** Too many concurrent positions already facing the same way. */
-  | "side-cap";
+  | "side-cap"
+  /** Measured round-trip execution cost on this symbol exceeds the edge. */
+  | "cost-gate"
+  /** A passive (post-only) entry never got filled before it expired. */
+  | "passive-expired";
 
 /** Reject reasons that are portfolio-risk limits rather than market mechanics. */
 export const RISK_LIMIT_REASONS: RejectReason[] = ["max-positions", "side-cap", "cooldown", "halted"];
@@ -248,6 +254,14 @@ export interface PendingOrder {
   id: string;
   symbol: string;
   side: "BUY" | "SELL";
+  /** "taker" crosses the spread on arrival; "passive" rests at the touch. */
+  mode?: "taker" | "passive";
+  /** Resting limit price for passive orders. */
+  limitPrice?: number;
+  /** Passive orders are cancelled (or chased) after this time. */
+  expiresAt?: number;
+  /** Expected favourable move at signal time, in bps. */
+  expectedMoveBps?: number;
   signalPrice: number;
   confidence: number;
   regime: string;
@@ -335,6 +349,24 @@ export interface PaperConfig {
   maxSameSide: number;
   /** Block new entries on a symbol for this long after it stops us out. */
   cooldownAfterStopMs: number;
+
+  // ── slippage control ──
+  /** Rest non-urgent entries as post-only limits at the touch instead of crossing. */
+  passiveEntries: boolean;
+  /** Only rest passively when the book is at least this wide (bps) — otherwise crossing is cheap. */
+  passiveMinSpreadBps: number;
+  /** Signals whose expected move exceeds this are urgent: cross immediately. */
+  passiveUrgentMoveBps: number;
+  /** How long a passive entry rests before it is cancelled. */
+  passiveMaxWaitMs: number;
+  /** After a passive order expires, cross the spread anyway instead of cancelling. */
+  passiveChaseOnExpiry: boolean;
+  /** Gate symbols whose measured round-trip cost is too large for the expected move. */
+  symbolCostGate: boolean;
+  /** Required expectedMove / symbolCost ratio for an entry to pass the gate. */
+  costGateMult: number;
+  /** Closed trades needed on a symbol before its cost estimate is trusted. */
+  costGateMinSamples: number;
 }
 
 /** Bybit settles funding at 00:00, 08:00 and 16:00 UTC. (canonical: math/perp) */
@@ -384,6 +416,17 @@ export const DEFAULT_PAPER_CONFIG: PaperConfig = {
   maxFundingShareOfReward: 0.35,
   maxSameSide: envNum("MAX_SAME_SIDE", 3, 1, 50),
   cooldownAfterStopMs: envNum("COOLDOWN_MINUTES", 45, 0, 1440) * 60_000,
+
+  // Measured round-trip slippage was ~59bps vs an 11bps fee hurdle, so the
+  // default posture is passive: only cross when the edge is time-sensitive.
+  passiveEntries: true,
+  passiveMinSpreadBps: envNum("PASSIVE_MIN_SPREAD_BPS", 3, 0, 100),
+  passiveUrgentMoveBps: envNum("PASSIVE_URGENT_MOVE_BPS", 120, 0, 5000),
+  passiveMaxWaitMs: envNum("PASSIVE_MAX_WAIT_MS", 4000, 250, 120_000),
+  passiveChaseOnExpiry: false,
+  symbolCostGate: true,
+  costGateMult: envNum("COST_GATE_MULT", 1.5, 0.5, 20),
+  costGateMinSamples: envNum("COST_GATE_MIN_SAMPLES", 4, 1, 200),
 };
 
 /**
@@ -442,6 +485,37 @@ export interface MarginSummary {
   atRisk: number;
 }
 
+/** Per-symbol measured execution cost, used by the cost gate. */
+export interface SymbolCost {
+  symbol: string;
+  /** EWMA of realized round-trip cost (entry slip + exit slip + fees), in bps. */
+  costBps: number;
+  samples: number;
+  /** Latest expected move that was compared against this cost, in bps. */
+  lastExpectedMoveBps: number;
+  /** Entries this symbol has had refused by the gate. */
+  blocked: number;
+}
+
+export interface SlippageControlStats {
+  /** Entries that rested as post-only limits. */
+  passiveSubmitted: number;
+  /** Passive entries that were filled at the touch (maker fee, no crossing). */
+  makerFills: number;
+  /** Passive entries that expired unfilled. */
+  passiveExpired: number;
+  /** Passive entries that expired and then crossed anyway. */
+  chased: number;
+  /** Entries that crossed the spread immediately (urgent or tight book). */
+  takerFills: number;
+  /** USD of spread-crossing avoided by maker entries, vs the touch cross. */
+  savedUsd: number;
+  /** Entries refused because measured symbol cost exceeded the expected move. */
+  costGated: number;
+  /** Worst-cost symbols currently tracked. */
+  symbols: SymbolCost[];
+}
+
 export interface ExecutionStats {
   submitted: number;
   filled: number;
@@ -459,6 +533,8 @@ export interface ExecutionStats {
   slipCostUsd: number;
   bookPricedFills: number;
   modelPricedFills: number;
+  /** Post-only / cost-gate telemetry. */
+  slippageControl: SlippageControlStats;
 }
 
 /** Live market data the broker needs to price executions. */
@@ -542,6 +618,17 @@ export class PaperBroker {
   private bookPricedFills = 0;
   private modelPricedFills = 0;
 
+  // ── slippage control telemetry ──
+  private passiveSubmitted = 0;
+  private makerFills = 0;
+  private passiveExpiredCount = 0;
+  private chased = 0;
+  private takerFills = 0;
+  private makerSavedUsd = 0;
+  private costGated = 0;
+  /** symbol → measured round-trip execution cost. */
+  private symbolCosts = new Map<string, SymbolCost>();
+
   constructor(
     private cfg: PaperConfig = DEFAULT_PAPER_CONFIG,
     private events: PaperEvents = {},
@@ -595,7 +682,31 @@ export class PaperBroker {
       slipCostUsd: this.slipCostUsd,
       bookPricedFills: this.bookPricedFills,
       modelPricedFills: this.modelPricedFills,
+      slippageControl: this.getSlippageControl(),
     };
+  }
+
+  /** Post-only / cost-gate telemetry for the execution panel. */
+  getSlippageControl(): SlippageControlStats {
+    return {
+      passiveSubmitted: this.passiveSubmitted,
+      makerFills: this.makerFills,
+      passiveExpired: this.passiveExpiredCount,
+      chased: this.chased,
+      takerFills: this.takerFills,
+      savedUsd: this.makerSavedUsd,
+      costGated: this.costGated,
+      symbols: Array.from(this.symbolCosts.values())
+        .sort((a, b) => b.costBps - a.costBps)
+        .slice(0, 12),
+    };
+  }
+
+  /** Measured round-trip cost for a symbol, or null when untrusted/unknown. */
+  symbolCostBps(symbol: string): number | null {
+    const rec = this.symbolCosts.get(symbol);
+    if (!rec || rec.samples < this.cfg.costGateMinSamples) return null;
+    return rec.costBps;
   }
 
   /** Margin usage / liquidation-risk snapshot for the whole account. */
@@ -934,9 +1045,40 @@ export class PaperBroker {
         `${sameSide} positions already ${proposal.direction === "BUY" ? "long" : "short"}`,
       );
 
+    // ── Symbol cost gate ──
+    // Once a symbol has enough closed trades, its measured round-trip cost
+    // (entry slip + exit slip + fees) must be small relative to the move the
+    // swarm expects, or the trade is structurally unprofitable before it opens.
+    const expectedMoveBps = proposal.expectedMoveBps ?? 0;
+    const measuredCost = this.symbolCostBps(proposal.symbol);
+    if (this.cfg.symbolCostGate && measuredCost !== null && expectedMoveBps > 0) {
+      const rec = this.symbolCosts.get(proposal.symbol)!;
+      rec.lastExpectedMoveBps = expectedMoveBps;
+      if (expectedMoveBps < measuredCost * this.cfg.costGateMult) {
+        rec.blocked += 1;
+        this.costGated += 1;
+        return this.reject(
+          base,
+          "cost-gate",
+          `expected ${expectedMoveBps.toFixed(1)}bps < ${this.cfg.costGateMult}× measured cost ${measuredCost.toFixed(1)}bps`,
+        );
+      }
+    }
+
+    // ── Passive vs aggressive entry ──
+    // Crossing the spread is only worth it when the edge is time-sensitive.
+    // Otherwise we rest at the touch, pay maker instead of taker, and give up
+    // the fill rather than the spread.
+    const book = this.market.book(proposal.symbol);
+    const spreadBps = book?.spreadBps ?? this.cfg.fallbackSpreadBps;
+    const urgent = expectedMoveBps > 0 && expectedMoveBps >= this.cfg.passiveUrgentMoveBps;
+    const passive =
+      this.cfg.passiveEntries && !urgent && Boolean(book) && spreadBps >= this.cfg.passiveMinSpreadBps;
+
     const jitter = (Math.random() * 2 - 1) * this.cfg.latencyJitterMs;
     const latency = Math.max(20, this.cfg.latencyMs + jitter);
     this.submitted += 1;
+    if (passive) this.passiveSubmitted += 1;
     this.pending.set(proposal.symbol, {
       id: proposal.id,
       symbol: proposal.symbol,
@@ -948,6 +1090,11 @@ export class PaperBroker {
       createdAt: now,
       readyAt: now + latency,
       volBps: proposal.volBps ?? 0,
+      expectedMoveBps,
+      mode: passive ? "passive" : "taker",
+      // Post-only: join the near side of the book instead of lifting the offer.
+      limitPrice: passive ? (proposal.direction === "BUY" ? book!.bid : book!.ask) : undefined,
+      expiresAt: passive ? now + latency + this.cfg.passiveMaxWaitMs : undefined,
     });
   }
 
@@ -955,12 +1102,46 @@ export class PaperBroker {
   processPending(now = Date.now()) {
     for (const order of Array.from(this.pending.values())) {
       if (now < order.readyAt) continue;
+
+      if (order.mode === "passive" && order.limitPrice) {
+        const book = this.market.book(order.symbol);
+        // A resting bid fills when the offer trades down to it (and vice versa).
+        const crossed = book
+          ? order.side === "BUY"
+            ? book.ask <= order.limitPrice
+            : book.bid >= order.limitPrice
+          : false;
+        if (crossed) {
+          this.pending.delete(order.symbol);
+          this.tryFill(order, now, { maker: true, price: order.limitPrice });
+          continue;
+        }
+        if (now < (order.expiresAt ?? now)) continue; // still queued
+        this.pending.delete(order.symbol);
+        this.passiveExpiredCount += 1;
+        if (this.cfg.passiveChaseOnExpiry) {
+          this.chased += 1;
+          this.tryFill(order, now);
+        } else {
+          this.reject(
+            order,
+            "passive-expired",
+            `post-only rest at ${order.limitPrice.toPrecision(6)} never filled in ${this.cfg.passiveMaxWaitMs}ms`,
+          );
+        }
+        continue;
+      }
+
       this.pending.delete(order.symbol);
       this.tryFill(order, now);
     }
   }
 
-  private tryFill(order: PendingOrder, now: number) {
+  private tryFill(
+    order: PendingOrder,
+    now: number,
+    maker?: { maker: true; price: number },
+  ) {
     if (this.halted) return this.reject(order, "halted", "Risk halt active during flight");
     if (this.positions.has(order.symbol)) return;
 
@@ -1035,7 +1216,16 @@ export class PaperBroker {
     let fillPrice: number;
     let levelsUsed = 0;
     let bookPriced = false;
-    if (book) {
+    if (maker) {
+      // Post-only: the fill happens at our own resting price, so no spread is
+      // crossed and no depth is walked. This is the whole point of the mode.
+      fillPrice = maker.price;
+      bookPriced = Boolean(book);
+      if (book) this.bookPricedFills += 1;
+      else this.modelPricedFills += 1;
+      this.makerFills += 1;
+      this.makerSavedUsd += Math.abs(touch - maker.price) * size;
+    } else if (book) {
       const walk = walkBook(book, order.side, size);
       if (walk.filled <= 0) return this.reject(order, "thin-book", "Book empty on the taking side");
       if (walk.exhausted) {
@@ -1051,6 +1241,7 @@ export class PaperBroker {
       levelsUsed = walk.levels;
       bookPriced = true;
       this.bookPricedFills += 1;
+      this.takerFills += 1;
     } else {
       fillPrice = modelledFillPrice(
         order.signalPrice,
@@ -1059,6 +1250,7 @@ export class PaperBroker {
         this.cfg.fallbackSpreadBps,
       );
       this.modelPricedFills += 1;
+      this.takerFills += 1;
     }
     fillPrice = roundPrice(fillPrice, filters.tickSize);
 
@@ -1070,7 +1262,8 @@ export class PaperBroker {
     const tier = riskLimitTier(notional);
     const leverage = Math.min(this.cfg.leverage, tier.maxLeverage, filters.maxLeverage);
     const initialMargin = notional / leverage;
-    const entryFee = takerFee(notional, this.cfg.takerFeeRate);
+    // A resting post-only entry earns the maker rate instead of paying taker.
+    const entryFee = takerFee(notional, maker ? this.cfg.makerFeeRate : this.cfg.takerFeeRate);
     if (initialMargin + entryFee > marginBudget)
       return this.reject(order, "margin", `IM $${initialMargin.toFixed(2)} exceeds free margin`);
 
@@ -1113,6 +1306,7 @@ export class PaperBroker {
       latencyMs: now - order.createdAt,
       entryLevels: levelsUsed,
       bookPriced,
+      makerEntry: Boolean(maker),
     };
 
     this.fills += 1;
@@ -1397,6 +1591,7 @@ export class PaperBroker {
       bookPriced: p.bookPriced && exitBookPriced,
     };
     this.closed = [trade, ...this.closed].slice(0, 200);
+    this.recordSymbolCost(trade);
     this.positions.delete(p.symbol);
     // Cool off a symbol that just took money off us: back-to-back re-entries
     // into the same failing move were the biggest source of paired losses.
@@ -1410,6 +1605,27 @@ export class PaperBroker {
       this.halted = true;
       this.events.onHalt?.(`Daily drawdown limit hit (${(dd * 100).toFixed(2)}%). New entries paused.`);
     }
+  }
+
+  /**
+   * Update the symbol's measured round-trip execution cost from a closed trade:
+   * entry slip + exit slip + both fees, expressed in bps of entry notional.
+   * EWMA (alpha 0.3) so the gate tracks current liquidity, not ancient history.
+   */
+  private recordSymbolCost(t: ClosedTrade) {
+    const notional = t.entryPrice * t.size;
+    if (!(notional > 0)) return;
+    const feeBps = (t.fees / notional) * 10_000;
+    const costBps = Math.max(0, t.entrySlipBps) + Math.max(0, t.exitSlipBps) + feeBps;
+    const prev = this.symbolCosts.get(t.symbol);
+    const alpha = 0.3;
+    this.symbolCosts.set(t.symbol, {
+      symbol: t.symbol,
+      costBps: prev ? prev.costBps * (1 - alpha) + costBps * alpha : costBps,
+      samples: (prev?.samples ?? 0) + 1,
+      lastExpectedMoveBps: prev?.lastExpectedMoveBps ?? 0,
+      blocked: prev?.blocked ?? 0,
+    });
   }
 
   closeAll(marks: Map<string, number>, time: number) {
@@ -1454,5 +1670,13 @@ export class PaperBroker {
     this.slipCostUsd = 0;
     this.bookPricedFills = 0;
     this.modelPricedFills = 0;
+    this.passiveSubmitted = 0;
+    this.makerFills = 0;
+    this.passiveExpiredCount = 0;
+    this.chased = 0;
+    this.takerFills = 0;
+    this.makerSavedUsd = 0;
+    this.costGated = 0;
+    this.symbolCosts.clear();
   }
 }
