@@ -11,6 +11,7 @@ import { EMPTY_EDGE_REPORT, type EdgeReport } from "@/lib/edge-model";
 import type { ShadowBookSnapshot, ShadowStats, ShadowTrade } from "@/lib/shadow-book";
 import type { FuturesGridConfig, GridRuntimeState } from "@/lib/futures-grid";
 import type {
+import { STRATEGY_EPOCH } from "@/lib/strategy-epoch";
   StoredTrade,
   SignalInput,
   OpenTradeInput,
@@ -66,7 +67,7 @@ export async function loadBootState(
   const closed = await sql`
     SELECT * FROM paper_trades WHERE user_id = ${userId} AND status = 'closed'
     ORDER BY closed_at DESC LIMIT 200`;
-  const reportRows = await sql`SELECT edge_report(${userId}) AS report`;
+  const reportRows = await sql`SELECT edge_report(${userId}, ${STRATEGY_EPOCH}) AS report`;
   const signalCountRows =
     await sql`SELECT count(*)::int AS count FROM signals WHERE user_id = ${userId}`;
 
@@ -134,14 +135,16 @@ export async function persistOpenTrade(
     INSERT INTO paper_trades (
       user_id, client_id, symbol, side, entry_price, size, notional, stop_loss, take_profit,
       confidence, conf_bucket, regime, hour_utc, agents, status, opened_at,
-      signal_price, entry_slip_bps, spread_entry_bps, latency_ms, leverage, liq_price, book_priced
+      signal_price, entry_slip_bps, spread_entry_bps, latency_ms, leverage, liq_price, book_priced,
+      strategy_epoch
     ) VALUES (
       ${userId}, ${data.clientId}, ${data.symbol}, ${data.side}, ${data.entryPrice}, ${data.size},
       ${data.notional}, ${data.stopLoss}, ${data.takeProfit}, ${data.confidence}, ${data.confBucket},
       ${data.regime}, ${data.hourUtc}, ${JSON.stringify(data.agents)}::jsonb, 'open',
       to_timestamp(${data.openedAt / 1000}),
       ${data.signalPrice ?? data.entryPrice}, ${data.entrySlipBps ?? 0}, ${data.spreadEntryBps ?? 0},
-      ${data.latencyMs ?? 0}, ${data.leverage ?? null}, ${data.liqPrice ?? null}, ${data.bookPriced ?? false}
+      ${data.latencyMs ?? 0}, ${data.leverage ?? null}, ${data.liqPrice ?? null}, ${data.bookPriced ?? false},
+      ${STRATEGY_EPOCH}
     )
     ON CONFLICT (user_id, client_id) DO UPDATE SET
       entry_price = EXCLUDED.entry_price, size = EXCLUDED.size, notional = EXCLUDED.notional,
@@ -190,7 +193,7 @@ export async function persistCloseTrade(
     ON CONFLICT (user_id) DO UPDATE SET
       realized_pnl = EXCLUDED.realized_pnl, halted = EXCLUDED.halted, updated_at = now()`;
 
-  const reportRows = await sql`SELECT edge_report(${userId}) AS report`;
+  const reportRows = await sql`SELECT edge_report(${userId}, ${STRATEGY_EPOCH}) AS report`;
   const report = (reportRows[0]?.report as EdgeReport | undefined) ?? EMPTY_EDGE_REPORT;
 
   return { report };
@@ -218,7 +221,7 @@ export async function resetPaperAccount(
     INSERT INTO paper_accounts (user_id, realized_pnl, halted, updated_at)
     VALUES (${userId}, 0, false, now())
     ON CONFLICT (user_id) DO UPDATE SET realized_pnl = 0, halted = false, updated_at = now()`;
-  const reportRows = await sql`SELECT edge_report(${userId}) AS report`;
+  const reportRows = await sql`SELECT edge_report(${userId}, ${STRATEGY_EPOCH}) AS report`;
   const report = (reportRows[0]?.report as EdgeReport | undefined) ?? EMPTY_EDGE_REPORT;
 
   return { report };

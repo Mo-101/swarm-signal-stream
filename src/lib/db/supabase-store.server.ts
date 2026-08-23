@@ -4,6 +4,7 @@
 // even though history existed in the cloud database.
 import { EMPTY_EDGE_REPORT, type EdgeReport } from "@/lib/edge-model";
 import type {
+import { STRATEGY_EPOCH } from "@/lib/strategy-epoch";
   StoredTrade,
   SignalInput,
   OpenTradeInput,
@@ -39,7 +40,8 @@ export function mapSupabaseTradeRow(row: any): StoredTrade {
 }
 
 export async function sbEdgeReport(supabase: Sb): Promise<EdgeReport> {
-  const { data, error } = await supabase.rpc("edge_report");
+  // Scope learning to the current strategy generation.
+  const { data, error } = await supabase.rpc("edge_report", { p_epoch: STRATEGY_EPOCH });
   if (error) {
     console.error("[supabase-store] edge_report failed:", error.message);
     return EMPTY_EDGE_REPORT;
@@ -158,6 +160,7 @@ export async function sbPersistOpenTrade(
       leverage: d.leverage ?? null,
       liq_price: d.liqPrice ?? null,
       book_priced: d.bookPriced ?? false,
+      strategy_epoch: STRATEGY_EPOCH,
     },
     { onConflict: "user_id,client_id" },
   );
