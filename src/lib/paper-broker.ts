@@ -1214,7 +1214,20 @@ export class PaperBroker {
     let fillPrice: number;
     let levelsUsed = 0;
     let bookPriced = false;
-    if (book) {
+    // ── Fill ──
+    let fillPrice: number;
+    let levelsUsed = 0;
+    let bookPriced = false;
+    if (maker) {
+      // Post-only: the fill happens at our own resting price, so no spread is
+      // crossed and no depth is walked. This is the whole point of the mode.
+      fillPrice = maker.price;
+      bookPriced = Boolean(book);
+      if (book) this.bookPricedFills += 1;
+      else this.modelPricedFills += 1;
+      this.makerFills += 1;
+      this.makerSavedUsd += Math.abs(touch - maker.price) * size;
+    } else if (book) {
       const walk = walkBook(book, order.side, size);
       if (walk.filled <= 0) return this.reject(order, "thin-book", "Book empty on the taking side");
       if (walk.exhausted) {
@@ -1230,6 +1243,7 @@ export class PaperBroker {
       levelsUsed = walk.levels;
       bookPriced = true;
       this.bookPricedFills += 1;
+      this.takerFills += 1;
     } else {
       fillPrice = modelledFillPrice(
         order.signalPrice,
@@ -1238,6 +1252,7 @@ export class PaperBroker {
         this.cfg.fallbackSpreadBps,
       );
       this.modelPricedFills += 1;
+      this.takerFills += 1;
     }
     fillPrice = roundPrice(fillPrice, filters.tickSize);
 
