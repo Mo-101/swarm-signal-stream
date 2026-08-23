@@ -1,0 +1,28 @@
+# Pull-based VPS deploy — no build on the server.
+# Images are published by GitHub Actions on every push to main:
+#   ghcr.io/mo-101/swarm-signal-stream:latest         (dashboard + runner)
+#   ghcr.io/mo-101/swarm-signal-stream-runner:latest  (runner only)
+#
+#   docker compose -f docker-compose.prod.yml pull
+#   docker compose -f docker-compose.prod.yml up -d
+services:
+  alpha-swarm:
+    image: ghcr.io/mo-101/swarm-signal-stream:latest
+    container_name: alpha-swarm
+    restart: always
+    pull_policy: always
+    ports:
+      - "8085:8080" # dashboard
+      - "8090:8090" # runner health endpoint
+    env_file:
+      - .env
+    environment:
+      - NODE_ENV=production
+      - PORT=8080
+      - HOST=0.0.0.0
+      - HEALTH_PORT=8090
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
