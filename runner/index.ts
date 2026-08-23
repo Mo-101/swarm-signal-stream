@@ -81,16 +81,21 @@ const HEALTH_PORT = Number(process.env.HEALTH_PORT ?? 8090);
 const TICK_STALL_EXIT_MS = Number(process.env.TICK_STALL_EXIT_MS ?? 5 * 60_000);
 
 async function main() {
-  // DATABASE_URL (Neon) is optional: when it is absent the shared store falls
-  // back to the Supabase/Lovable Cloud tables, which is what the dashboard
-  // uses locally. Only warn so a VPS box with just Supabase creds still runs.
+  // Neon and Supabase run simultaneously: Neon (DATABASE_URL) is the login
+  // store, Supabase holds the trade data unless DATA_STORE=neon. Supabase
+  // creds are always required; Neon is optional (Supabase auth then acts as
+  // the fallback login path).
+  requireEnv("SUPABASE_URL");
+  requireEnv("SUPABASE_PUBLISHABLE_KEY");
+  const dataStore = (process.env.DATA_STORE ?? "supabase").toLowerCase();
   if (!process.env.DATABASE_URL) {
     console.warn(
-      "[runner] DATABASE_URL not set — using the Supabase/Lovable Cloud store as the persistence backend.",
+      "[runner] DATABASE_URL not set — Neon login disabled, falling back to Supabase auth.",
     );
-    requireEnv("SUPABASE_URL");
-    requireEnv("SUPABASE_PUBLISHABLE_KEY");
+  } else {
+    console.log("[runner] Neon login enabled.");
   }
+  console.log(`[runner] trade data store: ${dataStore === "neon" ? "neon" : "supabase"}`);
   const RUNNER_EMAIL = requireEnv("RUNNER_EMAIL");
   const RUNNER_PASSWORD = requireEnv("RUNNER_PASSWORD");
 
