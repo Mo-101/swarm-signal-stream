@@ -1591,6 +1591,7 @@ export class PaperBroker {
       bookPriced: p.bookPriced && exitBookPriced,
     };
     this.closed = [trade, ...this.closed].slice(0, 200);
+    this.recordSymbolCost(trade);
     this.positions.delete(p.symbol);
     // Cool off a symbol that just took money off us: back-to-back re-entries
     // into the same failing move were the biggest source of paired losses.
