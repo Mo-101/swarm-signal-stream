@@ -64,10 +64,18 @@ describe("breakeven + trailing stop", () => {
     expect(b.getPositions()[0].stopMoved).toBe(false);
   });
 
-  it("pulls the stop above entry (fee cushion) at +1R", () => {
+  it("holds the stop at +1R — the ratchet waits for 1.5R", () => {
     const b = brokerWith();
     seedLong(b);
     b.markPrice("TESTUSDT", 102, 2_000); // +1R
+    expect(b.getPositions()[0].stopLoss).toBe(98);
+    expect(b.getPositions()[0].stopMoved).toBe(false);
+  });
+
+  it("pulls the stop above entry (fee cushion) at +1.5R", () => {
+    const b = brokerWith();
+    seedLong(b);
+    b.markPrice("TESTUSDT", 103, 2_000); // +1.5R
     const p = b.getPositions()[0];
     expect(p.stopMoved).toBe(true);
     // entry + 2 × taker fee, rounded to the 0.01 tick.
@@ -75,20 +83,20 @@ describe("breakeven + trailing stop", () => {
     expect(p.stopLoss).toBeLessThan(100.5);
   });
 
-  it("trails 0.75R behind the best price past +1.5R and never retreats", () => {
+  it("trails 1R behind the best price past +2.5R and never retreats", () => {
     const b = brokerWith();
-    seedLong(b);
-    b.markPrice("TESTUSDT", 103.4, 2_000); // +1.7R → trail to 103.4 - 1.5
-    expect(b.getPositions()[0].stopLoss).toBeCloseTo(101.9, 6);
-    b.markPrice("TESTUSDT", 102.5, 3_000); // pullback must not lower the stop
-    expect(b.getPositions()[0].stopLoss).toBeCloseTo(101.9, 6);
+    seedLong(b, { takeProfit: 120 }); // far target so the trail, not TP, exits
+    b.markPrice("TESTUSDT", 105.4, 2_000); // +2.7R → trail to 105.4 - 2
+    expect(b.getPositions()[0].stopLoss).toBeCloseTo(103.4, 6);
+    b.markPrice("TESTUSDT", 104, 3_000); // pullback must not lower the stop
+    expect(b.getPositions()[0].stopLoss).toBeCloseTo(103.4, 6);
   });
 
   it("books a trailed exit as TRAIL, not SL", () => {
     const b = brokerWith();
-    seedLong(b);
-    b.markPrice("TESTUSDT", 103.4, 2_000);
-    b.markPrice("TESTUSDT", 101.5, 3_000); // through the trailed stop
+    seedLong(b, { takeProfit: 120 }); // far target so the trail, not TP, exits
+    b.markPrice("TESTUSDT", 105.4, 2_000);
+    b.markPrice("TESTUSDT", 103, 3_000); // through the trailed stop
     const closed = b.getClosed();
     expect(closed).toHaveLength(1);
     expect(closed[0].reason).toBe("TRAIL");
