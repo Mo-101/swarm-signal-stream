@@ -82,16 +82,35 @@ async function resolveAuthContext(token: string): Promise<AuthContext> {
   return { supabase, userId: data.claims.sub, claims: data.claims as Record<string, unknown> };
 }
 
+/**
+ * Throw a real 401 Response, not an Error. A plain throw inside a server
+ * function is not converted into a response by the framework — the request
+ * ends with "forgot to return a response" and the browser gets a 500 HTML
+ * error page (blank screen). A thrown Response is passed straight through.
+ */
+function unauthorized(message: string): Response {
+  return new Response(JSON.stringify({ error: "Unauthorized", message }), {
+    status: 401,
+    headers: { "content-type": "application/json" },
+  });
+}
+
 export const requireAuth = createMiddleware({ type: "function" }).server(async ({ next }) => {
   const request = getRequest();
   const authHeader = request?.headers?.get("authorization");
   if (!authHeader?.startsWith("Bearer ")) {
-    throw new Error("Unauthorized: No bearer token provided");
+    throw unauthorized("Unauthorized: No bearer token provided");
   }
   const token = authHeader.slice("Bearer ".length);
   if (!token || token.split(".").length !== 3) {
-    throw new Error("Unauthorized: Invalid token");
+    throw unauthorized("Unauthorized: Invalid token");
   }
-  const context = await resolveAuthContext(token);
+  let context: AuthContext;
+  try {
+    context = await resolveAuthContext(token);
+  } catch {
+    throw unauthorized("Unauthorized: Invalid token");
+  }
   return next({ context });
 });
+
