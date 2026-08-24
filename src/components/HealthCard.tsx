@@ -146,21 +146,28 @@ export function HealthCard({ health }: { health: HealthSnapshot }) {
       </div>
       <dl className="space-y-1.5">
         {health.components.map((c) => (
-          <div key={c.id} className="flex items-baseline justify-between gap-3">
-            <dt className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
-              <span className={`h-1.5 w-1.5 rounded-full ${tone[c.state].dot}`} />
-              {c.label}
-            </dt>
-            <dd
-              className={`max-w-[60%] truncate text-right font-mono text-[10px] ${tone[c.state].text}`}
-              title={c.detail}
-            >
-              {c.detail}
-              {c.latencyMs !== undefined ? ` · ${c.latencyMs}ms` : ""}
-            </dd>
+          <div key={c.id}>
+            <div className="flex items-baseline justify-between gap-3">
+              <dt className="flex items-center gap-1.5 text-[11px] text-muted-foreground">
+                <span className={`h-1.5 w-1.5 rounded-full ${tone[c.state].dot}`} />
+                {c.label}
+              </dt>
+              <dd
+                className={`max-w-[60%] truncate text-right font-mono text-[10px] ${tone[c.state].text}`}
+                title={c.detail}
+              >
+                {c.detail}
+                {c.httpStatus !== undefined ? ` · HTTP ${c.httpStatus}` : ""}
+                {c.latencyMs !== undefined ? ` · ${c.latencyMs}ms` : ""}
+              </dd>
+            </div>
+            {c.hint && (c.state === "down" || c.state === "degraded") ? (
+              <p className="mt-0.5 pl-3 text-[10px] leading-snug text-muted-foreground">{c.hint}</p>
+            ) : null}
           </div>
         ))}
       </dl>
+
       <p className="mt-3 font-mono text-[10px] text-muted-foreground">
         {health.error
           ? `probe error: ${health.error}`
