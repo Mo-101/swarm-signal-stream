@@ -116,8 +116,9 @@ export function useHealthMonitor(metrics: SwarmMetrics | null): HealthSnapshot {
     if (before === null || before === status) return;
     const failing = components
       .filter((c) => c.state === "down" || c.state === "degraded")
-      .map((c) => `${c.label}: ${c.detail}`)
+      .map((c) => `${c.label}: ${c.detail}${c.hint ? ` → ${c.hint}` : ""}`)
       .join(" · ");
+
     if (status === "down") {
       toast.error("System health: DOWN", { description: failing, duration: 15000 });
     } else if (status === "degraded") {
