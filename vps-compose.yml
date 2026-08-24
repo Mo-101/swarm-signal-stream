@@ -1,0 +1,26 @@
+# Compose for the Hostinger-managed "alpha-swarm" project on VPS 1781299.
+#
+# Two deliberate differences from docker-compose.prod.yml:
+#   - no `env_file: .env`  — the panel injects the project environment itself,
+#     and a missing .env on the host makes `compose up` abort before any
+#     container is created.
+#   - no `container_name`  — avoids a name conflict with any stale container
+#     left over from an earlier `docker run`.
+services:
+  alpha-swarm:
+    image: ghcr.io/mo-101/swarm-signal-stream:latest
+    restart: always
+    pull_policy: always
+    ports:
+      - "8085:8080" # dashboard
+      - "8090:8090" # runner health endpoint
+    environment:
+      - NODE_ENV=production
+      - PORT=8080
+      - HOST=0.0.0.0
+      - HEALTH_PORT=8090
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
