@@ -370,16 +370,23 @@ export async function runHealthChecks(): Promise<HealthReport> {
   const components = await Promise.all([
     checkStream(),
     checkExecution(),
+    checkAuth(),
     checkRedis(),
     checkNats(),
     checkDatabase(),
   ]);
+  const failing = failures(components);
   const report: HealthReport = {
     status: rollup(components),
     checkedAt: started,
     durationMs: Date.now() - started,
     components,
+    failing,
+    summary: failing.length
+      ? failing.map((f) => `${f.id} ${f.state}: ${f.detail}`).join(" | ")
+      : "all checks passing",
   };
   await notify(report);
   return report;
 }
+
