@@ -13,6 +13,22 @@ export interface HealthComponent {
   detail: string;
   /** Probe round-trip in ms, when the check performed I/O. */
   latencyMs?: number;
+  /** Actionable remediation shown when the component is not healthy. */
+  hint?: string;
+  /** HTTP status of the underlying probe request, when there was one. */
+  httpStatus?: number;
+  /** Endpoint / target that was probed (never contains credentials). */
+  target?: string;
+}
+
+export interface HealthFailure {
+  id: string;
+  label: string;
+  state: HealthState;
+  detail: string;
+  hint?: string;
+  httpStatus?: number;
+  target?: string;
 }
 
 export interface HealthReport {
@@ -20,7 +36,26 @@ export interface HealthReport {
   checkedAt: number;
   durationMs: number;
   components: HealthComponent[];
+  /** Only the degraded/down components, so monitors can alert on one field. */
+  failing: HealthFailure[];
+  /** Compact "id: detail" summary of everything failing. */
+  summary: string;
 }
+
+export function failures(components: HealthComponent[]): HealthFailure[] {
+  return components
+    .filter((c) => c.state === "degraded" || c.state === "down")
+    .map(({ id, label, state, detail, hint, httpStatus, target }) => ({
+      id,
+      label,
+      state,
+      detail,
+      ...(hint ? { hint } : {}),
+      ...(httpStatus !== undefined ? { httpStatus } : {}),
+      ...(target ? { target } : {}),
+    }));
+}
+
 
 const RANK: Record<HealthState, number> = { ok: 0, skipped: 0, degraded: 1, down: 2 };
 
