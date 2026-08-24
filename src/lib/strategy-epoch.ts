@@ -14,5 +14,8 @@
  * v2 — vol-scaled brackets at fixed reward:risk, maker take-profits, breakeven
  *      + trailing stops, time/carry exits, correlation cap, post-stop cooldown,
  *      and confidence normalized to 0.5–1.0 by total agent weight.
+ * v3 — passive entry and cost gating kept verbatim from v2, but bracket
+ *      geometry reverted toward v1: wider ATR stop multiple (3.5x, 150-450bps)
+ *      and the breakeven ratchet delayed to +1.5R with trailing from +2.5R.
  */
-export const STRATEGY_EPOCH = "v2";
+export const STRATEGY_EPOCH = "v3";

@@ -405,13 +405,16 @@ export const DEFAULT_PAPER_CONFIG: PaperConfig = {
   makerFeeRate: 0.0002,
   takeProfitAsLimit: true,
   volScaledBrackets: true,
-  volStopMult: 2.5,
-  minStopBps: 60,
-  maxStopBps: 320,
+  // v3: v2's tight vol brackets stopped winners out as noise. Widened back
+  // toward v1's ~200bps geometry, with the breakeven ratchet delayed past 1R
+  // so a trade has to actually prove itself before its stop is pulled up.
+  volStopMult: 3.5,
+  minStopBps: 150,
+  maxStopBps: 450,
   rewardRiskRatio: 2,
-  breakevenAtR: 1,
-  trailStartR: 1.5,
-  trailDistanceR: 0.75,
+  breakevenAtR: 1.5,
+  trailStartR: 2.5,
+  trailDistanceR: 1,
   maxHoldMs: envNum("MAX_HOLD_HOURS", 8, 0.25, 240) * 3_600_000,
   maxFundingShareOfReward: 0.35,
   maxSameSide: envNum("MAX_SAME_SIDE", 3, 1, 50),
