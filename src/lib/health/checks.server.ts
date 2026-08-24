@@ -1,7 +1,8 @@
 // Server-side health probes. Only reachable from the /api/public/health
 // route handler and never imported into the client bundle (*.server.ts is
 // blocked by import protection).
-import { rollup, type HealthComponent, type HealthReport } from "./types";
+import { failures, rollup, type HealthComponent, type HealthReport } from "./types";
+
 
 const PROBE_TIMEOUT_MS = 4000;
 
