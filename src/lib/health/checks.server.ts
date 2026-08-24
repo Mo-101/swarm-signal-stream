@@ -101,23 +101,30 @@ async function hmacHex(secret: string, msg: string): Promise<string> {
  * the key, the signature and the account type all still work.
  */
 async function checkExecution(): Promise<HealthComponent> {
-  const key = process.env['BYBIT_TESTNET_API_KEY'] || process.env['BYBIT_API_KEY'];
+  const testnetKey = process.env['BYBIT_TESTNET_API_KEY'];
+  const key = testnetKey || process.env['BYBIT_API_KEY'];
   const secret = process.env['BYBIT_TESTNET_SECRET'] || process.env['BYBIT_SECRET'];
+  const keySource = testnetKey ? "BYBIT_TESTNET_API_KEY" : "BYBIT_API_KEY";
   const { rest, venue } = bybitBase();
+  const target = `${rest}/v5/account/wallet-balance`;
   if (!key || !secret) {
     return {
       id: "execution",
       label: "Order execution",
       state: "skipped",
       detail: "No venue API credentials — paper execution only",
+      target,
+      hint: "Set BYBIT_TESTNET_API_KEY / BYBIT_TESTNET_SECRET to enable live order routing.",
     };
   }
+  let httpStatus: number | undefined;
+  let retCode: number | undefined;
   const r = await timed(async (signal) => {
     const ts = String(Date.now());
     const recv = "5000";
     const query = "accountType=UNIFIED";
     const sign = await hmacHex(secret, ts + key + recv + query);
-    const res = await fetch(`${rest}/v5/account/wallet-balance?${query}`, {
+    const res = await fetch(`${target}?${query}`, {
       signal,
       headers: {
         "X-BAPI-API-KEY": key,
@@ -126,6 +133,7 @@ async function checkExecution(): Promise<HealthComponent> {
         "X-BAPI-SIGN": sign,
       },
     });
+    httpStatus = res.status;
     const text = await res.text();
     if (!text) throw new Error(`empty response (HTTP ${res.status})`);
     let body: { retCode?: number; retMsg?: string };
@@ -134,28 +142,99 @@ async function checkExecution(): Promise<HealthComponent> {
     } catch {
       throw new Error(`non-JSON response (HTTP ${res.status})`);
     }
+    retCode = body.retCode;
     if (body.retCode !== 0) throw new Error(`retCode ${body.retCode}: ${body.retMsg}`);
     return true;
   });
-  return r.ok
-    ? {
-        id: "execution",
-        label: "Order execution",
-        state: r.ms > 2000 ? "degraded" : "ok",
-        detail: `${venue} account authenticated`,
-        latencyMs: r.ms,
-      }
-    : {
-        id: "execution",
-        label: "Order execution",
-        // Rejected credentials only block LIVE orders — paper execution keeps
-        // running — so that is a degradation, not a full outage. A network
-        // failure to the venue is a real outage.
-        state: /401|403|retCode/.test(r.error) ? "degraded" : "down",
-        detail: `${venue} signed request failed — ${r.error}`,
-        latencyMs: r.ms,
-      };
+  if (r.ok) {
+    return {
+      id: "execution",
+      label: "Order execution",
+      state: r.ms > 2000 ? "degraded" : "ok",
+      detail: `${venue} account authenticated via ${keySource}`,
+      latencyMs: r.ms,
+      target,
+      ...(httpStatus !== undefined ? { httpStatus } : {}),
+      ...(r.ms > 2000 ? { hint: `Venue responded slowly (${r.ms} ms) — orders may miss the touch.` } : {}),
+    };
+  }
+  const credentialProblem = httpStatus === 401 || httpStatus === 403 || retCode !== undefined;
+  const hint = credentialProblem
+    ? `${keySource} is rejected by ${venue}${retCode !== undefined ? ` (retCode ${retCode})` : ""}${
+        httpStatus !== undefined ? ` / HTTP ${httpStatus}` : ""
+      } — regenerate the key on Bybit ${venue}, grant Unified Trading (read + trade) permission, and update ${keySource} / ${
+        keySource === "BYBIT_TESTNET_API_KEY" ? "BYBIT_TESTNET_SECRET" : "BYBIT_SECRET"
+      }. Paper trading is unaffected.`
+    : `Cannot reach ${venue} at ${rest} — check outbound network / venue status. Paper trading is unaffected.`;
+  return {
+    id: "execution",
+    label: "Order execution",
+    // Rejected credentials only block LIVE orders — paper execution keeps
+    // running — so that is a degradation, not a full outage. A network
+    // failure to the venue is a real outage.
+    state: credentialProblem ? "degraded" : "down",
+    detail: `${venue} signed request failed — ${r.error}`,
+    latencyMs: r.ms,
+    target,
+    ...(httpStatus !== undefined ? { httpStatus } : {}),
+    hint,
+  };
 }
+
+/**
+ * Auth plane. Neon-local auth (`app_users` + LOCAL_AUTH_SECRET) is canonical;
+ * the Supabase JWT path is a fallback. Reports which planes can actually
+ * authenticate a sign-in right now, without touching any credential values.
+ */
+async function checkAuth(): Promise<HealthComponent> {
+  const { neonEnabled } = await import("@/lib/db/neon");
+  const neon = neonEnabled();
+  const explicitSecret = Boolean(process.env['LOCAL_AUTH_SECRET']?.trim());
+  const supabaseUrl = process.env['SUPABASE_URL'];
+  const supabaseKey = process.env['SUPABASE_PUBLISHABLE_KEY'];
+  const supabaseConfigured = Boolean(supabaseUrl && supabaseKey);
+
+  if (!neon) {
+    return {
+      id: "auth",
+      label: "Auth plane",
+      state: supabaseConfigured ? "degraded" : "down",
+      detail: supabaseConfigured
+        ? "Neon auth store unavailable — Supabase JWT fallback only"
+        : "No auth plane configured — sign-in is impossible",
+      hint: "Set DATABASE_URL so local auth (app_users) can verify sign-ins.",
+    };
+  }
+
+  const r = await timed(async () => {
+    const { getNeonSql } = await import("@/lib/db/neon");
+    const sql = getNeonSql();
+    const rows = (await sql`select count(*)::int as n from app_users`) as { n: number }[];
+    return rows[0]?.n ?? 0;
+  });
+  if (!r.ok) {
+    return {
+      id: "auth",
+      label: "Auth plane",
+      state: "down",
+      detail: `Neon auth store unreachable — ${r.error}`,
+      latencyMs: r.ms,
+      hint: "Verify DATABASE_URL and that the app_users table exists (src/lib/db/schema.sql).",
+    };
+  }
+  const tokens = explicitSecret ? "LOCAL_AUTH_SECRET" : "derived from DATABASE_URL";
+  // Supabase fallback is optional: absent is fine, misconfigured is worth flagging.
+  const supabaseNote = supabaseConfigured ? "Supabase fallback on" : "Supabase fallback off";
+  return {
+    id: "auth",
+    label: "Auth plane",
+    state: r.ms > 2000 ? "degraded" : "ok",
+    detail: `Neon local auth · ${r.value} user${r.value === 1 ? "" : "s"} · tokens ${tokens} · ${supabaseNote}`,
+    latencyMs: r.ms,
+    ...(r.ms > 2000 ? { hint: `Auth store responded slowly (${r.ms} ms).` } : {}),
+  };
+}
+
 
 /**
  * Redis. Upstash-style REST endpoints can be pinged from the edge runtime;
