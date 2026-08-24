@@ -85,7 +85,7 @@ describe("breakeven + trailing stop", () => {
 
   it("trails 1R behind the best price past +2.5R and never retreats", () => {
     const b = brokerWith();
-    seedLong(b);
+    seedLong(b, { takeProfit: 120 }); // far target so the trail, not TP, exits
     b.markPrice("TESTUSDT", 105.4, 2_000); // +2.7R → trail to 105.4 - 2
     expect(b.getPositions()[0].stopLoss).toBeCloseTo(103.4, 6);
     b.markPrice("TESTUSDT", 104, 3_000); // pullback must not lower the stop
@@ -94,7 +94,7 @@ describe("breakeven + trailing stop", () => {
 
   it("books a trailed exit as TRAIL, not SL", () => {
     const b = brokerWith();
-    seedLong(b);
+    seedLong(b, { takeProfit: 120 }); // far target so the trail, not TP, exits
     b.markPrice("TESTUSDT", 105.4, 2_000);
     b.markPrice("TESTUSDT", 103, 3_000); // through the trailed stop
     const closed = b.getClosed();
