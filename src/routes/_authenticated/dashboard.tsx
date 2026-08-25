@@ -68,6 +68,7 @@ import { SystemPanel, type DiscoveryHealth } from "@/components/SystemPanel";
 import { HealthCard, useHealthMonitor } from "@/components/HealthCard";
 import { EdgePanel } from "@/components/EdgePanel";
 import { ExecutionPanel } from "@/components/ExecutionPanel";
+import { BinanceDemoPanel } from "@/components/BinanceDemoPanel";
 import { FundingPanel } from "@/components/FundingPanel";
 import { ReviewProgress } from "@/components/ReviewProgress";
 import { ShadowPanel } from "@/components/ShadowPanel";
@@ -214,6 +215,7 @@ type Tab =
   | "shadow"
   | "grid"
   | "live"
+  | "demo"
   | "system";
 
 const EMPTY_EXEC_STATS: ExecutionStats = {
@@ -1165,6 +1167,7 @@ function SwarmDashboard() {
                 "shadow",
                 "grid",
                 "live",
+                "demo",
                 "system",
               ] as Tab[]
             ).map((t) => (
@@ -1227,6 +1230,8 @@ function SwarmDashboard() {
               riskAlerts={riskAlerts}
             />
           )}
+
+          {tab === "demo" && <BinanceDemoPanel />}
 
           {tab === "funding" && <FundingPanel funding={funding} regimeMix={regimeMix} />}
 

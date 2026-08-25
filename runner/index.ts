@@ -24,6 +24,7 @@ import {
 import { getGridExecutionMode, canPlaceGridOrders } from "./bybit-grid";
 import { GridRuntimeCoordinator } from "./grid-runtime";
 import { startHealthServer, type HealthStatus } from "./health";
+import { BinanceDemoCoordinator } from "./binance-runtime";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -180,6 +181,11 @@ async function main() {
   startHealthServer(HEALTH_PORT, () => health);
   console.log(`[runner] health endpoint on :${HEALTH_PORT}/health`);
 
+  // Binance demo (testnet) execution plane. Constructed after the engine, but
+  // referenced from the hooks below, so it starts as null and is assigned once
+  // the runtime exists — an open before start() simply stays paper-only.
+  let binanceDemo: BinanceDemoCoordinator | null = null;
+
   const runtime = createEngineRuntime({
     symbols,
     boot,
@@ -197,11 +203,16 @@ async function main() {
         health.status = "halted";
         console.warn(`[runner] HALTED: ${reason}`);
       },
-      onOpen: (p) => console.log(`[runner] OPEN  ${p.side} ${p.symbol} @ ${p.entryPrice}`),
-      onClose: (t) =>
+      onOpen: (p) => {
+        console.log(`[runner] OPEN  ${p.side} ${p.symbol} @ ${p.entryPrice}`);
+        binanceDemo?.onPaperOpen(p);
+      },
+      onClose: (t) => {
         console.log(
           `[runner] CLOSE ${t.side} ${t.symbol} @ ${t.exitPrice} pnl=$${t.pnl.toFixed(2)} (${t.reason})`,
-        ),
+        );
+        binanceDemo?.onPaperClose(t);
+      },
       onTick: (t) => {
         health.lastTickAt = Date.now();
 
@@ -233,6 +244,23 @@ async function main() {
         health.equity = DEFAULT_PAPER_CONFIG.startingBalance + s.realizedPnl;
         health.openPositions = s.positions.length;
         health.closedTrades = s.closed.length;
+        if (binanceDemo) {
+          const b = binanceDemo.getStatus();
+          health.binanceDemo = {
+            configured: b.configured,
+            enabled: b.enabled,
+            armed: b.armed,
+            ready: b.ready,
+            equity: b.equity,
+            openExchangePositions: b.openExchangePositions,
+            mirroredTrades: b.mirroredTrades,
+            submitFailures: b.submitFailures,
+            avgSlippageBps: b.avgSlippageBps,
+            keySource: b.keySource,
+            lastError: b.lastError,
+            lastHint: b.lastHint,
+          };
+        }
       },
     },
   });
@@ -241,6 +269,9 @@ async function main() {
   console.log("[runner] engine started");
 
   // The runner owns grid execution. The dashboard only writes intent.
+  binanceDemo = new BinanceDemoCoordinator(runtime, supabase, userId);
+  await binanceDemo.start();
+
   const gridCoordinator = new GridRuntimeCoordinator(runtime, userId);
   await gridCoordinator.start();
   console.log(`[grid] coordinator started (poll 2s, runner owns execution)`);
@@ -294,6 +325,7 @@ async function main() {
     clearInterval(statusLog);
     clearInterval(stallWatch);
     gridCoordinator.stop();
+    binanceDemo?.stop();
     runtime.stop();
     await upsertHeartbeat(supabase, userId, startedAt, {
       status: "stopped",
