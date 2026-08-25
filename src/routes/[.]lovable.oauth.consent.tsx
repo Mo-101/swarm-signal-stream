@@ -20,7 +20,7 @@ type OAuthApi = {
   ) => Promise<{ data: OAuthResult | null; error: { message: string } | null }>;
 };
 
-const oauth = () => (supabase.auth as unknown as { oauth: OAuthApi }).oauth;
+export const oauth = () => (supabase.auth as unknown as { oauth: OAuthApi }).oauth;
 
 export const Route = createFileRoute("/.lovable/oauth/consent")({
   ssr: false,
