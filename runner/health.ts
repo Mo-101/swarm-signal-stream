@@ -10,6 +10,25 @@ export interface HealthStatus {
   equity: number;
   openPositions: number;
   closedTrades: number;
+  /**
+   * Binance demo (testnet) execution plane. Reported so a deploy can verify
+   * the arm state without a DB round-trip. Never affects the healthy verdict:
+   * a blocked venue leaves paper trading fully functional.
+   */
+  binanceDemo?: {
+    configured: boolean;
+    enabled: boolean;
+    armed: boolean;
+    ready: boolean;
+    equity: number | null;
+    openExchangePositions: number;
+    mirroredTrades: number;
+    submitFailures: number;
+    avgSlippageBps: number | null;
+    keySource: string | null;
+    lastError: string | null;
+    lastHint: string | null;
+  };
 }
 
 export function startHealthServer(port: number, getStatus: () => HealthStatus): Server {
