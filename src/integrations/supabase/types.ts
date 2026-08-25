@@ -14,6 +14,93 @@ export type Database = {
   }
   public: {
     Tables: {
+      binance_demo_control: {
+        Row: {
+          armed: boolean
+          disarm_reason: string | null
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          armed?: boolean
+          disarm_reason?: string | null
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          armed?: boolean
+          disarm_reason?: string | null
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
+      binance_demo_orders: {
+        Row: {
+          created_at: string
+          error: string | null
+          exchange_order_id: string | null
+          fill_price: number | null
+          fill_qty: number | null
+          id: string
+          order_type: string
+          paper_price: number | null
+          phase: string
+          requested_price: number | null
+          requested_qty: number
+          side: string
+          slippage_bps: number | null
+          status: string
+          strategy_epoch: string
+          symbol: string
+          trade_id: string
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          error?: string | null
+          exchange_order_id?: string | null
+          fill_price?: number | null
+          fill_qty?: number | null
+          id?: string
+          order_type: string
+          paper_price?: number | null
+          phase: string
+          requested_price?: number | null
+          requested_qty: number
+          side: string
+          slippage_bps?: number | null
+          status?: string
+          strategy_epoch?: string
+          symbol: string
+          trade_id: string
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          error?: string | null
+          exchange_order_id?: string | null
+          fill_price?: number | null
+          fill_qty?: number | null
+          id?: string
+          order_type?: string
+          paper_price?: number | null
+          phase?: string
+          requested_price?: number | null
+          requested_qty?: number
+          side?: string
+          slippage_bps?: number | null
+          status?: string
+          strategy_epoch?: string
+          symbol?: string
+          trade_id?: string
+          updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
       paper_accounts: {
         Row: {
           created_at: string
