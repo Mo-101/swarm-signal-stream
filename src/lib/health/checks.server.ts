@@ -182,6 +182,94 @@ async function checkExecution(): Promise<HealthComponent> {
 }
 
 /**
+ * Binance demo (testnet) execution plane. The runner is what actually submits
+ * orders, so this probe reports configuration + venue reachability from the
+ * app's region and never blocks paper trading.
+ */
+async function checkBinanceDemo(): Promise<HealthComponent> {
+  const key = process.env['BINANCE_TESTNET_API_KEY']?.trim();
+  const secret = process.env['BINANCE_TESTNET_SECRET']?.trim();
+  const enabledRaw = (process.env['BINANCE_DEMO_ENABLED'] ?? "").trim().toLowerCase();
+  const enabled = ["1", "true", "yes", "on"].includes(enabledRaw);
+  const target = "https://testnet.binancefuture.com/fapi/v2/account";
+
+  if (!key || !secret) {
+    return {
+      id: "binance_demo",
+      label: "Binance demo (testnet)",
+      state: "skipped",
+      detail: "No Binance testnet credentials — Binance demo routing is off",
+      target,
+      hint: "Set BINANCE_TESTNET_API_KEY / BINANCE_TESTNET_SECRET, then BINANCE_DEMO_ENABLED=true on the runner.",
+    };
+  }
+
+  let httpStatus: number | undefined;
+  let blockedAtEdge = false;
+  let apiCode: number | undefined;
+  const r = await timed(async (signal) => {
+    const query = `recvWindow=10000&timestamp=${Date.now()}`;
+    const sign = await hmacHex(secret, query);
+    const res = await fetch(`${target}?${query}&signature=${sign}`, {
+      signal,
+      headers: { "X-MBX-APIKEY": key },
+    });
+    httpStatus = res.status;
+    const text = await res.text();
+    if (!res.ok) {
+      if (/cloudfront|request could not be satisfied|<html/i.test(text)) {
+        blockedAtEdge = true;
+        throw new Error(`blocked at the network edge (HTTP ${res.status})`);
+      }
+      try {
+        const body = JSON.parse(text) as { code?: number; msg?: string };
+        apiCode = body.code;
+        throw new Error(`${body.msg ?? "rejected"}${body.code !== undefined ? ` (code ${body.code})` : ""}`);
+      } catch (e) {
+        throw e instanceof Error ? e : new Error(`HTTP ${res.status}`);
+      }
+    }
+    const body = JSON.parse(text) as { totalWalletBalance?: string };
+    return parseFloat(body.totalWalletBalance ?? "0");
+  });
+
+  if (r.ok) {
+    return {
+      id: "binance_demo",
+      label: "Binance demo (testnet)",
+      state: enabled ? "ok" : "degraded",
+      detail: `Testnet account authenticated · equity $${r.value.toFixed(2)} · submission ${enabled ? "enabled" : "disabled"}`,
+      latencyMs: r.ms,
+      target,
+      ...(httpStatus !== undefined ? { httpStatus } : {}),
+      ...(enabled
+        ? {}
+        : { hint: "Credentials work but BINANCE_DEMO_ENABLED is off — the runner will not submit orders." }),
+    };
+  }
+
+  const hint = blockedAtEdge
+    ? "Not a key problem: Binance testnet refuses requests from this app's region at the CDN. The VPS runner is the execution path — check its /health output instead."
+    : apiCode === -2014 || apiCode === -2015
+      ? "BINANCE_TESTNET_API_KEY is rejected — regenerate a Futures Testnet key at testnet.binancefuture.com with Futures enabled and no IP whitelist."
+      : apiCode === -1022
+        ? "Signature mismatch — BINANCE_TESTNET_SECRET does not match the saved API key."
+        : "Could not reach Binance testnet from this region; the runner may still be able to.";
+
+  return {
+    id: "binance_demo",
+    label: "Binance demo (testnet)",
+    // Never "down": Binance demo is an optional mirror; paper keeps running.
+    state: "degraded",
+    detail: `Testnet probe failed — ${r.error}`,
+    latencyMs: r.ms,
+    target,
+    ...(httpStatus !== undefined ? { httpStatus } : {}),
+    hint,
+  };
+}
+
+/**
  * Auth plane. Neon-local auth (`app_users` + LOCAL_AUTH_SECRET) is canonical;
  * the Supabase JWT path is a fallback. Reports which planes can actually
  * authenticate a sign-in right now, without touching any credential values.
@@ -370,6 +458,7 @@ export async function runHealthChecks(): Promise<HealthReport> {
   const components = await Promise.all([
     checkStream(),
     checkExecution(),
+    checkBinanceDemo(),
     checkAuth(),
     checkRedis(),
     checkNats(),
