@@ -301,7 +301,8 @@ export const getBybitStatus = createServerFn({ method: "GET" })
         : {}),
     };
   } catch (e) {
-    const wrongVenue = await detectVenueMismatch(apiKey, apiSecret, env);
+    const wrongVenue = await detectVenueMismatch(apiKey, apiSecret, env).catch(() => null);
+
     const base = {
       configured: true as const,
       env,
