@@ -37,9 +37,18 @@ export const ingestSignals = createServerFn({ method: "POST" })
   .middleware([requireAuth])
   .inputValidator((input: { signals: SignalInput[] }) => input)
   .handler(async ({ data, context }) => {
-    const { ingestSignals: ingest } = await import("@/lib/db/edge-store.server");
-    return ingest(context.supabase, context.userId, data.signals);
+    // Persistence is best-effort: when neither Neon nor the Supabase mirror is
+    // reachable this must degrade to "nothing stored", never a 500 that blanks
+    // the dashboard.
+    try {
+      const { ingestSignals: ingest } = await import("@/lib/db/edge-store.server");
+      return await ingest(context.supabase, context.userId, data.signals);
+    } catch (e) {
+      console.error("[edge] ingestSignals failed:", e instanceof Error ? e.message : e);
+      return { inserted: 0 };
+    }
   });
+
 
 export const persistOpenTrade = createServerFn({ method: "POST" })
   .middleware([requireAuth])
