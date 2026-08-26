@@ -575,12 +575,24 @@ export interface RunnerHeartbeatRow {
 }
 
 export async function getRunnerHeartbeat(userId: string): Promise<RunnerHeartbeatRow | null> {
-  const sql = getNeonSqlOrNoop();
-  const rows = await sql`
-    SELECT status, equity, closed_trades, ticks_per_sec, shadow, started_at, last_seen_at
-    FROM runner_state WHERE user_id = ${userId}`;
-  const row = rows[0] as Record<string, unknown> | undefined;
+  let row: Record<string, unknown> | undefined;
+  if (!neonDataEnabled()) {
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { data } = await supabaseAdmin
+      .from("runner_state")
+      .select("status, equity, closed_trades, ticks_per_sec, shadow, started_at, last_seen_at")
+      .eq("user_id", userId)
+      .maybeSingle();
+    row = (data ?? undefined) as Record<string, unknown> | undefined;
+  } else {
+    const sql = getNeonSqlOrNoop();
+    const rows = await sql`
+      SELECT status, equity, closed_trades, ticks_per_sec, shadow, started_at, last_seen_at
+      FROM runner_state WHERE user_id = ${userId}`;
+    row = rows[0] as Record<string, unknown> | undefined;
+  }
   if (!row) return null;
+
   const parsedShadow =
     row.shadow === null || row.shadow === undefined
       ? null
