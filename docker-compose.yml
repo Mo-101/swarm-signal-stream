@@ -3,6 +3,7 @@
 #
 #   docker compose up -d --build        # build + run on the VPS
 #   docker compose logs -f              # watch both services' logs
+#   tail -f logs/runner.log             # persistent host-side logs
 #
 # All persistence is external (Neon canonical, Supabase mirror/fallback), so
 # the container itself is stateless and safe to rebuild/replace at any time.
@@ -14,6 +15,7 @@ services:
     image: alpha-swarm:latest
     container_name: alpha-swarm
     restart: always
+    stop_grace_period: 20s
     ports:
       - "8085:8080" # dashboard
       - "8090:8090" # runner health endpoint
@@ -24,3 +26,11 @@ services:
       - PORT=8080
       - HOST=0.0.0.0
       - HEALTH_PORT=8090
+      - LOG_DIR=/app/logs
+    volumes:
+      - ./logs:/app/logs
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
