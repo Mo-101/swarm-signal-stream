@@ -81,6 +81,12 @@ export const resetPaperAccount = createServerFn({ method: "POST" })
 export const getRunnerHeartbeat = createServerFn({ method: "GET" })
   .middleware([requireAuth])
   .handler(async ({ context }) => {
-    const { getRunnerHeartbeat: get } = await import("@/lib/db/edge-store.server");
-    return get(context.userId);
+    try {
+      const { getRunnerHeartbeat: get } = await import("@/lib/db/edge-store.server");
+      return await get(context.userId);
+    } catch (e) {
+      console.error("[edge] getRunnerHeartbeat failed:", e instanceof Error ? e.message : e);
+      return null;
+    }
   });
+
