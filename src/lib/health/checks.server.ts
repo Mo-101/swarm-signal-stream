@@ -159,13 +159,44 @@ async function checkExecution(): Promise<HealthComponent> {
     };
   }
   const credentialProblem = httpStatus === 401 || httpStatus === 403 || retCode !== undefined;
-  const hint = credentialProblem
+
+  // A very common mix-up: a MAINNET key saved into the testnet slot. Bybit
+  // answers both hosts with the same 401 shape, so classify it by asking the
+  // other venue read-only — that turns "bad key" into "wrong venue".
+  let wrongVenue = false;
+  if (credentialProblem && venue === "testnet") {
+    try {
+      const ts = String(Date.now());
+      const recv = "5000";
+      const query = "accountType=UNIFIED";
+      const sign = await hmacHex(secret, ts + key + recv + query);
+      const res = await fetch(`https://api.bybit.com/v5/account/wallet-balance?${query}`, {
+        headers: {
+          "X-BAPI-API-KEY": key,
+          "X-BAPI-TIMESTAMP": ts,
+          "X-BAPI-RECV-WINDOW": recv,
+          "X-BAPI-SIGN": sign,
+        },
+      });
+      if (res.ok) {
+        const b = (await res.json()) as { retCode?: number };
+        wrongVenue = b.retCode === 0;
+      }
+    } catch {
+      // Classification is best-effort; fall back to the generic hint.
+    }
+  }
+
+  const hint = wrongVenue
+    ? `${keySource} is a MAINNET key — it authenticates on api.bybit.com but not on testnet. Either create a key at testnet.bybit.com for ${keySource}, or move this pair to BYBIT_API_KEY / BYBIT_API_SECRET and set BYBIT_ENV=mainnet (real funds). Paper trading is unaffected.`
+    : credentialProblem
     ? `${keySource} is rejected by ${venue}${retCode !== undefined ? ` (retCode ${retCode})` : ""}${
         httpStatus !== undefined ? ` / HTTP ${httpStatus}` : ""
       } — regenerate the key on Bybit ${venue}, grant Unified Trading (read + trade) permission, and update ${keySource} / ${
         keySource === "BYBIT_TESTNET_API_KEY" ? "BYBIT_TESTNET_SECRET" : "BYBIT_SECRET"
       }. Paper trading is unaffected.`
     : `Cannot reach ${venue} at ${rest} — check outbound network / venue status. Paper trading is unaffected.`;
+
   return {
     id: "execution",
     label: "Order execution",
