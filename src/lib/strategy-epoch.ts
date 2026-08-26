@@ -19,3 +19,20 @@
  *      and the breakeven ratchet delayed to +1.5R with trailing from +2.5R.
  */
 export const STRATEGY_EPOCH = "v3";
+
+/**
+ * Epochs whose closed trades are allowed to teach the edge model.
+ *
+ * v2 is retired: its expectancy CI sat entirely below zero (n=43, −$7.82/trade,
+ * 25.6% win rate), so it is proven-negative evidence produced by rules we no
+ * longer run. v1 and v3 both show positive (if not yet proven) expectancy and
+ * comparable bracket geometry, so they are pooled for learning while new trades
+ * continue to be stamped with STRATEGY_EPOCH.
+ */
+export const LEARNING_EPOCHS = ["v1", "v3"] as const;
+
+/** Epochs excluded from learning and from the live scoreboard. */
+export const RETIRED_EPOCHS = ["v2"] as const;
+
+/** Comma-separated filter understood by the edge_report SQL function. */
+export const EDGE_EPOCH_FILTER = LEARNING_EPOCHS.join(",");

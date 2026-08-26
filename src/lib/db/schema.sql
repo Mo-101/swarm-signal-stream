@@ -227,7 +227,7 @@ AS $$
 WITH closed AS (
   SELECT * FROM paper_trades
   WHERE user_id = p_user_id AND status = 'closed' AND pnl IS NOT NULL
-    AND (p_epoch IS NULL OR strategy_epoch = p_epoch)
+    AND (p_epoch IS NULL OR strategy_epoch = ANY(string_to_array(p_epoch, ',')))
 ),
 agents AS (
   SELECT a.key AS name,

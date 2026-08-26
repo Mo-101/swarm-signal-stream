@@ -17,7 +17,7 @@ import type {
   CloseTradeInput,
   EngineBootState,
 } from "./types";
-import { STRATEGY_EPOCH } from "@/lib/strategy-epoch";
+import { STRATEGY_EPOCH, EDGE_EPOCH_FILTER } from "@/lib/strategy-epoch";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function mapTradeRow(row: any): StoredTrade {
@@ -67,7 +67,7 @@ export async function loadBootState(
   const closed = await sql`
     SELECT * FROM paper_trades WHERE user_id = ${userId} AND status = 'closed'
     ORDER BY closed_at DESC LIMIT 200`;
-  const reportRows = await sql`SELECT edge_report(${userId}, ${STRATEGY_EPOCH}) AS report`;
+  const reportRows = await sql`SELECT edge_report(${userId}, ${EDGE_EPOCH_FILTER}) AS report`;
   const signalCountRows =
     await sql`SELECT count(*)::int AS count FROM signals WHERE user_id = ${userId}`;
 
@@ -193,7 +193,7 @@ export async function persistCloseTrade(
     ON CONFLICT (user_id) DO UPDATE SET
       realized_pnl = EXCLUDED.realized_pnl, halted = EXCLUDED.halted, updated_at = now()`;
 
-  const reportRows = await sql`SELECT edge_report(${userId}, ${STRATEGY_EPOCH}) AS report`;
+  const reportRows = await sql`SELECT edge_report(${userId}, ${EDGE_EPOCH_FILTER}) AS report`;
   const report = (reportRows[0]?.report as EdgeReport | undefined) ?? EMPTY_EDGE_REPORT;
 
   return { report };
@@ -221,7 +221,7 @@ export async function resetPaperAccount(
     INSERT INTO paper_accounts (user_id, realized_pnl, halted, updated_at)
     VALUES (${userId}, 0, false, now())
     ON CONFLICT (user_id) DO UPDATE SET realized_pnl = 0, halted = false, updated_at = now()`;
-  const reportRows = await sql`SELECT edge_report(${userId}, ${STRATEGY_EPOCH}) AS report`;
+  const reportRows = await sql`SELECT edge_report(${userId}, ${EDGE_EPOCH_FILTER}) AS report`;
   const report = (reportRows[0]?.report as EdgeReport | undefined) ?? EMPTY_EDGE_REPORT;
 
   return { report };

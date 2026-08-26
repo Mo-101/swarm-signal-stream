@@ -10,7 +10,7 @@ import type {
   CloseTradeInput,
   EngineBootState,
 } from "./types";
-import { STRATEGY_EPOCH } from "@/lib/strategy-epoch";
+import { STRATEGY_EPOCH, EDGE_EPOCH_FILTER } from "@/lib/strategy-epoch";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type Sb = any;
@@ -41,7 +41,7 @@ export function mapSupabaseTradeRow(row: any): StoredTrade {
 
 export async function sbEdgeReport(supabase: Sb): Promise<EdgeReport> {
   // Scope learning to the current strategy generation.
-  const { data, error } = await supabase.rpc("edge_report", { p_epoch: STRATEGY_EPOCH });
+  const { data, error } = await supabase.rpc("edge_report", { p_epoch: EDGE_EPOCH_FILTER });
   if (error) {
     console.error("[supabase-store] edge_report failed:", error.message);
     return EMPTY_EDGE_REPORT;
