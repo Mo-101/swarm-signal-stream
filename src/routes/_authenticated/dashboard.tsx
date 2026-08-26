@@ -840,6 +840,7 @@ function SwarmDashboard() {
     if (runnerActive) return;
     brokerRef.current?.reset();
     setHalted(null);
+    if (!canPersist) return;
     void resetAccount({ data: { wipeHistory: false } })
       .then((res: { report: any }) => setEdgeReport(res.report ?? EMPTY_EDGE_REPORT))
       .catch((e: { message: any }) =>
