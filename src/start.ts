@@ -8,6 +8,12 @@ const errorMiddleware = createMiddleware().server(async ({ next }) => {
   try {
     return await next();
   } catch (error) {
+    // Authentication middleware deliberately throws a Response. Preserve it
+    // verbatim; converting it to the generic SSR fallback turns an expected
+    // 401 into a misleading 500/blank screen in server-function clients.
+    if (error instanceof Response) {
+      return error;
+    }
     if (error != null && typeof error === "object" && "statusCode" in error) {
       throw error;
     }
