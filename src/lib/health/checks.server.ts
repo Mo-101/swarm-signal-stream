@@ -520,6 +520,8 @@ export async function runHealthChecks(): Promise<HealthReport> {
     checkRedis(),
     checkNats(),
     checkDatabase(),
+    checkDaemon(),
+
   ]);
   const failing = failures(components);
   const report: HealthReport = {
