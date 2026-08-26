@@ -432,7 +432,64 @@ async function checkDatabase(): Promise<HealthComponent> {
       };
 }
 
-/** Fire-and-forget outbound alert when the report is not fully healthy. */
+/**
+ * Safety-net daemon. The VPS runner is the primary always-on engine; this
+ * reports whether the scheduled cloud watchdog has ticked recently, so a
+ * silent cron (unscheduled job, paused breaker) is visible instead of
+ * looking like calm markets.
+ */
+async function checkDaemon(): Promise<HealthComponent> {
+  const r = await timed(async () => {
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { data } = await supabaseAdmin
+      .from("daemon_state")
+      .select("last_run_at, last_status, paused, last_result")
+      .eq("id", "paper-watchdog")
+      .maybeSingle();
+    return data;
+  });
+  if (!r.ok) {
+    return {
+      id: "daemon",
+      label: "Safety-net daemon",
+      state: "degraded",
+      detail: `Daemon state unreadable — ${r.error}`,
+      latencyMs: r.ms,
+    };
+  }
+  const row = r.value;
+  if (!row?.last_run_at) {
+    return {
+      id: "daemon",
+      label: "Safety-net daemon",
+      state: "skipped",
+      detail: "Never ticked — cron schedule not installed yet",
+      hint: "Schedule a pg_cron job to POST /api/public/daemon/tick every minute.",
+    };
+  }
+  if (row.paused) {
+    return {
+      id: "daemon",
+      label: "Safety-net daemon",
+      state: "degraded",
+      detail: "Paused — the watchdog will not settle unattended positions",
+      hint: "Clear `paused` on the daemon_state row to resume.",
+    };
+  }
+  const ageMs = Date.now() - new Date(row.last_run_at as string).getTime();
+  const stale = ageMs > 5 * 60_000;
+  const summary = (row.last_result as { reason?: string } | null)?.reason ?? row.last_status;
+  return {
+    id: "daemon",
+    label: "Safety-net daemon",
+    state: stale || row.last_status === "error" ? "degraded" : "ok",
+    detail: `Last tick ${Math.round(ageMs / 1000)}s ago · ${summary}`,
+    latencyMs: r.ms,
+    ...(stale ? { hint: "No tick in over 5 minutes — check the pg_cron schedule." } : {}),
+  };
+}
+
+
 async function notify(report: HealthReport): Promise<void> {
   const hook = process.env['HEALTH_ALERT_WEBHOOK'];
   if (!hook || report.status === "ok") return;
