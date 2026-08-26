@@ -87,7 +87,7 @@ async function releaseLock(sb: Sb, result: DaemonTickResult): Promise<void> {
       id: LOCK_ID,
       locked_until: null,
       last_status: result.errors.length ? "error" : result.ran ? "ok" : "idle",
-      last_result: result as unknown as Record<string, unknown>,
+      last_result: JSON.parse(JSON.stringify(result)),
       consecutive_errors: result.errors.length ? 1 : 0,
       updated_at: new Date().toISOString(),
     },
