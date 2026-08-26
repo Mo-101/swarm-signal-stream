@@ -301,7 +301,8 @@ export const getBybitStatus = createServerFn({ method: "GET" })
         : {}),
     };
   } catch (e) {
-    const wrongVenue = await detectVenueMismatch(apiKey, apiSecret, env);
+    const wrongVenue = await detectVenueMismatch(apiKey, apiSecret, env).catch(() => null);
+
     const base = {
       configured: true as const,
       env,
@@ -557,8 +558,16 @@ export const getBybitPositions = createServerFn({ method: "GET" })
 export const getBybitHistory = createServerFn({ method: "GET" })
   .middleware([requireAuth])
   .handler(async ({ context }) => {
-    const { loadLiveTrades } = await import("@/lib/db/live-store.server");
-    const { closed } = await loadLiveTrades(context.supabase, context.userId, "bybit");
+    // Live-trade persistence is Neon-only; without DATABASE_URL it throws.
+    // Degrade to an empty book instead of a 500 that blanks the dashboard.
+    let closed: Awaited<ReturnType<typeof import("@/lib/db/live-store.server").loadLiveTrades>>["closed"] = [];
+    try {
+      const { loadLiveTrades } = await import("@/lib/db/live-store.server");
+      ({ closed } = await loadLiveTrades(context.supabase, context.userId, "bybit"));
+    } catch (e) {
+      console.error("[bybit] live history unavailable:", e instanceof Error ? e.message : e);
+    }
+
 
     // Bybit is the source of truth for real-money executions. Protective
     // stops and trailing stops can close a position on the exchange while
