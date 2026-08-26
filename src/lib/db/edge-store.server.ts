@@ -531,6 +531,27 @@ export async function upsertHeartbeat(
   startedAt: Date,
   fields: HeartbeatFields,
 ): Promise<void> {
+  // Neon is canonical when configured; otherwise the heartbeat must still
+  // land somewhere, or the dashboard and the cloud watchdog can never tell a
+  // live runner from a dead one.
+  if (!neonDataEnabled()) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const sb: any = _supabase ?? (await import("@/integrations/supabase/client.server")).supabaseAdmin;
+    await sb.from("runner_state").upsert(
+      {
+        user_id: userId,
+        status: fields.status,
+        equity: fields.equity,
+        closed_trades: fields.closedTrades,
+        ticks_per_sec: fields.ticksPerSec,
+        shadow: JSON.parse(JSON.stringify(fields.shadow)),
+        started_at: startedAt.toISOString(),
+        last_seen_at: new Date().toISOString(),
+      },
+      { onConflict: "user_id" },
+    );
+    return;
+  }
   const sql = getNeonSqlOrNoop();
   await sql`
     INSERT INTO runner_state (user_id, status, equity, closed_trades, ticks_per_sec, shadow, started_at, last_seen_at)
@@ -539,6 +560,7 @@ export async function upsertHeartbeat(
       status = EXCLUDED.status, equity = EXCLUDED.equity, closed_trades = EXCLUDED.closed_trades,
       ticks_per_sec = EXCLUDED.ticks_per_sec, shadow = EXCLUDED.shadow, last_seen_at = now()`;
 }
+
 
 // ── Runner heartbeat (read) ─────────────────────────────────────────────
 
@@ -553,12 +575,24 @@ export interface RunnerHeartbeatRow {
 }
 
 export async function getRunnerHeartbeat(userId: string): Promise<RunnerHeartbeatRow | null> {
-  const sql = getNeonSqlOrNoop();
-  const rows = await sql`
-    SELECT status, equity, closed_trades, ticks_per_sec, shadow, started_at, last_seen_at
-    FROM runner_state WHERE user_id = ${userId}`;
-  const row = rows[0] as Record<string, unknown> | undefined;
+  let row: Record<string, unknown> | undefined;
+  if (!neonDataEnabled()) {
+    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
+    const { data } = await supabaseAdmin
+      .from("runner_state")
+      .select("status, equity, closed_trades, ticks_per_sec, shadow, started_at, last_seen_at")
+      .eq("user_id", userId)
+      .maybeSingle();
+    row = (data ?? undefined) as Record<string, unknown> | undefined;
+  } else {
+    const sql = getNeonSqlOrNoop();
+    const rows = await sql`
+      SELECT status, equity, closed_trades, ticks_per_sec, shadow, started_at, last_seen_at
+      FROM runner_state WHERE user_id = ${userId}`;
+    row = rows[0] as Record<string, unknown> | undefined;
+  }
   if (!row) return null;
+
   const parsedShadow =
     row.shadow === null || row.shadow === undefined
       ? null

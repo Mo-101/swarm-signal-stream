@@ -101,6 +101,39 @@ export type Database = {
         }
         Relationships: []
       }
+      daemon_state: {
+        Row: {
+          consecutive_errors: number
+          id: string
+          last_result: Json | null
+          last_run_at: string | null
+          last_status: string | null
+          locked_until: string | null
+          paused: boolean
+          updated_at: string
+        }
+        Insert: {
+          consecutive_errors?: number
+          id: string
+          last_result?: Json | null
+          last_run_at?: string | null
+          last_status?: string | null
+          locked_until?: string | null
+          paused?: boolean
+          updated_at?: string
+        }
+        Update: {
+          consecutive_errors?: number
+          id?: string
+          last_result?: Json | null
+          last_run_at?: string | null
+          last_status?: string | null
+          locked_until?: string | null
+          paused?: boolean
+          updated_at?: string
+        }
+        Relationships: []
+      }
       paper_accounts: {
         Row: {
           created_at: string
@@ -244,6 +277,39 @@ export type Database = {
           symbol?: string
           take_profit?: number
           trigger_price?: number | null
+          user_id?: string
+        }
+        Relationships: []
+      }
+      runner_state: {
+        Row: {
+          closed_trades: number
+          equity: number
+          last_seen_at: string
+          shadow: Json | null
+          started_at: string
+          status: string
+          ticks_per_sec: number
+          user_id: string
+        }
+        Insert: {
+          closed_trades?: number
+          equity?: number
+          last_seen_at?: string
+          shadow?: Json | null
+          started_at?: string
+          status?: string
+          ticks_per_sec?: number
+          user_id: string
+        }
+        Update: {
+          closed_trades?: number
+          equity?: number
+          last_seen_at?: string
+          shadow?: Json | null
+          started_at?: string
+          status?: string
+          ticks_per_sec?: number
           user_id?: string
         }
         Relationships: []
