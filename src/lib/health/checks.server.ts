@@ -268,14 +268,14 @@ async function checkBinanceDemo(): Promise<HealthComponent> {
     return {
       id: "binance_demo",
       label: "Binance demo (testnet)",
-      state: enabled ? "ok" : "degraded",
-      detail: `Testnet account authenticated · equity $${r.value.toFixed(2)} · submission ${enabled ? "enabled" : "disabled"}`,
+      state: "ok",
+      detail: `Testnet account authenticated · equity $${r.value.toFixed(2)} · submission ${enabled ? "enabled" : "disabled by config"}`,
       latencyMs: r.ms,
       target,
       ...(httpStatus !== undefined ? { httpStatus } : {}),
       ...(enabled
         ? {}
-        : { hint: "Credentials work but BINANCE_DEMO_ENABLED is off — the runner will not submit orders." }),
+        : { hint: "Credentials work but BINANCE_DEMO_ENABLED is off — flip it on when you want the runner to mirror orders to Binance testnet. Paper trading is unaffected." }),
     };
   }
 
