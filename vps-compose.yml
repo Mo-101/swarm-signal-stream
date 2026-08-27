@@ -19,6 +19,9 @@ services:
       - PORT=8080
       - HOST=0.0.0.0
       - HEALTH_PORT=8090
+      - LOG_DIR=/app/logs
+    volumes:
+      - ./logs:/app/logs
     logging:
       driver: json-file
       options:
