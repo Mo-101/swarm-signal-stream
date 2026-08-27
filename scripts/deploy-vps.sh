@@ -18,6 +18,19 @@ if [[ ! -f .env ]]; then
   exit 1
 fi
 
+COMPOSE_FILE="docker-compose.prod.yml"
+[[ "$MODE" == "build" ]] && COMPOSE_FILE="docker-compose.yml"
+
+CONFIG_ERR="$(mktemp)"
+if ! docker compose -f "$COMPOSE_FILE" config >/dev/null 2>"$CONFIG_ERR"; then
+  echo "!! compose preflight failed before deploy." >&2
+  echo "!! Check .env: it must contain only KEY=value lines, blank lines, or # comments." >&2
+  sed -n '1,12p' "$CONFIG_ERR" >&2
+  rm -f "$CONFIG_ERR"
+  exit 1
+fi
+rm -f "$CONFIG_ERR"
+
 if [[ "$MODE" == "build" ]]; then
   echo "==> building locally"
   docker compose build --pull

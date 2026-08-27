@@ -37,10 +37,35 @@ stack, waits for both `http://localhost:8085/` and
 cd /opt/alpha-swarm && git pull && ./scripts/deploy-vps.sh
 ```
 
+## Verify after deploy
+
+```bash
+curl -s localhost:8090/health | jq
+curl -s localhost:8085/api/public/health | jq
+docker compose -f docker-compose.prod.yml ps
+tail -f logs/runner.log
+```
+
+The runner writes to both Docker stdout and `logs/runner.log` on the host.
+Dashboard logs are written to `logs/dashboard.log`. The supervisor rotates
+those app logs at 20 MB, and Compose also limits Docker's JSON logs.
+
+If deploy fails before the container starts with an `.env` or compose parse
+error, check that `.env` contains only valid environment entries:
+
+```bash
+KEY=value
+# comments are fine
+```
+
+Plain notes such as `schemas present: public, financial...` must be removed or
+commented out, because Compose parses them as environment keys.
+
 ## Day-to-day
 
 ```bash
 docker compose -f docker-compose.prod.yml logs -f          # both services
+tail -f logs/dashboard.log logs/runner.log                 # host-side app logs
 docker compose -f docker-compose.prod.yml restart          # bounce
 docker compose -f docker-compose.prod.yml down             # stop
 curl -s localhost:8090/health | jq                         # runner heartbeat
@@ -71,7 +96,7 @@ swarm.example.com {
 If the dashboard runs elsewhere and you only want the trading process:
 
 ```bash
-docker run -d --name alpha-swarm-runner --restart always \
-  --env-file runner/.env -p 8090:8090 \
-  ghcr.io/mo-101/swarm-signal-stream-runner:latest
+docker compose -f docker-compose.runner.yml up -d --build
+curl -s localhost:8090/health | jq
+tail -f logs/runner.log
 ```
