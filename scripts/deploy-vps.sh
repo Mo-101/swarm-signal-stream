@@ -1,21 +1,41 @@
 #!/usr/bin/env bash
 # One-shot VPS deploy for alpha-swarm (dashboard :8085 + runner health :8090).
 #
-#   ./scripts/deploy-vps.sh            # pull the published GHCR image and restart
-#   ./scripts/deploy-vps.sh --build    # build locally from this checkout instead
+#   ./scripts/deploy-vps.sh              # pull the published GHCR image and restart
+#   ./scripts/deploy-vps.sh --build      # build locally from this checkout instead
+#   ./scripts/deploy-vps.sh --no-schema  # skip the Neon schema apply step
 #
-# Requires: docker + docker compose v2, and a filled .env next to this repo
-# (copy .env.example). Nothing secret is baked into the image.
+# Requires docker + docker compose v2. Nothing secret is baked into the image
+# and nothing secret is printed by this script.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
 MODE="pull"
-[[ "${1:-}" == "--build" ]] && MODE="build"
+APPLY_SCHEMA=1
+for arg in "$@"; do
+  case "$arg" in
+    --build) MODE="build" ;;
+    --no-schema) APPLY_SCHEMA=0 ;;
+    *) echo "!! unknown flag: $arg" >&2; exit 2 ;;
+  esac
+done
+
+if [[ "$MODE" == "build" ]]; then
+  COMPOSE_FILE="docker-compose.yml"
+else
+  COMPOSE_FILE="docker-compose.prod.yml"
+fi
+COMPOSE=(docker compose -f "$COMPOSE_FILE")
+SERVICE="alpha-swarm"
+
+echo "==> preflight: $COMPOSE_FILE"
+"${COMPOSE[@]}" config -q
+
+mkdir -p logs
 
 if [[ ! -f .env ]]; then
-  echo "!! .env missing — cp .env.example .env and fill it in first." >&2
-  exit 1
+  echo "-- note: no .env in $(pwd) — relying on environment injected by the host/panel."
 fi
 
 COMPOSE_FILE="docker-compose.prod.yml"
@@ -32,27 +52,42 @@ fi
 rm -f "$CONFIG_ERR"
 
 if [[ "$MODE" == "build" ]]; then
-  echo "==> building locally"
-  docker compose build --pull
-  docker compose up -d
-  COMPOSE="docker compose"
+  echo "==> building image locally"
+  "${COMPOSE[@]}" build --pull
 else
   echo "==> pulling ghcr.io/mo-101/swarm-signal-stream:latest"
-  docker compose -f docker-compose.prod.yml pull
-  docker compose -f docker-compose.prod.yml up -d
-  COMPOSE="docker compose -f docker-compose.prod.yml"
+  "${COMPOSE[@]}" pull
 fi
 
-echo "==> waiting for health"
-for i in $(seq 1 60); do
-  if curl -sf -o /dev/null http://localhost:8085/ && curl -sf -o /dev/null http://localhost:8090/health; then
-    echo "==> healthy: dashboard http://localhost:8085  runner http://localhost:8090/health"
+if [[ "$APPLY_SCHEMA" == "1" ]]; then
+  echo "==> applying Neon schema (idempotent)"
+  if ! "${COMPOSE[@]}" run --rm --no-deps --entrypoint node "$SERVICE" \
+      scripts/apply-schema.mjs src/lib/db/schema.sql; then
+    echo "!! schema apply failed — aborting before restart." >&2
+    exit 1
+  fi
+fi
+
+echo "==> restarting stack"
+"${COMPOSE[@]}" up -d
+
+echo "==> waiting for health (up to 180s)"
+for _ in $(seq 1 90); do
+  if curl -sf -o /dev/null http://localhost:8090/health \
+     && curl -sf -o /dev/null http://localhost:8085/api/public/health; then
+    echo "==> healthy"
+    echo "    dashboard   http://localhost:8085"
+    echo "    dash health http://localhost:8085/api/public/health"
+    echo "    runner      http://localhost:8090/health"
+    echo "    logs        tail -f logs/runner.log"
     docker image prune -f >/dev/null 2>&1 || true
     exit 0
   fi
   sleep 2
 done
 
-echo "!! not healthy after 120s — recent logs:" >&2
-$COMPOSE logs --tail=60
+echo "!! not healthy after 180s — diagnostics below (no secrets are printed):" >&2
+"${COMPOSE[@]}" ps || true
+"${COMPOSE[@]}" logs --tail=80 || true
+[[ -f logs/runner.log ]] && { echo "---- logs/runner.log (tail) ----"; tail -n 40 logs/runner.log; }
 exit 1
