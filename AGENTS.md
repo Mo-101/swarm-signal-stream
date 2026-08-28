@@ -33,9 +33,10 @@
   `docker/supervisor.mjs`): `docker compose up -d --build`. Ports 8085→8080
   (dashboard), 8090 (runner health). Secrets come from `.env` via compose
   `env_file` and are excluded from the image by `.dockerignore`.
-- Apply Neon schema: `node .scratch-apply-schema.mjs src/lib/db/schema.sql`
-  with `DATABASE_URL` set (note: it drops statements that *start* with a
-  comment line, and splits on `;` even inside comments).
+- Apply Neon schema: `node scripts/apply-schema.mjs src/lib/db/schema.sql`
+  with `DATABASE_URL` set. Idempotent, comment/dollar-quote safe, verifies
+  `public.edge_report` exists afterwards, and no-ops when `DATABASE_URL` is
+  unset. `scripts/deploy-vps.sh` runs it automatically on every deploy.
 
 ## Environment quirks
 

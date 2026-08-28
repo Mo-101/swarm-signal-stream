@@ -470,6 +470,21 @@ async function checkDatabase(): Promise<HealthComponent> {
  * looking like calm markets.
  */
 async function checkDaemon(): Promise<HealthComponent> {
+  // Supabase is a fallback mirror only. When it isn't configured, the cloud
+  // watchdog simply doesn't exist — the VPS runner is the primary engine — so
+  // this is "not configured", never a degradation that pages the webhook.
+  const supabaseConfigured = Boolean(
+    process.env['SUPABASE_URL'] &&
+      (process.env['SUPABASE_SERVICE_ROLE_KEY'] || process.env['SUPABASE_PUBLISHABLE_KEY']),
+  );
+  if (!supabaseConfigured) {
+    return {
+      id: "daemon",
+      label: "Safety-net daemon",
+      state: "skipped",
+      detail: "Supabase fallback not configured — the VPS runner is the primary engine",
+    };
+  }
   const r = await timed(async () => {
     const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
     const { data } = await supabaseAdmin
