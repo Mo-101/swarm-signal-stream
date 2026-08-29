@@ -415,7 +415,9 @@ export const DEFAULT_PAPER_CONFIG: PaperConfig = {
   breakevenAtR: 1.5,
   trailStartR: 2.5,
   trailDistanceR: 1,
-  maxHoldMs: envNum("MAX_HOLD_HOURS", 8, 0.25, 240) * 3_600_000,
+  // Keep paper-review turnover moving: risk exits remain immediate, while
+  // positions that hit neither SL nor TP are released after one hour.
+  maxHoldMs: envNum("MAX_HOLD_HOURS", 1, 0.5, 240) * 3_600_000,
   maxFundingShareOfReward: 0.35,
   maxSameSide: envNum("MAX_SAME_SIDE", 3, 1, 50),
   cooldownAfterStopMs: envNum("COOLDOWN_MINUTES", 45, 0, 1440) * 60_000,
