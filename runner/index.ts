@@ -82,17 +82,12 @@ const HEALTH_PORT = Number(process.env.HEALTH_PORT ?? 8090);
 const TICK_STALL_EXIT_MS = Number(process.env.TICK_STALL_EXIT_MS ?? 5 * 60_000);
 
 async function main() {
-  // Neon and Supabase run simultaneously: Neon (DATABASE_URL) is the login
-  // store, Supabase holds the trade data unless DATA_STORE=neon. Supabase
-  // creds are always required; Neon is optional (Supabase auth then acts as
-  // the fallback login path).
-  requireEnv("SUPABASE_URL");
-  requireEnv("SUPABASE_PUBLISHABLE_KEY");
-  const dataStore = (process.env.DATA_STORE ?? "supabase").toLowerCase();
+  // Neon (DATABASE_URL) is the canonical login and trade-data store.
+  // Supabase variables are accepted only for explicit legacy mirroring and
+  // are never required for the VPS runner.
+  const dataStore = (process.env.DATA_STORE ?? "neon").toLowerCase();
   if (!process.env.DATABASE_URL) {
-    console.warn(
-      "[runner] DATABASE_URL not set — Neon login disabled, falling back to Supabase auth.",
-    );
+    throw new Error("Missing DATABASE_URL — Neon is required by the VPS runner.");
   } else {
     console.log("[runner] Neon login enabled.");
   }

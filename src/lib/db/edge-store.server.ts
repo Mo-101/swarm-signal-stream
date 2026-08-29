@@ -1,6 +1,5 @@
-// Trade/edge data layer. Supabase is the default database; set DATA_STORE=neon
-// to route reads/writes through Neon (DATABASE_URL) instead. Neon stays the
-// canonical auth store either way.
+// Trade/edge data layer. Neon (DATABASE_URL) is canonical. Supabase is a
+// legacy fallback only when DATA_STORE=supabase is selected explicitly.
 //
 // Server-only (imports the Neon client, which reads process.env.DATABASE_URL)
 // — dynamically import this from edge.functions.ts handlers, same convention
@@ -536,7 +535,8 @@ export async function upsertHeartbeat(
   // live runner from a dead one.
   if (!neonDataEnabled()) {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const sb: any = _supabase ?? (await import("@/integrations/supabase/client.server")).supabaseAdmin;
+    const sb: any =
+      _supabase ?? (await import("@/integrations/supabase/client.server")).supabaseAdmin;
     await sb.from("runner_state").upsert(
       {
         user_id: userId,
@@ -560,7 +560,6 @@ export async function upsertHeartbeat(
       status = EXCLUDED.status, equity = EXCLUDED.equity, closed_trades = EXCLUDED.closed_trades,
       ticks_per_sec = EXCLUDED.ticks_per_sec, shadow = EXCLUDED.shadow, last_seen_at = now()`;
 }
-
 
 // ── Runner heartbeat (read) ─────────────────────────────────────────────
 

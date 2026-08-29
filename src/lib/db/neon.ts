@@ -54,11 +54,11 @@ export function getNeonSqlOrNoop(): NeonQueryFunction<false, false> {
 }
 
 /**
- * Data-plane switch. Neon is always the auth store (app_users) when
- * DATABASE_URL is set; trade/edge data lives in Supabase by default so both
- * run simultaneously. Set DATA_STORE=neon to move trade data to Neon too.
+ * Data-plane switch. Neon is the canonical auth and trade/edge store whenever
+ * DATABASE_URL is set. Supabase is legacy compatibility only and must be
+ * selected explicitly with DATA_STORE=supabase.
  */
 export function neonDataEnabled(): boolean {
-  const target = (process.env.DATA_STORE ?? "supabase").trim().toLowerCase();
-  return target === "neon" && neonEnabled();
+  const target = (process.env.DATA_STORE ?? "neon").trim().toLowerCase();
+  return target !== "supabase" && neonEnabled();
 }

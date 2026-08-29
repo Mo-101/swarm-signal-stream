@@ -3,14 +3,16 @@
 // blocked by import protection).
 import { failures, rollup, type HealthComponent, type HealthReport } from "./types";
 
-
 const PROBE_TIMEOUT_MS = 4000;
 
-async function timed<T>(fn: (signal: AbortSignal) => Promise<T>): Promise<{
-  ok: true;
-  value: T;
-  ms: number;
-} | { ok: false; error: string; ms: number }> {
+async function timed<T>(fn: (signal: AbortSignal) => Promise<T>): Promise<
+  | {
+      ok: true;
+      value: T;
+      ms: number;
+    }
+  | { ok: false; error: string; ms: number }
+> {
   const started = Date.now();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), PROBE_TIMEOUT_MS);
@@ -30,9 +32,8 @@ async function timed<T>(fn: (signal: AbortSignal) => Promise<T>): Promise<{
 }
 
 function bybitBase(): { rest: string; venue: string } {
-  const venue = (process.env['BYBIT_ENV'] ?? "testnet").toLowerCase() === "mainnet"
-    ? "mainnet"
-    : "testnet";
+  const venue =
+    (process.env["BYBIT_ENV"] ?? "testnet").toLowerCase() === "mainnet" ? "mainnet" : "testnet";
   return {
     rest: venue === "mainnet" ? "https://api.bybit.com" : "https://api-testnet.bybit.com",
     venue,
@@ -101,9 +102,9 @@ async function hmacHex(secret: string, msg: string): Promise<string> {
  * the key, the signature and the account type all still work.
  */
 async function checkExecution(): Promise<HealthComponent> {
-  const testnetKey = process.env['BYBIT_TESTNET_API_KEY'];
-  const key = testnetKey || process.env['BYBIT_API_KEY'];
-  const secret = process.env['BYBIT_TESTNET_SECRET'] || process.env['BYBIT_SECRET'];
+  const testnetKey = process.env["BYBIT_TESTNET_API_KEY"];
+  const key = testnetKey || process.env["BYBIT_API_KEY"];
+  const secret = process.env["BYBIT_TESTNET_SECRET"] || process.env["BYBIT_SECRET"];
   const keySource = testnetKey ? "BYBIT_TESTNET_API_KEY" : "BYBIT_API_KEY";
   const { rest, venue } = bybitBase();
   const target = `${rest}/v5/account/wallet-balance`;
@@ -155,7 +156,9 @@ async function checkExecution(): Promise<HealthComponent> {
       latencyMs: r.ms,
       target,
       ...(httpStatus !== undefined ? { httpStatus } : {}),
-      ...(r.ms > 2000 ? { hint: `Venue responded slowly (${r.ms} ms) — orders may miss the touch.` } : {}),
+      ...(r.ms > 2000
+        ? { hint: `Venue responded slowly (${r.ms} ms) — orders may miss the touch.` }
+        : {}),
     };
   }
   const credentialProblem = httpStatus === 401 || httpStatus === 403 || retCode !== undefined;
@@ -190,12 +193,12 @@ async function checkExecution(): Promise<HealthComponent> {
   const hint = wrongVenue
     ? `${keySource} is a MAINNET key — it authenticates on api.bybit.com but not on testnet. Either create a key at testnet.bybit.com for ${keySource}, or move this pair to BYBIT_API_KEY / BYBIT_API_SECRET and set BYBIT_ENV=mainnet (real funds). Paper trading is unaffected.`
     : credentialProblem
-    ? `${keySource} is rejected by ${venue}${retCode !== undefined ? ` (retCode ${retCode})` : ""}${
-        httpStatus !== undefined ? ` / HTTP ${httpStatus}` : ""
-      } — regenerate the key on Bybit ${venue}, grant Unified Trading (read + trade) permission, and update ${keySource} / ${
-        keySource === "BYBIT_TESTNET_API_KEY" ? "BYBIT_TESTNET_SECRET" : "BYBIT_SECRET"
-      }. Paper trading is unaffected.`
-    : `Cannot reach ${venue} at ${rest} — check outbound network / venue status. Paper trading is unaffected.`;
+      ? `${keySource} is rejected by ${venue}${retCode !== undefined ? ` (retCode ${retCode})` : ""}${
+          httpStatus !== undefined ? ` / HTTP ${httpStatus}` : ""
+        } — regenerate the key on Bybit ${venue}, grant Unified Trading (read + trade) permission, and update ${keySource} / ${
+          keySource === "BYBIT_TESTNET_API_KEY" ? "BYBIT_TESTNET_SECRET" : "BYBIT_SECRET"
+        }. Paper trading is unaffected.`
+      : `Cannot reach ${venue} at ${rest} — check outbound network / venue status. Paper trading is unaffected.`;
 
   return {
     id: "execution",
@@ -218,9 +221,9 @@ async function checkExecution(): Promise<HealthComponent> {
  * app's region and never blocks paper trading.
  */
 async function checkBinanceDemo(): Promise<HealthComponent> {
-  const key = process.env['BINANCE_TESTNET_API_KEY']?.trim();
-  const secret = process.env['BINANCE_TESTNET_SECRET']?.trim();
-  const enabledRaw = (process.env['BINANCE_DEMO_ENABLED'] ?? "").trim().toLowerCase();
+  const key = process.env["BINANCE_TESTNET_API_KEY"]?.trim();
+  const secret = process.env["BINANCE_TESTNET_SECRET"]?.trim();
+  const enabledRaw = (process.env["BINANCE_DEMO_ENABLED"] ?? "").trim().toLowerCase();
   const enabled = ["1", "true", "yes", "on"].includes(enabledRaw);
   const target = "https://testnet.binancefuture.com/fapi/v2/account";
 
@@ -255,7 +258,9 @@ async function checkBinanceDemo(): Promise<HealthComponent> {
       try {
         const body = JSON.parse(text) as { code?: number; msg?: string };
         apiCode = body.code;
-        throw new Error(`${body.msg ?? "rejected"}${body.code !== undefined ? ` (code ${body.code})` : ""}`);
+        throw new Error(
+          `${body.msg ?? "rejected"}${body.code !== undefined ? ` (code ${body.code})` : ""}`,
+        );
       } catch (e) {
         throw e instanceof Error ? e : new Error(`HTTP ${res.status}`);
       }
@@ -275,7 +280,9 @@ async function checkBinanceDemo(): Promise<HealthComponent> {
       ...(httpStatus !== undefined ? { httpStatus } : {}),
       ...(enabled
         ? {}
-        : { hint: "Credentials work but BINANCE_DEMO_ENABLED is off — flip it on when you want the runner to mirror orders to Binance testnet. Paper trading is unaffected." }),
+        : {
+            hint: "Credentials work but BINANCE_DEMO_ENABLED is off — flip it on when you want the runner to mirror orders to Binance testnet. Paper trading is unaffected.",
+          }),
     };
   }
 
@@ -301,26 +308,20 @@ async function checkBinanceDemo(): Promise<HealthComponent> {
 }
 
 /**
- * Auth plane. Neon-local auth (`app_users` + LOCAL_AUTH_SECRET) is canonical;
- * the Supabase JWT path is a fallback. Reports which planes can actually
- * authenticate a sign-in right now, without touching any credential values.
+ * Auth plane. Neon-local auth (`app_users` + LOCAL_AUTH_SECRET) is canonical.
+ * This probe intentionally ignores legacy Supabase variables: they are not
+ * part of the Alpha Swarm VPS runtime and must never affect its health.
  */
 async function checkAuth(): Promise<HealthComponent> {
   const { neonEnabled } = await import("@/lib/db/neon");
   const neon = neonEnabled();
-  const explicitSecret = Boolean(process.env['LOCAL_AUTH_SECRET']?.trim());
-  const supabaseUrl = process.env['SUPABASE_URL'];
-  const supabaseKey = process.env['SUPABASE_PUBLISHABLE_KEY'];
-  const supabaseConfigured = Boolean(supabaseUrl && supabaseKey);
-
+  const explicitSecret = Boolean(process.env["LOCAL_AUTH_SECRET"]?.trim());
   if (!neon) {
     return {
       id: "auth",
       label: "Auth plane",
-      state: supabaseConfigured ? "degraded" : "down",
-      detail: supabaseConfigured
-        ? "Neon auth store unavailable — Supabase JWT fallback only"
-        : "No auth plane configured — sign-in is impossible",
+      state: "down",
+      detail: "Neon auth store unavailable — sign-in is impossible",
       hint: "Set DATABASE_URL so local auth (app_users) can verify sign-ins.",
     };
   }
@@ -342,18 +343,15 @@ async function checkAuth(): Promise<HealthComponent> {
     };
   }
   const tokens = explicitSecret ? "LOCAL_AUTH_SECRET" : "derived from DATABASE_URL";
-  // Supabase fallback is optional: absent is fine, misconfigured is worth flagging.
-  const supabaseNote = supabaseConfigured ? "Supabase fallback on" : "Supabase fallback off";
   return {
     id: "auth",
     label: "Auth plane",
     state: r.ms > 2000 ? "degraded" : "ok",
-    detail: `Neon local auth · ${r.value} user${r.value === 1 ? "" : "s"} · tokens ${tokens} · ${supabaseNote}`,
+    detail: `Neon local auth · ${r.value} user${r.value === 1 ? "" : "s"} · tokens ${tokens}`,
     latencyMs: r.ms,
     ...(r.ms > 2000 ? { hint: `Auth store responded slowly (${r.ms} ms).` } : {}),
   };
 }
-
 
 /**
  * Redis. Upstash-style REST endpoints can be pinged from the edge runtime;
@@ -361,9 +359,9 @@ async function checkAuth(): Promise<HealthComponent> {
  * configured-but-unverified rather than faked as healthy.
  */
 async function checkRedis(): Promise<HealthComponent> {
-  const restUrl = process.env['UPSTASH_REDIS_REST_URL'];
-  const restToken = process.env['UPSTASH_REDIS_REST_TOKEN'];
-  const raw = process.env['REDIS_URL'];
+  const restUrl = process.env["UPSTASH_REDIS_REST_URL"];
+  const restToken = process.env["UPSTASH_REDIS_REST_TOKEN"];
+  const raw = process.env["REDIS_URL"];
   if (!restUrl || !restToken) {
     return {
       id: "redis",
@@ -397,8 +395,8 @@ async function checkRedis(): Promise<HealthComponent> {
 
 /** NATS via its HTTP monitoring port (`/healthz` on :8222 by default). */
 async function checkNats(): Promise<HealthComponent> {
-  const monitor = process.env['NATS_MONITOR_URL'];
-  const nats = process.env['NATS_URL'];
+  const monitor = process.env["NATS_MONITOR_URL"];
+  const nats = process.env["NATS_URL"];
   if (!monitor) {
     return {
       id: "nats",
@@ -425,25 +423,26 @@ async function checkNats(): Promise<HealthComponent> {
     : { id: "nats", label: "NATS", state: "down", detail: r.error, latencyMs: r.ms };
 }
 
-/** Trade database (the Supabase data plane) plus the Neon auth plane flag. */
+/** Canonical Neon trade database. Performs a read-only schema/count probe. */
 async function checkDatabase(): Promise<HealthComponent> {
-  const url = process.env['SUPABASE_URL'];
-  const key = process.env['SUPABASE_PUBLISHABLE_KEY'];
-  const neon = !!process.env['DATABASE_URL'];
-  if (!url || !key) {
+  const { neonEnabled } = await import("@/lib/db/neon");
+  if (!neonEnabled()) {
     return {
       id: "database",
       label: "Trade database",
       state: "down",
-      detail: "Backend URL/key not configured — trades cannot persist",
+      detail: "Neon DATABASE_URL not configured — trades cannot persist",
     };
   }
-  const r = await timed(async (signal) => {
-    const res = await fetch(`${url.replace(/\/$/, "")}/rest/v1/`, {
-      signal,
-      headers: { apikey: key },
-    });
-    if (res.status >= 500) throw new Error(`HTTP ${res.status}`);
+  const r = await timed(async () => {
+    const { getNeonSql } = await import("@/lib/db/neon");
+    const sql = getNeonSql();
+    const rows = (await sql`
+      select
+        to_regclass('public.paper_trades') is not null as trades,
+        to_regclass('public.signals') is not null as signals
+    `) as { trades: boolean; signals: boolean }[];
+    if (!rows[0]?.trades || !rows[0]?.signals) throw new Error("required trade tables missing");
     return true;
   });
   return r.ok
@@ -451,93 +450,33 @@ async function checkDatabase(): Promise<HealthComponent> {
         id: "database",
         label: "Trade database",
         state: r.ms > 2000 ? "degraded" : "ok",
-        detail: `Data API reachable · auth plane ${neon ? "Neon" : "local"}`,
+        detail: "Neon reachable · paper_trades and signals loaded",
         latencyMs: r.ms,
       }
     : {
         id: "database",
         label: "Trade database",
         state: "down",
-        detail: `Data API unreachable — ${r.error}`,
+        detail: `Neon unreachable — ${r.error}`,
         latencyMs: r.ms,
       };
 }
 
 /**
- * Safety-net daemon. The VPS runner is the primary always-on engine; this
- * reports whether the scheduled cloud watchdog has ticked recently, so a
- * silent cron (unscheduled job, paused breaker) is visible instead of
- * looking like calm markets.
+ * The VPS runner is the only always-on engine. The old Supabase pg_cron
+ * watchdog is deliberately not part of this deployment.
  */
 async function checkDaemon(): Promise<HealthComponent> {
-  // Supabase is a fallback mirror only. When it isn't configured, the cloud
-  // watchdog simply doesn't exist — the VPS runner is the primary engine — so
-  // this is "not configured", never a degradation that pages the webhook.
-  const supabaseConfigured = Boolean(
-    process.env['SUPABASE_URL'] &&
-      (process.env['SUPABASE_SERVICE_ROLE_KEY'] || process.env['SUPABASE_PUBLISHABLE_KEY']),
-  );
-  if (!supabaseConfigured) {
-    return {
-      id: "daemon",
-      label: "Safety-net daemon",
-      state: "skipped",
-      detail: "Supabase fallback not configured — the VPS runner is the primary engine",
-    };
-  }
-  const r = await timed(async () => {
-    const { supabaseAdmin } = await import("@/integrations/supabase/client.server");
-    const { data } = await supabaseAdmin
-      .from("daemon_state")
-      .select("last_run_at, last_status, paused, last_result")
-      .eq("id", "paper-watchdog")
-      .maybeSingle();
-    return data;
-  });
-  if (!r.ok) {
-    return {
-      id: "daemon",
-      label: "Safety-net daemon",
-      state: "degraded",
-      detail: `Daemon state unreadable — ${r.error}`,
-      latencyMs: r.ms,
-    };
-  }
-  const row = r.value;
-  if (!row?.last_run_at) {
-    return {
-      id: "daemon",
-      label: "Safety-net daemon",
-      state: "skipped",
-      detail: "Never ticked — cron schedule not installed yet",
-      hint: "Schedule a pg_cron job to POST /api/public/daemon/tick every minute.",
-    };
-  }
-  if (row.paused) {
-    return {
-      id: "daemon",
-      label: "Safety-net daemon",
-      state: "degraded",
-      detail: "Paused — the watchdog will not settle unattended positions",
-      hint: "Clear `paused` on the daemon_state row to resume.",
-    };
-  }
-  const ageMs = Date.now() - new Date(row.last_run_at as string).getTime();
-  const stale = ageMs > 5 * 60_000;
-  const summary = (row.last_result as { reason?: string } | null)?.reason ?? row.last_status;
   return {
     id: "daemon",
-    label: "Safety-net daemon",
-    state: stale || row.last_status === "error" ? "degraded" : "ok",
-    detail: `Last tick ${Math.round(ageMs / 1000)}s ago · ${summary}`,
-    latencyMs: r.ms,
-    ...(stale ? { hint: "No tick in over 5 minutes — check the pg_cron schedule." } : {}),
+    label: "VPS engine",
+    state: "skipped",
+    detail: "Runner health is supervised at :8090/health; no Supabase daemon is used",
   };
 }
 
-
 async function notify(report: HealthReport): Promise<void> {
-  const hook = process.env['HEALTH_ALERT_WEBHOOK'];
+  const hook = process.env["HEALTH_ALERT_WEBHOOK"];
   if (!hook || report.status === "ok") return;
   const failing = report.components.filter((c) => c.state === "down" || c.state === "degraded");
   try {
@@ -567,7 +506,6 @@ export async function runHealthChecks(): Promise<HealthReport> {
     checkNats(),
     checkDatabase(),
     checkDaemon(),
-
   ]);
   const failing = failures(components);
   const report: HealthReport = {
@@ -583,4 +521,3 @@ export async function runHealthChecks(): Promise<HealthReport> {
   await notify(report);
   return report;
 }
-
