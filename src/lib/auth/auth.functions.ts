@@ -20,6 +20,11 @@ function validateCredentials(input: Credentials): Credentials {
 export const localSignIn = createServerFn({ method: "POST" })
   .inputValidator(validateCredentials)
   .handler(async ({ data }) => {
+    const { neonEnabled } = await import("@/lib/db/neon");
+    if (!neonEnabled()) {
+      const { signInFallback } = await import("./fallback-auth.server");
+      return signInFallback(data.email, data.password);
+    }
     const { signInLocal } = await import("./local-auth.server");
     return signInLocal(data.email, data.password);
   });
@@ -27,9 +32,15 @@ export const localSignIn = createServerFn({ method: "POST" })
 export const localSignUp = createServerFn({ method: "POST" })
   .inputValidator(validateCredentials)
   .handler(async ({ data }) => {
+    const { neonEnabled } = await import("@/lib/db/neon");
+    if (!neonEnabled()) {
+      const { signUpFallback } = await import("./fallback-auth.server");
+      return signUpFallback(data.email, data.password);
+    }
     const { signUpLocal } = await import("./local-auth.server");
     return signUpLocal(data.email, data.password);
   });
+
 
 // Requires a valid (Supabase) session — the mirrored id comes from the
 // verified token, never from client input.
