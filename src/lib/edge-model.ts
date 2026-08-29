@@ -66,7 +66,6 @@ export const EMPTY_EDGE_REPORT: EdgeReport = {
   confidence: [],
 };
 
-
 export function confBucket(confidence: number): string {
   const c = Math.max(0, Math.min(1, confidence));
   if (c < 0.6) return "0.5-0.6";
@@ -96,6 +95,8 @@ export function winRate(row: { trades: number; wins: number }): number {
  */
 export const MIN_BUCKET_SAMPLE = 20;
 const MIN_SAMPLE = MIN_BUCKET_SAMPLE;
+/** Do not let learned thresholds starve the agreed 100-trade review run. */
+export const MIN_CONFIDENCE_CALIBRATION_SAMPLE = 100;
 
 export type TrustLevel = "none" | "low" | "medium" | "high";
 
@@ -106,7 +107,6 @@ export function trustLevel(sample: number): TrustLevel {
   if (sample < MIN_BUCKET_SAMPLE * 6) return "medium";
   return "high";
 }
-
 
 /**
  * Learned weights derived from realized outcomes. Agents that make money get
@@ -138,7 +138,6 @@ export interface LearnedEdge {
   trust: TrustLevel;
   minBucketSample: number;
 }
-
 
 export const BASE_AGENT_WEIGHTS: Record<string, number> = {
   Trend: 1.0,
@@ -189,7 +188,6 @@ export function deriveEdge(report: EdgeReport, baseMinConfidence = 0.6): Learned
     if (n < MIN_BUCKET_SAMPLE) pendingAgents.push(name);
   }
 
-
   const suppressedSymbols = report.symbols
     .filter((s) => s.trades >= 4 && s.pnl < 0 && winRate(s) < 0.4)
     .map((s) => s.name);
@@ -209,9 +207,7 @@ export function deriveEdge(report: EdgeReport, baseMinConfidence = 0.6): Learned
   const symbolCostBps: Record<string, number> = {};
   for (const s of report.symbols) {
     if (s.trades < 3) continue;
-    symbolCostBps[s.name] = Number(
-      ((s.avg_slip_bps ?? 0) + ROUND_TRIP_FEE_BPS).toFixed(2),
-    );
+    symbolCostBps[s.name] = Number(((s.avg_slip_bps ?? 0) + ROUND_TRIP_FEE_BPS).toFixed(2));
   }
 
   // Confidence calibration: raise the bar to the lowest bucket that is
@@ -220,12 +216,13 @@ export function deriveEdge(report: EdgeReport, baseMinConfidence = 0.6): Learned
   const buckets = [...report.confidence]
     .filter((b) => b.trades >= MIN_SAMPLE)
     .sort((a, b) => a.name.localeCompare(b.name));
-  if (buckets.length > 0) {
+  if (report.totals.trades >= MIN_CONFIDENCE_CALIBRATION_SAMPLE) {
     const firstGood = buckets.find((b) => b.expectancy > 0);
-    const lowest = firstGood ?? buckets[buckets.length - 1];
-    const floor = Number(lowest.name.split("-")[0]);
-    if (Number.isFinite(floor)) {
-      minConfidence = Math.max(baseMinConfidence, Math.min(0.9, floor));
+    if (firstGood) {
+      const floor = Number(firstGood.name.split("-")[0]);
+      if (Number.isFinite(floor)) {
+        minConfidence = Math.max(baseMinConfidence, Math.min(0.9, floor));
+      }
     }
   }
 
@@ -342,4 +339,3 @@ export function edgeDrift(trades: RollingTrade[], n = 25) {
   const priorExp = exp(prior);
   return { recentExp, priorExp, delta: recentExp - priorExp, sample: n };
 }
-
