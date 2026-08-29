@@ -38,7 +38,7 @@ cp runner/.env.example runner/.env
 #
 # Neon + Supabase run together: DATABASE_URL (Neon) powers login (app_users)
 # and the live_trades ledger; Supabase stays the trade database. Leave
-# DATA_STORE=supabase unless you want trade data written to Neon instead.
+# DATA_STORE=neon is the canonical VPS configuration.
 ```
 
 ## 4. Run it
