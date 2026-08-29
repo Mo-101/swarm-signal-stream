@@ -169,13 +169,13 @@ function formatDuration(ms: number): string {
 export const Route = createFileRoute("/_authenticated/dashboard")({
   head: () => ({
     meta: [
-      { title: "Swarm Terminal — Live USDT-M Perp Signals" },
+      { title: "Alpha Swarm — Live USDT-M Perp Signals" },
       {
         name: "description",
         content:
           "Real-time AI trading swarm streaming every Bybit USDT perpetual future with paper-trading execution, SL/TP, and PnL tracking.",
       },
-      { property: "og:title", content: "Swarm Terminal — Live USDT-M Perp Signals" },
+      { property: "og:title", content: "Alpha Swarm — Live USDT-M Perp Signals" },
       {
         property: "og:description",
         content:
@@ -934,10 +934,7 @@ function SwarmDashboard() {
             />
             <div>
               <div className="flex items-center gap-2">
-                <h1 className="text-xl font-bold tracking-tight text-foreground">Swarm Terminal</h1>
-                <span className="rounded-full bg-primary/20 border border-primary/40 px-2 py-0.5 font-mono text-[10px] uppercase tracking-widest text-primary font-bold shadow-xs">
-                  Alpha Swarm
-                </span>
+                <h1 className="text-xl font-bold tracking-tight text-foreground">Alpha Swarm</h1>
               </div>
               <p className="text-xs text-muted-foreground">
                 {liveMode

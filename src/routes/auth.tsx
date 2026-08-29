@@ -124,7 +124,7 @@ function AuthPage() {
             onClick={enterAsGuest}
             className="w-full rounded-md bg-gradient-to-r from-emerald-600 via-teal-600 to-cyan-600 px-3 py-2 text-xs font-semibold text-white shadow-md transition hover:brightness-110 active:scale-[0.99]"
           >
-            Enter Swarm Terminal as Operator (Demo Mode)
+            Enter Alpha Swarm as Operator (Demo Mode)
           </button>
         </div>
 

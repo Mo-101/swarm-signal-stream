@@ -26,7 +26,7 @@ function NotFoundComponent() {
         <h1 className="mt-4 text-6xl font-black tracking-tight text-foreground">404</h1>
         <h2 className="mt-2 text-lg font-semibold text-foreground">Route Not Found</h2>
         <p className="mt-2 text-xs text-muted-foreground leading-relaxed">
-          The requested page or endpoint doesn&apos;t exist. Jump back into the Swarm Terminal or head to the home dashboard.
+          The requested page or endpoint doesn&apos;t exist. Jump back into Alpha Swarm or head to the home dashboard.
         </p>
         <div className="mt-6 flex flex-wrap justify-center gap-3">
           <Link
