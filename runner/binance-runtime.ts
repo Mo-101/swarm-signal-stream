@@ -186,6 +186,9 @@ export class BinanceDemoCoordinator {
       return;
     }
 
+    // Fail closed: no exchange entry is allowed until this symbol is isolated.
+    await executor.setIsolatedMargin(position.symbol);
+
     try {
       await executor.setLeverage(position.symbol, position.leverage);
     } catch {

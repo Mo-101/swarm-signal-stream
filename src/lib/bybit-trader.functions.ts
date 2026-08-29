@@ -438,6 +438,21 @@ export const placeBybitTrade = createServerFn({ method: "POST" })
     const trailStr = roundStep(trailingDistanceVal, filter.tickSize, filter.pricePrecision);
     const lev = String(data.leverage ?? 5);
 
+    // UTA 2.0 controls margin mode at account level. Never submit an entry
+    // while the account can draw on the shared cross-margin wallet.
+    const marginMode = await signedRequest<{ reasons?: Array<{ reasonCode: string; reasonMsg: string }> }>(
+      "POST",
+      "/v5/account/set-margin-mode",
+      { setMarginMode: "ISOLATED_MARGIN" },
+    );
+    if (marginMode.reasons?.length) {
+      throw new Error(
+        `Bybit isolated-margin setup refused: ${marginMode.reasons
+          .map((reason) => `${reason.reasonCode}: ${reason.reasonMsg}`)
+          .join("; ")}`,
+      );
+    }
+
     // Best-effort leverage set.
     try {
       await signedRequest("POST", "/v5/position/set-leverage", {

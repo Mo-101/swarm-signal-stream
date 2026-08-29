@@ -236,6 +236,20 @@ export class BinanceExecutor {
     });
   }
 
+  /** Ensure this symbol cannot draw on the shared futures wallet. */
+  async setIsolatedMargin(symbol: string): Promise<void> {
+    try {
+      await signedRequest(this.creds, "POST", "/fapi/v1/marginType", {
+        symbol,
+        marginType: "ISOLATED",
+      });
+    } catch (error) {
+      // Binance returns -4046 when the requested margin type is already set.
+      if (error instanceof BinanceApiError && error.code === -4046) return;
+      throw error;
+    }
+  }
+
   async marketOrder(
     symbol: string,
     side: BinanceSide,
