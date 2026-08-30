@@ -104,10 +104,17 @@ export const Route = createRootRouteWithContext<{ queryClient: QueryClient }>()(
       },
     ],
     links: [
+      { rel: "preconnect", href: "https://fonts.googleapis.com" },
+      { rel: "preconnect", href: "https://fonts.gstatic.com", crossOrigin: "anonymous" },
+      {
+        rel: "stylesheet",
+        href: "https://fonts.googleapis.com/css2?family=Inter:wght@100..900&family=JetBrains+Mono:wght@100..800&display=swap",
+      },
       {
         rel: "stylesheet",
         href: appCss,
       },
+
       { rel: "icon", href: "/alpha-sword-logo.png", type: "image/png" },
       { rel: "shortcut icon", href: "/alpha-sword-logo.png", type: "image/png" },
       { rel: "apple-touch-icon", href: "/alpha-sword-logo.png" },
