@@ -72,6 +72,94 @@ ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS strategy_epoch text NOT NULL D
 CREATE INDEX IF NOT EXISTS paper_trades_user_status_idx ON paper_trades (user_id, status, opened_at DESC);
 CREATE INDEX IF NOT EXISTS paper_trades_epoch_idx ON paper_trades (user_id, strategy_epoch, status);
 
+-- Reconcile legacy closed trades to the net identity: net = gross - fees - funding.
+--
+-- gross_pnl, fees and funding were added after trading had already started, so
+-- rows written before that are NULL in those columns. sum() skips NULLs, so
+-- those rows contributed their pnl to net_pnl and NOTHING to gross_pnl — the
+-- execution report showed a fixed, unexplained gap (gross - fees - funding
+-- undershooting reported net by a constant, because the legacy row set never
+-- grows). Their pnl was already net and their cost breakdown was never
+-- recorded, so gross = pnl with zero recorded costs is the only honest
+-- reconstruction: cost-neutral rather than silently missing from the numerator.
+-- Idempotent — after the first apply no rows match.
+-- Step 1: any row missing a cost column at all.
+UPDATE paper_trades
+   SET gross_pnl = coalesce(gross_pnl, pnl),
+       fees = coalesce(fees, 0),
+       funding = coalesce(funding, 0)
+ WHERE status = 'closed' AND pnl IS NOT NULL
+   AND (gross_pnl IS NULL OR fees IS NULL OR funding IS NULL);
+
+-- Step 2: legacy rows whose stored pnl OMITTED THE ENTRY FEE.
+--
+-- Trade-level pnl used to be computed as gross - exitFee - funding, leaving
+-- the entry fee out (see the note in paper-broker.closePosition). The entry
+-- fee was still deducted from the account's realized_pnl at open, so the trade
+-- table understated cost relative to the account, and every per-trade edge
+-- statistic - expectancy, win rate, per-agent PnL - was measured against a
+-- number that was too generous by exactly one taker leg.
+--
+-- Verified against live data: all 41 offending rows have a residual equal to
+-- their entry fee to the cent. Restating pnl to the full net identity is what
+-- makes the trade table agree with the account, and with every trade closed
+-- since the fix.
+--
+-- Liquidations are excluded: their pnl is deliberately capped at the posted
+-- margin rather than derived from the exit fill, so the identity does not
+-- apply to them.
+--
+-- Idempotent: after one pass the WHERE clause matches nothing.
+UPDATE paper_trades
+   SET pnl = gross_pnl - fees - funding,
+       pnl_pct = CASE
+                   WHEN entry_price * size > 0
+                     THEN ((gross_pnl - fees - funding) / (entry_price * size)) * 100
+                   ELSE pnl_pct
+                 END
+ WHERE status = 'closed'
+   AND pnl IS NOT NULL
+   AND gross_pnl IS NOT NULL
+   AND coalesce(reason, '') <> 'LIQ'
+   AND abs(pnl - (gross_pnl - fees - funding)) > 0.01;
+
+-- One row per funding settlement charged to a paper position.
+--
+-- The UNIQUE constraint is the durable half of the engine's idempotency: the
+-- broker keeps an in-memory set of settled boundaries, and this constraint
+-- makes that survive a restart. A replayed or double-delivered settlement hits
+-- ON CONFLICT DO NOTHING and cannot reach the ledger twice.
+--
+-- funding_time is the EXCHANGE's settlement timestamp (Bybit nextFundingTime /
+-- fundingRateTimestamp), never a locally computed 8h grid point — the schedule
+-- is per-symbol and Bybit can change it.
+CREATE TABLE IF NOT EXISTS paper_funding_events (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id uuid NOT NULL,
+  client_id text NOT NULL,
+  symbol text NOT NULL,
+  side text NOT NULL,
+  funding_time timestamptz NOT NULL,
+  -- Position quantity AT settlement, not averaged over the interval.
+  position_qty numeric NOT NULL,
+  mark_price numeric NOT NULL,
+  funding_rate numeric NOT NULL,
+  interval_ms bigint NOT NULL,
+  notional numeric NOT NULL,
+  -- Signed as the ledger sees it: positive = the position PAID.
+  amount_usd numeric NOT NULL,
+  -- 'settled' (confirmed vs history-fund-rate), 'live' (provisional predicted
+  -- rate) or 'default' (no exchange rate was available).
+  rate_source text NOT NULL DEFAULT 'live',
+  strategy_epoch text NOT NULL DEFAULT 'v1',
+  created_at timestamptz NOT NULL DEFAULT now(),
+  UNIQUE (user_id, symbol, side, funding_time)
+);
+CREATE INDEX IF NOT EXISTS paper_funding_events_user_time_idx
+  ON paper_funding_events (user_id, funding_time DESC);
+CREATE INDEX IF NOT EXISTS paper_funding_events_provisional_idx
+  ON paper_funding_events (user_id, rate_source) WHERE rate_source <> 'settled';
+
 CREATE TABLE IF NOT EXISTS signals (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   user_id uuid NOT NULL,
@@ -278,6 +366,26 @@ confs AS (
          coalesce(avg(entry_slip_bps + exit_slip_bps), 0)::numeric AS avg_slip_bps,
          coalesce(avg(confidence), 0)::numeric AS avg_confidence
   FROM closed GROUP BY conf_bucket
+),
+-- Confidence buckets split BY EPOCH.
+--
+-- `confs` above pools every learning epoch, which is correct for display but
+-- wrong for calibrating an entry threshold: the confidence scale itself
+-- changed at v2 (normalized to 0.5-1.0 by total agent weight, where v1
+-- saturated on |net|). Pooled, the table describes two different scales at
+-- once — v1 occupies 0.7-1.0 and v3 occupies 0.6-0.8 with almost no overlap —
+-- so a threshold learned from it can land above anything the current epoch
+-- ever emits, silently halting trading instead of tightening it.
+-- deriveEdge() calibrates from these rows, scoped to the running epoch.
+confs_epoch AS (
+  SELECT strategy_epoch AS epoch, conf_bucket AS name, count(*)::int AS trades,
+         count(*) FILTER (WHERE pnl > 0)::int AS wins,
+         coalesce(sum(pnl), 0)::numeric AS pnl,
+         coalesce(avg(pnl), 0)::numeric AS expectancy,
+         coalesce(avg(gross_pnl), 0)::numeric AS gross_expectancy,
+         coalesce(avg(entry_slip_bps + exit_slip_bps), 0)::numeric AS avg_slip_bps,
+         coalesce(avg(confidence), 0)::numeric AS avg_confidence
+  FROM closed GROUP BY strategy_epoch, conf_bucket
 )
 SELECT jsonb_build_object(
   'totals', (SELECT jsonb_build_object(
@@ -291,7 +399,21 @@ SELECT jsonb_build_object(
       'net_pnl', coalesce(sum(pnl), 0),
       'fees', coalesce(sum(fees), 0),
       'funding', coalesce(sum(funding), 0),
+      -- Attribution only. gross_pnl is computed from the prices we actually
+      -- FILLED at, so slippage is already inside it; subtracting it from gross
+      -- would double-count. Never put this in the net identity.
       'slip_cost', coalesce(sum(slip_cost_usd), 0),
+      -- net - (gross - fees - funding). Must be ~0 outside liquidations,
+      -- whose pnl is capped at the margin rather than derived from the exit.
+      'residual', coalesce(sum(pnl), 0)
+                  - (coalesce(sum(gross_pnl), 0)
+                     - coalesce(sum(fees), 0)
+                     - coalesce(sum(funding), 0)),
+      'unreconciled', count(*) FILTER (
+          WHERE abs(coalesce(pnl, 0)
+                    - (coalesce(gross_pnl, 0)
+                       - coalesce(fees, 0)
+                       - coalesce(funding, 0))) > 0.01)::int,
       'avg_entry_slip_bps', coalesce(avg(entry_slip_bps), 0),
       'avg_exit_slip_bps', coalesce(avg(exit_slip_bps), 0),
       'avg_spread_bps', coalesce(avg(spread_entry_bps), 0),
@@ -302,6 +424,8 @@ SELECT jsonb_build_object(
   'symbols', coalesce((SELECT jsonb_agg(to_jsonb(symbols)) FROM symbols), '[]'::jsonb),
   'regimes', coalesce((SELECT jsonb_agg(to_jsonb(regimes)) FROM regimes), '[]'::jsonb),
   'hours', coalesce((SELECT jsonb_agg(to_jsonb(hours)) FROM hours), '[]'::jsonb),
-  'confidence', coalesce((SELECT jsonb_agg(to_jsonb(confs)) FROM confs), '[]'::jsonb)
+  'confidence', coalesce((SELECT jsonb_agg(to_jsonb(confs)) FROM confs), '[]'::jsonb),
+  'confidence_by_epoch',
+    coalesce((SELECT jsonb_agg(to_jsonb(confs_epoch)) FROM confs_epoch), '[]'::jsonb)
 );
 $$;

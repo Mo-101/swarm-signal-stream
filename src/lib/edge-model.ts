@@ -1,4 +1,5 @@
 import { winRateStats } from "./math/stats";
+import { STRATEGY_EPOCH } from "./strategy-epoch";
 // Edge model — pure, client-safe helpers for bucketing outcomes and turning
 // stored trade history into live agent/symbol/regime/confidence weights.
 
@@ -22,13 +23,23 @@ export interface ExecutionSummary {
   net_pnl: number;
   fees: number;
   funding: number;
+  /** Fill-vs-signal drift. Attribution only — already inside gross_pnl. */
   slip_cost: number;
+  /** net - (gross - fees - funding). ~0 outside liquidations. */
+  residual?: number;
+  /** Trades that individually fail the net identity. */
+  unreconciled?: number;
   avg_entry_slip_bps: number;
   avg_exit_slip_bps: number;
   avg_spread_bps: number;
   avg_latency_ms: number;
   book_priced: number;
   liquidations: number;
+}
+
+/** A bucket row scoped to the strategy epoch that produced it. */
+export interface EpochEdgeRow extends EdgeRow {
+  epoch: string;
 }
 
 export interface EdgeReport {
@@ -38,7 +49,15 @@ export interface EdgeReport {
   symbols: EdgeRow[];
   regimes: EdgeRow[];
   hours: EdgeRow[];
+  /** Confidence buckets pooled across every learning epoch. Display only. */
   confidence: EdgeRow[];
+  /**
+   * Confidence buckets split by epoch — the only sound basis for calibrating
+   * an entry threshold, because the confidence SCALE is not comparable across
+   * epochs (see deriveEdge). Absent on reports produced before this existed,
+   * in which case calibration falls back to the pooled rows.
+   */
+  confidence_by_epoch?: EpochEdgeRow[];
 }
 
 export const EMPTY_EXECUTION: ExecutionSummary = {
@@ -48,6 +67,8 @@ export const EMPTY_EXECUTION: ExecutionSummary = {
   fees: 0,
   funding: 0,
   slip_cost: 0,
+  residual: 0,
+  unreconciled: 0,
   avg_entry_slip_bps: 0,
   avg_exit_slip_bps: 0,
   avg_spread_bps: 0,
@@ -137,6 +158,15 @@ export interface LearnedEdge {
   /** Overall trust in the learned parameters, from total closed trades. */
   trust: TrustLevel;
   minBucketSample: number;
+  /** The epoch new signals are being stamped with. */
+  currentEpoch: string;
+  /**
+   * Closed trades from THAT epoch — the sample the confidence threshold is
+   * actually calibrated on. It can be far smaller than `sample`, which pools
+   * every learning epoch, and the gap is the honest measure of how much is
+   * known about the rules currently running.
+   */
+  currentEpochSample: number;
 }
 
 export const BASE_AGENT_WEIGHTS: Record<string, number> = {
@@ -212,11 +242,37 @@ export function deriveEdge(report: EdgeReport, baseMinConfidence = 0.6): Learned
 
   // Confidence calibration: raise the bar to the lowest bucket that is
   // profitable once we have enough closed trades to trust it.
+  //
+  // SCALE SAFETY — calibrate from the CURRENT epoch only.
+  //
+  // Confidence is not comparable across epochs: v1 saturated on |net|, while
+  // v2 onward normalize to 0.5-1.0 by total agent weight. Measured on real
+  // history, v1 trades occupy 0.7-1.0 and v3 trades occupy 0.6-0.8 with almost
+  // no overlap, so the pooled bucket table describes two different scales at
+  // once. Calibrating on the pool picks a floor from whichever epoch happens
+  // to look best — and if that is the retired scale, the floor can sit ABOVE
+  // anything the running strategy ever emits. That does not make the engine
+  // selective; it silently stops it trading altogether.
+  //
+  // Scoping to the running epoch also makes starvation structurally
+  // impossible: the chosen floor always comes from a bucket holding at least
+  // MIN_SAMPLE trades from the epoch now in force, so signals do reach it.
+  //
+  // Other calibrations (agents, symbols, regimes, cost) are unaffected by the
+  // scale change and keep using the full learning pool.
   let minConfidence = baseMinConfidence;
-  const buckets = [...report.confidence]
+  const epochRows = report.confidence_by_epoch;
+  const scoped = (epochRows ?? []).filter((b) => b.epoch === STRATEGY_EPOCH);
+  // A report that predates confidence_by_epoch keeps the old pooled behaviour;
+  // once the field exists, the pool is never used for this again.
+  const calibrationRows: EdgeRow[] = epochRows ? scoped : report.confidence;
+  const calibrationSample = epochRows
+    ? scoped.reduce((n, b) => n + b.trades, 0)
+    : report.totals.trades;
+  const buckets = [...calibrationRows]
     .filter((b) => b.trades >= MIN_SAMPLE)
     .sort((a, b) => a.name.localeCompare(b.name));
-  if (report.totals.trades >= MIN_CONFIDENCE_CALIBRATION_SAMPLE) {
+  if (calibrationSample >= MIN_CONFIDENCE_CALIBRATION_SAMPLE) {
     const firstGood = buckets.find((b) => b.expectancy > 0);
     if (firstGood) {
       const floor = Number(firstGood.name.split("-")[0]);
@@ -247,6 +303,8 @@ export function deriveEdge(report: EdgeReport, baseMinConfidence = 0.6): Learned
     pendingAgents,
     trust: trustLevel(report.totals.trades),
     minBucketSample: MIN_BUCKET_SAMPLE,
+    currentEpoch: STRATEGY_EPOCH,
+    currentEpochSample: calibrationSample,
   };
 }
 

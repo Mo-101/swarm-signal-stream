@@ -38,9 +38,15 @@ export function roundTripFeeBps(takerFeeRate: number): Bps {
 }
 
 /**
- * Funding payment for one 8h settlement.
+ * Funding payment for ONE settlement, on the position value at the mark.
  * Positive = the position PAYS. Longs pay a positive funding rate; shorts
  * receive it (and vice versa).
+ *
+ *   fee = |q| · M · F · sign(side)
+ *
+ * The interval never appears here: a settlement is a settlement, whether the
+ * contract runs on an 8h, 4h or 1h schedule. Scheduling is the funding
+ * clock's job (lib/funding-clock), not this function's.
  */
 export function fundingPayment(
   positionValue: number,
@@ -50,17 +56,41 @@ export function fundingPayment(
   return positionValue * fundingRate * sideSign(side);
 }
 
-/** Bybit settles funding at 00:00 / 08:00 / 16:00 UTC. */
-export const FUNDING_INTERVAL_MS = 8 * 60 * 60 * 1000;
+/**
+ * Fallback settlement period, used ONLY when the exchange has not told us the
+ * real one. Bybit's most common linear-perp schedule is 8h (00:00 / 08:00 /
+ * 16:00 UTC), but the interval is per-contract and Bybit may change it
+ * dynamically — so nothing may treat this as the schedule. The authoritative
+ * values are `fundingInterval` from instruments-info and `nextFundingTime`
+ * from the ticker; see lib/funding-clock.
+ */
+export const DEFAULT_FUNDING_INTERVAL_MS = 8 * 60 * 60 * 1000;
 
-export function lastFundingBoundary(t: number): number {
-  return Math.floor(t / FUNDING_INTERVAL_MS) * FUNDING_INTERVAL_MS;
+/** @deprecated Use DEFAULT_FUNDING_INTERVAL_MS, or the per-symbol interval. */
+export const FUNDING_INTERVAL_MS = DEFAULT_FUNDING_INTERVAL_MS;
+
+/**
+ * Last settlement at or before `t` on a UTC-anchored grid of `intervalMs`.
+ * This is the *fallback* grid for a symbol with no exchange schedule yet;
+ * once `nextFundingTime` is known the clock anchors on that instead.
+ */
+export function lastFundingBoundary(
+  t: number,
+  intervalMs: number = DEFAULT_FUNDING_INTERVAL_MS,
+): number {
+  const iv = intervalMs > 0 ? intervalMs : DEFAULT_FUNDING_INTERVAL_MS;
+  return Math.floor(t / iv) * iv;
 }
 
 /** Number of funding boundaries strictly after `from` and at/before `to`. */
-export function fundingIntervalsBetween(from: number, to: number): number {
+export function fundingIntervalsBetween(
+  from: number,
+  to: number,
+  intervalMs: number = DEFAULT_FUNDING_INTERVAL_MS,
+): number {
   if (!(to > from)) return 0;
-  return Math.floor(to / FUNDING_INTERVAL_MS) - Math.floor(from / FUNDING_INTERVAL_MS);
+  const iv = intervalMs > 0 ? intervalMs : DEFAULT_FUNDING_INTERVAL_MS;
+  return Math.floor(to / iv) - Math.floor(from / iv);
 }
 
 /** Price PnL before any cost. Exactly antisymmetric between long and short. */
@@ -89,6 +119,37 @@ export function netPnl(i: NetPnlInput): number {
   return (
     grossPnl(i.entryPrice, i.exitPrice, i.size, i.side) - i.entryFee - i.exitFee - i.funding
   );
+}
+
+/**
+ * The one PnL identity every report must satisfy:
+ *
+ *   net = gross − fees − funding
+ *
+ * Slippage is deliberately absent. `grossPnl` is computed from the prices we
+ * actually FILLED at, so execution slippage is already inside it; `slipCostUsd`
+ * measures fill-vs-signal drift for attribution and must never be subtracted a
+ * second time. A non-zero residual means the rows disagree — typically a
+ * liquidation (whose PnL is capped at the margin, not derived from the exit) or
+ * a legacy row with a NULL gross_pnl — never a formula error.
+ *
+ * Returns net − (gross − fees − funding), in USD.
+ */
+export function netPnlResidual(t: {
+  grossPnl: number;
+  fees: number;
+  funding: number;
+  netPnl: number;
+}): number {
+  return t.netPnl - (t.grossPnl - t.fees - t.funding);
+}
+
+/** True when a trade satisfies the net identity within `tolerance` USD. */
+export function reconciles(
+  t: { grossPnl: number; fees: number; funding: number; netPnl: number },
+  tolerance = 0.01,
+): boolean {
+  return Math.abs(netPnlResidual(t)) <= tolerance;
 }
 
 /** Return on margin posted (ROE). This is what a trader calls "% gain". */
@@ -177,7 +238,10 @@ export function costHurdle(input: {
   takerFeeRate: number;
   entrySlipBps: number;
   exitSlipBps: number;
+  /** Funding rate per SETTLEMENT (not per 8h — the interval is separate). */
   fundingRatePer8h?: number;
+  /** This symbol's real settlement period. Defaults to the 8h fallback. */
+  fundingIntervalMs?: number;
   expectedHoldMs?: number;
   side?: Side;
   safetyMargin?: number;
@@ -185,7 +249,11 @@ export function costHurdle(input: {
   const feeBps = roundTripFeeBps(input.takerFeeRate);
   const entrySlipBps = bps(Math.max(0, input.entrySlipBps));
   const exitSlipBps = bps(Math.max(0, input.exitSlipBps));
-  const intervals = Math.max(0, (input.expectedHoldMs ?? 0) / FUNDING_INTERVAL_MS);
+  const intervalMs =
+    input.fundingIntervalMs && input.fundingIntervalMs > 0
+      ? input.fundingIntervalMs
+      : DEFAULT_FUNDING_INTERVAL_MS;
+  const intervals = Math.max(0, (input.expectedHoldMs ?? 0) / intervalMs);
   const rate = input.fundingRatePer8h ?? 0;
   const fundingBps = bps(rate * intervals * sideSign(input.side ?? "BUY") * BPS_PER_UNIT);
   const totalCostBps = bps(feeBps + entrySlipBps + exitSlipBps + Math.max(0, fundingBps));

@@ -8,6 +8,8 @@ import {
   persistCloseTrade as persistCloseTradeShared,
   ingestSignals as ingestSignalsShared,
   upsertHeartbeat as upsertHeartbeatShared,
+  persistFundingEvent as persistFundingEventShared,
+  confirmFundingEvent as confirmFundingEventShared,
   persistShadowOpen as persistShadowOpenShared,
   persistShadowClose as persistShadowCloseShared,
   loadShadowBook as loadShadowBookShared,
@@ -16,7 +18,12 @@ import {
   type HeartbeatFields,
 } from "../src/lib/db/edge-store.server";
 import type { FuturesGridConfig, GridRuntimeState } from "../src/lib/futures-grid";
-import type { OpenTradeInput, CloseTradeInput, SignalInput } from "../src/lib/db/types";
+import type {
+  OpenTradeInput,
+  CloseTradeInput,
+  SignalInput,
+  FundingEventInput,
+} from "../src/lib/db/types";
 import type { EnginePersistence, EngineBootState } from "../src/lib/engine-runtime";
 import { ENGINE_SHADOW_CONFIG } from "../src/lib/engine-runtime";
 import {
@@ -88,6 +95,16 @@ export function createSupabasePersistence(
     },
     async sendSignals(signals: SignalInput[]) {
       await ingestSignalsShared(supabase, userId, signals);
+    },
+    async saveFundingEvent(event: FundingEventInput) {
+      // Idempotent on (user, symbol, side, funding_time): a replayed or
+      // re-confirmed settlement can never reach the ledger twice.
+      if (event.rateSource === "settled") {
+        const inserted = await persistFundingEventShared(userId, event);
+        if (!inserted) await confirmFundingEventShared(userId, event);
+        return;
+      }
+      await persistFundingEventShared(userId, event);
     },
     async saveShadowOpen(trade: ShadowTrade) {
       await persistShadowOpenShared(userId, trade);

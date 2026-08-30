@@ -15,6 +15,8 @@ import type {
   OpenTradeInput,
   CloseTradeInput,
   EngineBootState,
+  FundingEventInput,
+  StoredFundingEvent,
 } from "./types";
 import { STRATEGY_EPOCH, EDGE_EPOCH_FILTER } from "@/lib/strategy-epoch";
 
@@ -70,6 +72,13 @@ export async function loadBootState(
   const signalCountRows =
     await sql`SELECT count(*)::int AS count FROM signals WHERE user_id = ${userId}`;
 
+  // Settlements already charged. Only history that could still be replayed
+  // matters: nothing older than the oldest open position (with a day of slack
+  // for a schedule that moved) can be re-applied to anything.
+  const openRows = open.map(mapTradeRow);
+  const oldestOpen = openRows.reduce((min, t) => Math.min(min, t.openedAt), Date.now());
+  const fundingEvents = await loadFundingEvents(userId, oldestOpen - 24 * 60 * 60 * 1000);
+
   return {
     boot: {
       account: {
@@ -77,8 +86,9 @@ export async function loadBootState(
         realizedPnl: Number(account.realized_pnl ?? 0),
         halted: Boolean(account.halted),
       },
-      open: open.map(mapTradeRow),
+      open: openRows,
       closed: closed.map(mapTradeRow),
+      fundingEvents,
     },
     report: (reportRows[0]?.report as EdgeReport | undefined) ?? EMPTY_EDGE_REPORT,
     signalCount: (signalCountRows[0]?.count as number | undefined) ?? 0,
@@ -232,6 +242,108 @@ export async function resetPaperAccount(
 // update: the open write is best-effort and fire-and-forget, so a close must
 // still land a complete row even when the open never made it to the database.
 // Losing a closed shadow trade loses the evidence the book exists to collect.
+
+// ── Funding settlements ─────────────────────────────────────────────────
+
+/**
+ * Record one funding settlement. The UNIQUE (user_id, symbol, side,
+ * funding_time) constraint plus ON CONFLICT DO NOTHING is what makes this
+ * safe to call from a replay: a settlement that already reached the ledger is
+ * silently ignored rather than charged twice.
+ *
+ * Returns true when the row was actually inserted — i.e. this settlement had
+ * not been recorded before.
+ */
+export async function persistFundingEvent(userId: string, e: FundingEventInput): Promise<boolean> {
+  if (!neonDataEnabled()) return false;
+  const sql = getNeonSqlOrNoop();
+  const rows = await sql`
+    INSERT INTO paper_funding_events (
+      user_id, client_id, symbol, side, funding_time, position_qty, mark_price,
+      funding_rate, interval_ms, notional, amount_usd, rate_source, strategy_epoch
+    ) VALUES (
+      ${userId}, ${e.clientId}, ${e.symbol}, ${e.side},
+      ${new Date(e.at).toISOString()}, ${e.quantity}, ${e.markPrice}, ${e.rate},
+      ${e.intervalMs}, ${e.notional}, ${e.amount}, ${e.rateSource}, ${STRATEGY_EPOCH}
+    )
+    ON CONFLICT (user_id, symbol, side, funding_time) DO NOTHING
+    RETURNING id`;
+  return Array.isArray(rows) && rows.length > 0;
+}
+
+/**
+ * Promote a provisional settlement to its confirmed rate. Only rows that are
+ * still provisional are touched, so a second confirmation is a no-op.
+ */
+export async function confirmFundingEvent(
+  userId: string,
+  e: { symbol: string; side: string; at: number; rate: number; amount: number },
+): Promise<void> {
+  if (!neonDataEnabled()) return;
+  const sql = getNeonSqlOrNoop();
+  await sql`
+    UPDATE paper_funding_events
+       SET funding_rate = ${e.rate}, amount_usd = ${e.amount}, rate_source = 'settled'
+     WHERE user_id = ${userId} AND symbol = ${e.symbol} AND side = ${e.side}
+       AND funding_time = ${new Date(e.at).toISOString()}
+       AND rate_source <> 'settled'`;
+}
+
+/** Settlements recorded since `sinceMs`, newest first. */
+export async function loadFundingEvents(
+  userId: string,
+  sinceMs: number,
+  limit = 500,
+): Promise<StoredFundingEvent[]> {
+  if (!neonDataEnabled()) return [];
+  // NEVER let this fail the boot. It runs inside loadBootState, so a throw here
+  // stops the runner from starting at all — which is exactly what happens when
+  // the new image is deployed before apply-schema has created the table.
+  // Losing the seed only costs idempotency belt (the persisted lastFundingAt
+  // watermark is still the braces); crashing costs live trading.
+  try {
+    return await loadFundingEventsUnsafe(userId, sinceMs, limit);
+  } catch (e) {
+    console.error(
+      `[persist] funding-event history unavailable (${
+        e instanceof Error ? e.message : String(e)
+      }) — continuing without the replay guard. Run scripts/apply-schema.mjs.`,
+    );
+    return [];
+  }
+}
+
+async function loadFundingEventsUnsafe(
+  userId: string,
+  sinceMs: number,
+  limit: number,
+): Promise<StoredFundingEvent[]> {
+  const sql = getNeonSqlOrNoop();
+  const rows = (await sql`
+    SELECT * FROM paper_funding_events
+     WHERE user_id = ${userId} AND funding_time >= ${new Date(sinceMs).toISOString()}
+     ORDER BY funding_time DESC
+     LIMIT ${limit}`) as Array<Record<string, unknown>>;
+  return (rows ?? []).map(mapFundingRow);
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function mapFundingRow(row: any): StoredFundingEvent {
+  return {
+    id: String(row.id),
+    clientId: row.client_id,
+    symbol: row.symbol,
+    side: row.side === "SELL" ? "SELL" : "BUY",
+    at: new Date(row.funding_time).getTime(),
+    quantity: Number(row.position_qty),
+    markPrice: Number(row.mark_price),
+    rate: Number(row.funding_rate),
+    intervalMs: Number(row.interval_ms),
+    notional: Number(row.notional),
+    amount: Number(row.amount_usd),
+    rateSource: row.rate_source,
+  };
+}
 
 export async function persistShadowOpen(userId: string, t: ShadowTrade): Promise<void> {
   const sql = getNeonSqlOrNoop();

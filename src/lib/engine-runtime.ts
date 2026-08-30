@@ -48,7 +48,14 @@ import type {
   SignalInput,
   OpenTradeInput,
   CloseTradeInput,
+  FundingEventInput,
+  StoredFundingEvent,
 } from "@/lib/edge.functions";
+import {
+  fetchFundingIntervals,
+  fetchFundingTickers,
+  fetchSettledFundingRates,
+} from "@/lib/funding-clock";
 
 /**
  * Shadow economics the engine always runs with: the counterfactual only means
@@ -78,6 +85,13 @@ export interface EnginePersistence {
    */
   saveShadowOpen?(trade: ShadowTrade): Promise<unknown>;
   saveShadowClose?(trade: ShadowTrade): Promise<unknown>;
+  /**
+   * Durably record one funding settlement. Optional, like the shadow writers:
+   * the dashboard keeps funding in memory, the headless runner persists it so
+   * a restart cannot charge the same settlement twice. The write is expected
+   * to be idempotent on (symbol, side, at).
+   */
+  saveFundingEvent?(event: FundingEventInput): Promise<unknown>;
   /** Persist grid config + runtime state after configure and every risk update. */
   saveGridState?(config: FuturesGridConfig, state: GridRuntimeState): Promise<unknown>;
   onPersistError?: (message: string) => void;
@@ -87,6 +101,11 @@ export interface EngineBootState {
   account: { startingBalance: number; realizedPnl: number; halted: boolean };
   open: StoredTrade[];
   closed: StoredTrade[];
+  /**
+   * Funding settlements already charged, replayed into the broker's
+   * idempotency set so a restart cannot charge any of them a second time.
+   */
+  fundingEvents?: StoredFundingEvent[];
 }
 
 export interface EngineSnapshot {
@@ -291,6 +310,29 @@ export function createEngineRuntime(opts: EngineRuntimeOptions): EngineRuntime {
     onHalt: (msg) => hooks.onHalt?.(msg),
     onReject: (r) => hooks.onReject?.(r),
     onRiskAlert: (a) => hooks.onRiskAlert?.(a),
+    // Every settlement is written as it is charged, so the boundary is durable
+    // before the process can die holding it only in memory.
+    onFunding: (e) => {
+      void persistence
+        .saveFundingEvent?.({
+          clientId: e.positionId,
+          symbol: e.symbol,
+          side: e.side,
+          at: e.at,
+          quantity: e.quantity,
+          markPrice: e.markPrice,
+          rate: e.rate,
+          intervalMs: e.intervalMs,
+          notional: e.notional,
+          amount: e.amount,
+          rateSource: e.rateSource,
+        })
+        .catch((err: unknown) =>
+          persistence.onPersistError?.(
+            err instanceof Error ? err.message : "Funding event save failed",
+          ),
+        );
+    },
     onOpen: (pos) => {
       hooks.onOpen?.(pos);
       void persistence
@@ -362,6 +404,12 @@ export function createEngineRuntime(opts: EngineRuntimeOptions): EngineRuntime {
     realizedPnl: boot.account.realizedPnl,
     halted: boot.account.halted,
   });
+  // Settlements already in the ledger. Seeding these BEFORE any accrual runs
+  // is what makes the boot replay safe: a boundary recorded by the previous
+  // process is recognised and skipped rather than charged twice.
+  if (boot.fundingEvents?.length) {
+    broker.restoreFundingEvents(boot.fundingEvents);
+  }
 
   let lastPendingSweep = 0;
   const engine = new SwarmEngine(symbols, {
@@ -425,24 +473,153 @@ export function createEngineRuntime(opts: EngineRuntimeOptions): EngineRuntime {
 
   let flushIv: ReturnType<typeof setInterval> | null = null;
   let fundingIv: ReturnType<typeof setInterval> | null = null;
+  let fundingSpecIv: ReturnType<typeof setInterval> | null = null;
   let matchIv: ReturnType<typeof setInterval> | null = null;
   let trackIv: ReturnType<typeof setInterval> | null = null;
   let snapshotIv: ReturnType<typeof setInterval> | null = null;
   let lastTickCount = 0;
   let lastSample = Date.now();
 
-  const loadFunding = async () => {
+  /**
+   * Per-symbol settlement period, from instruments-info. Loaded once at start
+   * and refreshed hourly — Bybit can move a contract between schedules (8h to
+   * 4h or 1h), and the engine must follow rather than assume.
+   */
+  const loadFundingIntervals = async () => {
     try {
-      const res = await fetch("https://api.bybit.com/v5/market/tickers?category=linear");
-      const json = (await res.json()) as {
-        result?: { list?: Array<{ symbol: string; fundingRate: string }> };
-      };
-      for (const t of json.result?.list ?? []) {
-        const rate = Number(t.fundingRate);
-        if (Number.isFinite(rate)) broker.setFundingRate(t.symbol, rate);
+      const intervals = await fetchFundingIntervals();
+      for (const [symbol, minutes] of intervals) {
+        broker.setFundingIntervalMinutes(symbol, minutes);
       }
     } catch {
-      // Keep the default 0.01%/8h assumption when the REST call fails.
+      // Fall back to the 8h assumption per symbol until the next attempt.
+    }
+  };
+
+  /**
+   * The exchange's own funding clock: the predicted rate AND `nextFundingTime`.
+   * Nothing here computes a settlement time — Bybit is the authority, so a
+   * schedule change lands automatically on the next poll.
+   */
+  const loadFunding = async () => {
+    try {
+      const rows = await fetchFundingTickers();
+      const now = Date.now();
+      for (const t of rows) broker.applyFundingTicker(t, now);
+    } catch {
+      // Keep the last known schedule and the default rate assumption.
+    }
+  };
+
+  /**
+   * Replace provisional charges with the rate Bybit ACTUALLY settled.
+   *
+   * The ticker's funding rate drifts right up to settlement, so charging at it
+   * is a good estimate but not the truth. history-fund-rate publishes the
+   * settled rate shortly after the boundary; this books the difference exactly
+   * once and marks the settlement final. A boundary Bybit has not published
+   * yet stays provisional and is retried — never guessed.
+   */
+  const reconcileFunding = async () => {
+    const pending = broker.getProvisionalFundings();
+    if (pending.length === 0) return;
+    // One request per symbol, covering that symbol's whole pending span.
+    const bySymbol = new Map<string, { from: number; to: number }>();
+    for (const e of pending) {
+      const span = bySymbol.get(e.symbol);
+      if (!span) bySymbol.set(e.symbol, { from: e.at, to: e.at });
+      else {
+        span.from = Math.min(span.from, e.at);
+        span.to = Math.max(span.to, e.at);
+      }
+    }
+    for (const [symbol, span] of bySymbol) {
+      try {
+        const settled = await fetchSettledFundingRates(symbol, span.from, span.to);
+        if (settled.size === 0) continue;
+        for (const e of pending) {
+          if (e.symbol !== symbol) continue;
+          let rate = settled.get(e.at);
+          if (rate === undefined) {
+            // Tolerate sub-second drift between our anchor and Bybit's stamp.
+            for (const [ts, r] of settled) {
+              if (Math.abs(ts - e.at) <= 10_000) {
+                rate = r;
+                break;
+              }
+            }
+          }
+          if (rate === undefined) continue;
+          const delta = broker.reconcileSettledFunding(e.symbol, e.side, e.at, rate);
+          if (delta !== null) {
+            void persistence
+              .saveFundingEvent?.({
+                clientId: e.positionId,
+                symbol: e.symbol,
+                side: e.side,
+                at: e.at,
+                quantity: e.quantity,
+                markPrice: e.markPrice,
+                rate,
+                intervalMs: e.intervalMs,
+                notional: e.notional,
+                amount: e.amount + delta,
+                rateSource: "settled",
+              })
+              .catch(() => {
+                /* best-effort; the next pass retries */
+              });
+            if (delta !== 0) {
+              console.info(
+                `[funding] ${e.symbol} ${e.side} @ ${new Date(e.at).toISOString()} ` +
+                  `confirmed at ${(rate * 100).toFixed(4)}% → adjusted $${delta.toFixed(4)}`,
+              );
+            }
+          }
+        }
+      } catch {
+        // Leave them provisional; the next pass retries.
+      }
+    }
+  };
+
+  /**
+   * Charge settlements that happened while this process was down.
+   *
+   * A restarted position resumes with its persisted `lastFundingAt`
+   * watermark, so the boundaries it missed are known. They are replayed at
+   * their SETTLED rates from history-fund-rate — not at today's live rate,
+   * and not lumped into a single N-interval charge, both of which the old
+   * fixed-grid accrual did. Boundaries already recorded in the funding-event
+   * table were seeded into the broker at boot and are skipped.
+   */
+  const recoverMissedFunding = async () => {
+    const now = Date.now();
+    const clock = broker.getFundingClock();
+    for (const p of broker.getPositions()) {
+      const missed = clock.boundariesBetween(p.symbol, p.lastFundingAt, now);
+      if (missed.length === 0) continue;
+      try {
+        const settled = await fetchSettledFundingRates(
+          p.symbol,
+          missed[0],
+          missed[missed.length - 1],
+        );
+        for (const at of missed) {
+          const rate = settled.get(at);
+          if (rate === undefined) continue;
+          const fee = broker.replaySettledFunding(p.symbol, at, rate);
+          if (fee !== null) {
+            console.info(
+              `[funding] replayed missed settlement ${p.symbol} ${p.side} ` +
+                `@ ${new Date(at).toISOString()} at ${(rate * 100).toFixed(4)}% → $${fee.toFixed(4)}`,
+            );
+          }
+        }
+      } catch {
+        // The live accrual loop picks these up at the predicted rate, and the
+        // reconciliation pass corrects them once Bybit publishes.
+      }
     }
   };
 
@@ -453,8 +630,19 @@ export function createEngineRuntime(opts: EngineRuntimeOptions): EngineRuntime {
     micro.start();
     engine.start();
 
-    void loadFunding();
-    fundingIv = setInterval(loadFunding, 5 * 60 * 1000);
+    // Order matters: intervals then tickers, so the first schedule the clock
+    // holds is already the exchange's own, then replay whatever settled while
+    // this process was down before the live accrual loop starts.
+    void loadFundingIntervals()
+      .then(loadFunding)
+      .then(recoverMissedFunding)
+      .catch(() => {
+        /* every step already degrades gracefully on its own */
+      });
+    fundingIv = setInterval(() => {
+      void loadFunding().then(reconcileFunding);
+    }, 5 * 60 * 1000);
+    fundingSpecIv = setInterval(() => void loadFundingIntervals(), 60 * 60 * 1000);
     matchIv = setInterval(() => broker.processPending(Date.now()), 100);
     trackIv = setInterval(() => {
       const hot = new Set<string>();
@@ -521,6 +709,7 @@ export function createEngineRuntime(opts: EngineRuntimeOptions): EngineRuntime {
   function stop() {
     if (flushIv) clearInterval(flushIv);
     if (fundingIv) clearInterval(fundingIv);
+    if (fundingSpecIv) clearInterval(fundingSpecIv);
     if (matchIv) clearInterval(matchIv);
     if (trackIv) clearInterval(trackIv);
     if (snapshotIv) clearInterval(snapshotIv);

@@ -292,13 +292,20 @@ export function EdgePanel({
         {report.execution && report.execution.trades > 0 && (
           <p className="mt-2 text-[10px] text-muted-foreground">
             Stored execution: gross {usd(report.execution.gross_pnl)} → net{" "}
-            {usd(report.execution.net_pnl)} after {usd(report.execution.fees)} fees,{" "}
-            {usd(report.execution.funding)} funding and {usd(report.execution.slip_cost)}{" "}
-            slippage · avg round-trip slip{" "}
+            {usd(report.execution.net_pnl)} after {usd(report.execution.fees)} fees and{" "}
+            {usd(report.execution.funding)} funding · {usd(report.execution.slip_cost)}{" "}
+            slippage already inside gross (avg round-trip{" "}
             {(
               report.execution.avg_entry_slip_bps + report.execution.avg_exit_slip_bps
             ).toFixed(1)}{" "}
-            bps · {report.execution.liquidations} liquidations.
+            bps) · {report.execution.liquidations} liquidations.
+            {Math.abs(report.execution.residual ?? 0) > 0.01 && (
+              <span className="text-bear">
+                {" "}
+                Unreconciled {usd(report.execution.residual ?? 0)} across{" "}
+                {report.execution.unreconciled ?? 0} trade(s).
+              </span>
+            )}
           </p>
         )}
         <p className="mt-2 text-[10px] text-muted-foreground">

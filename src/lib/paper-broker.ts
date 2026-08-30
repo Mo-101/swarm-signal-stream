@@ -15,7 +15,13 @@ import {
   type InstrumentFilter,
 } from "@/lib/microstructure";
 import {
-  FUNDING_INTERVAL_MS as PERP_FUNDING_INTERVAL_MS,
+  FundingClock,
+  formatInterval,
+  type RateSource,
+  type TickerFunding,
+} from "@/lib/funding-clock";
+import {
+  DEFAULT_FUNDING_INTERVAL_MS as PERP_FUNDING_INTERVAL_MS,
   bankruptcyPrice,
   fundingPayment,
   grossPnl as grossPnlOf,
@@ -206,23 +212,38 @@ export interface RiskAlert {
   sameSide: number;
 }
 
-/** One settled 8h funding boundary for one position. */
+/**
+ * One settlement, for one position, at one exchange-reported funding time.
+ * Exactly one of these exists per (symbol, side, at) — the accrual loop is
+ * idempotent, so a restart or a replayed boundary never charges twice.
+ */
 export interface FundingEvent {
+  /** The exchange's settlement timestamp, not a locally computed grid point. */
   at: number;
   symbol: string;
   side: "BUY" | "SELL";
-  /** Funding rate per interval used for the charge. */
+  /** Position the charge was applied to. */
+  positionId: string;
+  /** Funding rate for this settlement. */
   rate: number;
-  /** Number of 8h boundaries settled in this accrual. */
-  intervals: number;
-  /** Notional the charge was applied to. */
+  /** This contract's settlement period at the time of the charge, in ms. */
+  intervalMs: number;
+  /** Position quantity AT settlement — not an average over the interval. */
+  quantity: number;
+  /** Mark price at settlement. Position value is quantity × this. */
+  markPrice: number;
+  /** Notional the charge was applied to: |quantity| × markPrice. */
   notional: number;
   /** USD paid (positive) or received (negative). */
   amount: number;
-  /** Position's cumulative funding after this accrual. */
+  /** Position's cumulative funding after this settlement. */
   cumulative: number;
-  /** Whether the live exchange rate was used, or the configured default. */
-  liveRate: boolean;
+  /**
+   * "settled" = confirmed against history-fund-rate and final.
+   * "live"    = provisional, charged at the ticker's predicted rate.
+   * "default" = no exchange rate available; the configured assumption.
+   */
+  rateSource: RateSource;
 }
 
 export interface FundingStats {
@@ -231,12 +252,20 @@ export interface FundingStats {
   paid: number;
   received: number;
   accruals: number;
+  /** Settlements charged at a provisional rate, still awaiting confirmation. */
+  provisional: number;
   /** Symbols with a live funding rate loaded from the exchange. */
   liveRates: number;
-  /** Mean live rate across currently open positions, per 8h interval. */
+  /** Mean live rate across currently open positions, per settlement. */
   avgOpenRate: number;
-  /** Projected funding cost of the open book over the next 8h boundary. */
-  projectedNext8hUsd: number;
+  /** Projected funding cost of the open book at its next settlement. */
+  projectedNextUsd: number;
+  /** Soonest exchange-reported settlement across open positions, ms epoch. */
+  nextFundingAt: number | null;
+  /** Settlement periods in force across the open book, e.g. { "8h": 3, "4h": 1 }. */
+  intervalMix: Record<string, number>;
+  /** Times the exchange re-cut a settlement schedule this session. */
+  scheduleChanges: number;
   /** Funding already accrued by positions still open. */
   openCarryUsd: number;
   /** Positions closed by the funding-aware CARRY rule. */
@@ -369,7 +398,11 @@ export interface PaperConfig {
   costGateMinSamples: number;
 }
 
-/** Bybit settles funding at 00:00, 08:00 and 16:00 UTC. (canonical: math/perp) */
+/**
+ * Fallback settlement period, for a symbol the exchange has not described yet.
+ * The real schedule is per-symbol and comes from the funding clock — nothing
+ * in this file may assume 00:00 / 08:00 / 16:00 UTC. (canonical: math/perp)
+ */
 export const FUNDING_INTERVAL_MS = PERP_FUNDING_INTERVAL_MS;
 export const lastFundingBoundary = lastFundingBoundaryOf;
 
@@ -580,16 +613,27 @@ export class PaperBroker {
     this.pnlLedger.set(v);
   }
   private halted = false;
-  /** Live funding rate per symbol (per interval), when the feed provides one. */
-  private fundingRates = new Map<string, number>();
+  /**
+   * Per-symbol funding schedule and rate, straight from Bybit. The broker
+   * never derives a settlement time itself.
+   */
+  private clock = new FundingClock();
   private totalFees = 0;
   private totalFunding = 0;
   private liquidations = 0;
   // ── funding telemetry ──
   private fundingEvents: FundingEvent[] = [];
+  /**
+   * `${symbol}|${side}|${at}` for every settlement already charged. This is
+   * what makes accrual idempotent across a replay or a restart: a boundary in
+   * here is never charged a second time, whatever asks for it.
+   */
+  private settledBoundaries = new Set<string>();
   private fundingAccruals = 0;
   private fundingPaidUsd = 0;
   private fundingReceivedUsd = 0;
+  /** Settlements charged at a provisional rate, not yet confirmed. */
+  private provisionalFundings = 0;
   private carryExits = 0;
   private timeExits = 0;
   private carrySavedUsd = 0;
@@ -736,12 +780,41 @@ export class PaperBroker {
     };
   }
 
-  /** Feed in Bybit's live funding rate (per interval) for accurate carry. */
+  /** Feed in Bybit's live funding rate (per settlement) for accurate carry. */
   setFundingRate(symbol: string, rate: number) {
-    if (Number.isFinite(rate)) this.fundingRates.set(symbol, rate);
+    if (Number.isFinite(rate)) this.clock.applyTicker({ symbol, fundingRate: rate });
   }
+
+  /**
+   * Fold in one Bybit ticker row: the predicted rate AND the exchange's own
+   * `nextFundingTime`. Returns true when the exchange re-cut the schedule.
+   */
+  applyFundingTicker(t: TickerFunding, now = Date.now()): boolean {
+    const moved = this.clock.applyTicker(t, now);
+    if (moved) {
+      const s = this.clock.scheduleOf(t.symbol);
+      console.info(
+        `[funding] ${t.symbol} schedule changed → next ${
+          s?.nextFundingAt ? new Date(s.nextFundingAt).toISOString() : "?"
+        } every ${formatInterval(s?.intervalMs ?? FUNDING_INTERVAL_MS)}`,
+      );
+    }
+    return moved;
+  }
+
+  /** `fundingInterval` from instruments-info, in minutes. */
+  setFundingIntervalMinutes(symbol: string, minutes: number) {
+    this.clock.setIntervalMinutes(symbol, minutes);
+  }
+
+  /** The clock itself, for the runtime's settled-rate reconciliation. */
+  getFundingClock(): FundingClock {
+    return this.clock;
+  }
+
   private rateFor(symbol: string) {
-    return this.fundingRates.get(symbol) ?? this.cfg.defaultFundingRate;
+    const s = this.clock.scheduleOf(symbol);
+    return s?.rate ?? this.cfg.defaultFundingRate;
   }
 
   /** Prefer the exchange mark price; fall back to the last trade. */
@@ -754,47 +827,186 @@ export class PaperBroker {
     return last && last > 0 ? last : null;
   }
 
+  private boundaryKey(symbol: string, side: "BUY" | "SELL", at: number): string {
+    return `${symbol}|${side}|${at}`;
+  }
+
   /**
-   * Settle any 8h funding boundaries crossed since the last check.
-   * Positive rate: longs pay shorts. Negative: shorts pay longs.
-   * Charged on position value at the mark, per Bybit's funding mechanism.
+   * Settle every funding boundary the EXCHANGE reports as having passed since
+   * this position last settled.
+   *
+   *   fee = |q_τ| · M_τ · F_τ · sign(side)
+   *
+   * Three things this deliberately does not do:
+   *
+   *  - It does not predict when funding happens. Boundaries come from the
+   *    clock, which anchors on Bybit's `nextFundingTime` and per-symbol
+   *    interval, so 8h / 4h / 1h contracts and mid-flight schedule changes all
+   *    work with no code change.
+   *  - It does not lump N missed intervals into one charge at today's rate.
+   *    Each boundary is settled separately, at the rate for THAT boundary, so
+   *    a restart that missed three settlements produces three correct events
+   *    rather than one wrong one.
+   *  - It does not average the position size over the interval. Bybit charges
+   *    on the quantity held AT settlement, so that is what is used.
+   *
+   * Idempotent: a boundary already in `settledBoundaries` is skipped, which is
+   * what makes a replay after a restart safe.
    */
   accrueFunding(now: number, marks: Map<string, number>) {
     for (const p of this.positions.values()) {
-      const boundary = lastFundingBoundary(now);
-      if (boundary <= p.lastFundingAt) continue;
-      const intervals = Math.round((boundary - p.lastFundingAt) / FUNDING_INTERVAL_MS);
-      const mark = this.markFor(p.symbol, marks) ?? p.entryPrice;
-      const rate = this.rateFor(p.symbol);
-      const notional = mark * p.size;
-      const fee = fundingPayment(notional * intervals, rate, p.side);
-      p.fundingPaid += fee;
-      p.lastFundingAt = boundary;
-      this.realizedPnl -= fee;
-      this.totalFunding += fee;
-
-      this.fundingAccruals += 1;
-      if (fee >= 0) this.fundingPaidUsd += fee;
-      else this.fundingReceivedUsd += -fee;
-      const ev: FundingEvent = {
-        at: boundary,
-        symbol: p.symbol,
-        side: p.side,
-        rate,
-        intervals,
-        notional,
-        amount: fee,
-        cumulative: p.fundingPaid,
-        liveRate: this.fundingRates.has(p.symbol),
-      };
-      this.fundingEvents = [ev, ...this.fundingEvents].slice(0, 200);
-      this.events.onFunding?.(ev);
-      console.info(
-        `[funding] ${p.symbol} ${p.side} ${intervals}×8h rate=${(rate * 100).toFixed(4)}%` +
-          ` notional=$${notional.toFixed(2)} → ${fee >= 0 ? "paid" : "received"} $${Math.abs(fee).toFixed(4)}` +
-          ` (cum $${p.fundingPaid.toFixed(4)}, ${ev.liveRate ? "live" : "default"} rate)`,
-      );
+      const boundaries = this.clock.boundariesBetween(p.symbol, p.lastFundingAt, now);
+      for (const at of boundaries) {
+        this.settleFundingBoundary(p, at, marks);
+      }
     }
+  }
+
+  /** Charge one settlement against one open position. Returns the USD amount. */
+  private settleFundingBoundary(
+    p: Position,
+    at: number,
+    marks?: Map<string, number>,
+  ): number | null {
+    const key = this.boundaryKey(p.symbol, p.side, at);
+    if (this.settledBoundaries.has(key)) {
+      // Already charged — only move the watermark forward.
+      if (at > p.lastFundingAt) p.lastFundingAt = at;
+      return null;
+    }
+
+    const mark = this.markFor(p.symbol, marks) ?? p.entryPrice;
+    const { rate, source } = this.clock.rateAt(p.symbol, at, this.cfg.defaultFundingRate);
+    const notional = Math.abs(p.size) * mark;
+    const fee = fundingPayment(notional, rate, p.side);
+
+    p.fundingPaid += fee;
+    p.lastFundingAt = at;
+    this.realizedPnl -= fee;
+    this.totalFunding += fee;
+    this.settledBoundaries.add(key);
+
+    this.fundingAccruals += 1;
+    if (source !== "settled") this.provisionalFundings += 1;
+    if (fee >= 0) this.fundingPaidUsd += fee;
+    else this.fundingReceivedUsd += -fee;
+
+    const intervalMs = this.clock.intervalMs(p.symbol);
+    const ev: FundingEvent = {
+      at,
+      symbol: p.symbol,
+      side: p.side,
+      positionId: p.id,
+      rate,
+      intervalMs,
+      quantity: p.size,
+      markPrice: mark,
+      notional,
+      amount: fee,
+      cumulative: p.fundingPaid,
+      rateSource: source,
+    };
+    this.fundingEvents = [ev, ...this.fundingEvents].slice(0, 200);
+    this.events.onFunding?.(ev);
+    console.info(
+      `[funding] ${p.symbol} ${p.side} @ ${new Date(at).toISOString()} ` +
+        `every ${formatInterval(intervalMs)} rate=${(rate * 100).toFixed(4)}% (${source}) ` +
+        `notional=$${notional.toFixed(2)} → ${fee >= 0 ? "paid" : "received"} $${Math.abs(fee).toFixed(4)} ` +
+        `(cum $${p.fundingPaid.toFixed(4)})`,
+    );
+    return fee;
+  }
+
+  /**
+   * Replay one settlement that happened while this process was down, at the
+   * rate Bybit actually settled — the caller reads it from history-fund-rate.
+   * Safe to call repeatedly: a boundary already charged is a no-op.
+   */
+  replaySettledFunding(
+    symbol: string,
+    at: number,
+    settledRate: number,
+    markPrice?: number,
+  ): number | null {
+    const p = this.positions.get(symbol);
+    if (!p) return null;
+    // Funding applies only to a position that was open at settlement.
+    if (p.openedAt >= at) return null;
+    this.clock.setSettledRate(symbol, at, settledRate);
+    if (markPrice && markPrice > 0) this.lastMark.set(symbol, markPrice);
+    return this.settleFundingBoundary(p, at);
+  }
+
+  /**
+   * Reconcile a boundary charged at the PREDICTED rate against the rate Bybit
+   * actually settled. The ticker's rate drifts right up to settlement, so the
+   * provisional charge is usually a few percent off; this books the difference
+   * exactly once and marks the event final.
+   *
+   * The delta lands wherever the position went: on the still-open position, or
+   * on the closed trade it became. Returns the USD adjustment, or null when
+   * there is nothing to correct.
+   */
+  reconcileSettledFunding(
+    symbol: string,
+    side: "BUY" | "SELL",
+    at: number,
+    settledRate: number,
+  ): number | null {
+    this.clock.setSettledRate(symbol, at, settledRate);
+    const idx = this.fundingEvents.findIndex(
+      (e) => e.symbol === symbol && e.side === side && e.at === at,
+    );
+    if (idx < 0) return null;
+    const ev = this.fundingEvents[idx];
+    if (ev.rateSource === "settled") return null;
+
+    const corrected = fundingPayment(ev.notional, settledRate, side);
+    const delta = corrected - ev.amount;
+    this.fundingEvents[idx] = {
+      ...ev,
+      rate: settledRate,
+      amount: corrected,
+      cumulative: ev.cumulative + delta,
+      rateSource: "settled",
+    };
+    this.provisionalFundings = Math.max(0, this.provisionalFundings - 1);
+    if (delta === 0) return 0;
+
+    this.realizedPnl -= delta;
+    this.totalFunding += delta;
+    if (delta >= 0) this.fundingPaidUsd += delta;
+    else this.fundingReceivedUsd += -delta;
+
+    const open = this.positions.get(symbol);
+    if (open && open.id === ev.positionId) {
+      open.fundingPaid += delta;
+      return delta;
+    }
+    // The position closed before the settled rate was published. Correct the
+    // stored trade too, or its net PnL would no longer satisfy
+    // net = gross − fees − funding.
+    const t = this.closed.find((c) => c.id === ev.positionId);
+    if (t) {
+      t.funding += delta;
+      t.pnl = round(t.pnl - delta, 8);
+      t.pnlPct = roiPct(t.pnl, t.entryPrice * t.size);
+      t.roePct = roePct(t.pnl, t.initialMargin);
+    }
+    return delta;
+  }
+
+  /** Settlements charged at a provisional rate, oldest first. */
+  getProvisionalFundings(): FundingEvent[] {
+    return this.fundingEvents.filter((e) => e.rateSource !== "settled").reverse();
+  }
+
+  /**
+   * Seed the idempotency set from durably stored settlements, so a restart
+   * cannot re-charge a boundary that already hit the ledger.
+   */
+  restoreFundingEvents(events: Array<{ symbol: string; side: "BUY" | "SELL"; at: number }>) {
+    for (const e of events) this.settledBoundaries.add(this.boundaryKey(e.symbol, e.side, e.at));
   }
 
   /** Funding / carry telemetry, used to verify the CARRY exit reduces drag. */
@@ -803,12 +1015,19 @@ export class PaperBroker {
     let projected = 0;
     let rateSum = 0;
     let rateCount = 0;
+    let nextAt: number | null = null;
+    const now = Date.now();
+    const openSymbols: string[] = [];
     for (const p of this.positions.values()) {
       openCarry += p.fundingPaid;
+      openSymbols.push(p.symbol);
       const mark = this.markFor(p.symbol, marks) ?? p.entryPrice;
       const rate = this.rateFor(p.symbol);
-      projected += fundingPayment(mark * p.size, rate, p.side);
-      if (this.fundingRates.has(p.symbol)) {
+      // Projected cost at THIS symbol's next settlement, whenever that is.
+      projected += fundingPayment(Math.abs(p.size) * mark, rate, p.side);
+      const due = this.clock.nextFundingAt(p.symbol, now);
+      if (nextAt === null || due < nextAt) nextAt = due;
+      if (this.clock.hasLiveRate(p.symbol)) {
         rateSum += rate;
         rateCount += 1;
       }
@@ -820,9 +1039,13 @@ export class PaperBroker {
       paid: this.fundingPaidUsd,
       received: this.fundingReceivedUsd,
       accruals: this.fundingAccruals,
-      liveRates: this.fundingRates.size,
+      provisional: this.provisionalFundings,
+      liveRates: this.clock.liveRateCount(),
       avgOpenRate: rateCount ? rateSum / rateCount : 0,
-      projectedNext8hUsd: projected,
+      projectedNextUsd: projected,
+      nextFundingAt: nextAt,
+      intervalMix: this.clock.intervalMix(openSymbols),
+      scheduleChanges: this.clock.getScheduleChanges(),
       openCarryUsd: openCarry,
       carryExits: this.carryExits,
       timeExits: this.timeExits,
@@ -909,7 +1132,11 @@ export class PaperBroker {
         ...p,
         entryFee: p.entryFee ?? p.notional * this.cfg.takerFeeRate,
         fundingPaid: p.fundingPaid ?? 0,
-        lastFundingAt: p.lastFundingAt ?? lastFundingBoundary(p.openedAt),
+        // Watermark, not a grid point: every exchange settlement after this
+        // instant is still owed. Falling back to the open time is correct for
+        // a row written before funding was tracked — the boot replay then
+        // charges the real boundaries at their real settled rates.
+        lastFundingAt: p.lastFundingAt ?? p.openedAt,
         leverage,
         initialMargin: p.initialMargin ?? p.notional / leverage,
         maintenanceMarginRate: mmr,
@@ -1291,7 +1518,8 @@ export class PaperBroker {
       agents: order.agents,
       entryFee,
       fundingPaid: 0,
-      lastFundingAt: lastFundingBoundary(now),
+      // A position owes funding at every settlement strictly after it opened.
+      lastFundingAt: now,
       leverage,
       initialMargin,
       maintenanceMarginRate: tier.mmr,
@@ -1432,12 +1660,16 @@ export class PaperBroker {
       if (reward > 0 && p.fundingPaid >= budget) {
         this.carryExits += 1;
         // What staying to max hold would have cost on top, at the current rate.
-        const remainingIntervals = Math.max(
-          0,
-          Math.floor((this.cfg.maxHoldMs - heldMs) / FUNDING_INTERVAL_MS),
-        );
+        // Counted off the exchange's own schedule, so a 1h contract is charged
+        // eight settlements where an 8h one is charged one — the fixed /8h
+        // divisor understated short-interval contracts by exactly that factor.
+        const remainingIntervals = this.clock.boundariesBetween(
+          p.symbol,
+          now,
+          now + Math.max(0, this.cfg.maxHoldMs - heldMs),
+        ).length;
         const wouldPay = fundingPayment(
-          mark * p.size * remainingIntervals,
+          Math.abs(p.size) * mark * remainingIntervals,
           this.rateFor(p.symbol),
           p.side,
         );
@@ -1647,9 +1879,11 @@ export class PaperBroker {
     this.totalFunding = 0;
     this.liquidations = 0;
     this.fundingEvents = [];
+    this.settledBoundaries.clear();
     this.fundingAccruals = 0;
     this.fundingPaidUsd = 0;
     this.fundingReceivedUsd = 0;
+    this.provisionalFundings = 0;
     this.carryExits = 0;
     this.timeExits = 0;
     this.carrySavedUsd = 0;

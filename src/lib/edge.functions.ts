@@ -1,9 +1,23 @@
 import { createServerFn } from "@tanstack/react-start";
 import { requireAuth } from "@/lib/auth/auth-middleware";
 import { EMPTY_EDGE_REPORT, type EdgeReport } from "@/lib/edge-model";
-import type { StoredTrade, SignalInput, OpenTradeInput, CloseTradeInput } from "@/lib/db/types";
+import type {
+  StoredTrade,
+  SignalInput,
+  OpenTradeInput,
+  CloseTradeInput,
+  FundingEventInput,
+  StoredFundingEvent,
+} from "@/lib/db/types";
 
-export type { StoredTrade, SignalInput, OpenTradeInput, CloseTradeInput };
+export type {
+  StoredTrade,
+  SignalInput,
+  OpenTradeInput,
+  CloseTradeInput,
+  FundingEventInput,
+  StoredFundingEvent,
+};
 
 export const loadEngineState = createServerFn({ method: "GET" })
   .middleware([requireAuth])

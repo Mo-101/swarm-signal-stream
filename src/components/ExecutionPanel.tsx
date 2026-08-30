@@ -388,7 +388,15 @@ function AlphaVsFills({ closed, stats }: { closed: ClosedTrade[]; stats: Executi
   const fees = closed.reduce((a, t) => a + t.fees, 0);
   const funding = closed.reduce((a, t) => a + t.funding, 0);
   const slip = closed.reduce((a, t) => a + t.slipCostUsd, 0);
-  const cost = fees + funding + slip;
+  // Deductions from gross are fees and funding, and ONLY those. gross is
+  // computed from the prices we actually filled at, so slippage is already
+  // inside it — subtracting it here would double-count and is what made this
+  // panel's numbers fail to reconcile.
+  const cost = fees + funding;
+  // net − (gross − fees − funding). Non-zero means a row cannot satisfy the
+  // identity: a liquidation, whose PnL is capped at the margin rather than
+  // derived from the exit price. Shown rather than hidden.
+  const residual = net - (gross - fees - funding);
   const share = (v: number) => (gross !== 0 ? Math.min(100, (Math.abs(v) / Math.abs(gross)) * 100) : 0);
   const avgLatency = n ? closed.reduce((a, t) => a + t.latencyMs, 0) / n : 0;
   const bookShare = n ? (closed.filter((t) => t.bookPriced).length / n) * 100 : 0;
@@ -413,15 +421,15 @@ function AlphaVsFills({ closed, stats }: { closed: ClosedTrade[]; stats: Executi
       />
       <div className="grid gap-3 p-4 sm:grid-cols-2 lg:grid-cols-4">
         <Card
-          title="Gross (alpha)"
+          title="Gross (at fills)"
           value={usd(gross)}
-          sub={`${n} round trips at signal-to-trigger prices`}
+          sub={`${n} round trips, entry fill → exit fill (slippage already inside)`}
           tone={gross >= 0 ? "bull" : "bear"}
         />
         <Card
-          title="Execution cost"
+          title="Deducted from gross"
           value={usd(-cost)}
-          sub={`fees ${usd(fees)} · funding ${usd(funding)} · slip ${usd(slip)}`}
+          sub={`fees ${usd(fees)} · funding ${usd(funding)}`}
           tone={cost > 0 ? "bear" : "neutral"}
         />
         <Card
@@ -438,10 +446,16 @@ function AlphaVsFills({ closed, stats }: { closed: ClosedTrade[]; stats: Executi
         />
       </div>
       <div className="space-y-2 px-4 pb-4">
+        <p className="text-[11px] text-muted-foreground">
+          net = gross − fees − funding. Slippage is not in that identity: gross is
+          measured between actual fills, so it already carries the slippage cost.
+          The slippage bar is attribution — how much of gross the fills gave up
+          against the signal price — never a further deduction.
+        </p>
         {[
           { label: "Fees", value: fees, className: "bg-bear/60" },
           { label: "Funding", value: funding, className: "bg-accent/60" },
-          { label: "Slippage", value: slip, className: "bg-bear/40" },
+          { label: "Slippage*", value: slip, className: "bg-bear/40" },
         ].map((row) => (
           <div key={row.label} className="flex items-center gap-3">
             <span className="w-20 text-[11px] text-muted-foreground">{row.label}</span>
@@ -454,6 +468,13 @@ function AlphaVsFills({ closed, stats }: { closed: ClosedTrade[]; stats: Executi
           </div>
         ))}
         <p className="pt-1 text-[11px] text-muted-foreground">{verdict}</p>
+        {Math.abs(residual) > 0.01 && (
+          <p className="text-[11px] text-bear">
+            Unreconciled: {usd(residual)} — net does not equal gross − fees − funding.
+            Expected only for liquidations, whose PnL is capped at the posted margin
+            rather than derived from the exit fill.
+          </p>
+        )}
       </div>
     </section>
   );

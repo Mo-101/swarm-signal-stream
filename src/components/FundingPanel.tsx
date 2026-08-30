@@ -14,6 +14,25 @@ function pctRate(v: number): string {
 function time(ms: number): string {
   return new Date(ms).toLocaleTimeString([], { hour12: false });
 }
+/** "in 2h 13m" — read off the exchange's own next settlement, never computed. */
+function countdown(at: number | null): string {
+  if (at === null) return "—";
+  const ms = at - Date.now();
+  if (ms <= 0) return "due";
+  const h = Math.floor(ms / 3_600_000);
+  const m = Math.floor((ms % 3_600_000) / 60_000);
+  return h > 0 ? `in ${h}h ${m}m` : `in ${m}m`;
+}
+/** "8h", "4h", "1h", "30m" — whatever this contract actually runs on. */
+function interval(ms: number): string {
+  const hours = ms / 3_600_000;
+  return hours >= 1 ? `${Number(hours.toFixed(2))}h` : `${Math.round(ms / 60_000)}m`;
+}
+const RATE_SOURCE_LABEL: Record<string, string> = {
+  settled: "confirmed",
+  live: "predicted",
+  default: "assumed",
+};
 
 const REGIME_LABELS: Record<RegimeStyle, string> = {
   trend: "Trending",
@@ -35,6 +54,11 @@ export function FundingPanel({
   regimeMix: Record<RegimeStyle, number>;
 }) {
   const mixTotal = Object.values(regimeMix).reduce((a, b) => a + b, 0);
+  // "3 × 8h · 1 × 4h" — the open book's real schedules, not an assumed one.
+  const intervalSummary = Object.entries(funding.intervalMix)
+    .sort((a, b) => b[1] - a[1])
+    .map(([label, n]) => `${n} × ${label}`)
+    .join(" · ");
 
   return (
     <div className="space-y-4 p-4">
@@ -54,8 +78,10 @@ export function FundingPanel({
         <Card
           title="Open carry"
           value={usd(funding.openCarryUsd)}
-          sub={`next 8h boundary ≈ ${usd(funding.projectedNext8hUsd)} · avg rate ${pctRate(funding.avgOpenRate)}`}
-          tone={funding.projectedNext8hUsd > 0 ? "bear" : "neutral"}
+          sub={`next settlement ${countdown(funding.nextFundingAt)} ≈ ${usd(
+            funding.projectedNextUsd,
+          )} · avg rate ${pctRate(funding.avgOpenRate)}`}
+          tone={funding.projectedNextUsd > 0 ? "bear" : "neutral"}
         />
         <Card
           title="CARRY exits"
@@ -64,6 +90,23 @@ export function FundingPanel({
           tone={funding.carryExits > 0 ? "bull" : "neutral"}
         />
       </div>
+
+      <p className="text-[11px] text-muted-foreground">
+        Funding is modeled per symbol from Bybit&apos;s live rate and its
+        exchange-reported next settlement time. Intervals vary by contract and can
+        change dynamically — nothing here assumes a fixed 8h schedule.
+        {intervalSummary && <> Open book: {intervalSummary}.</>}
+        {funding.scheduleChanges > 0 && (
+          <> {funding.scheduleChanges} schedule change(s) followed this session.</>
+        )}
+        {funding.provisional > 0 && (
+          <>
+            {" "}
+            {funding.provisional} settlement(s) charged at the predicted rate, awaiting
+            confirmation from funding history.
+          </>
+        )}
+      </p>
 
       {mixTotal > 0 && (
         <section className="rounded-lg border border-border">
@@ -96,12 +139,12 @@ export function FundingPanel({
         <div className="border-b border-border px-4 py-3">
           <h3 className="text-sm font-semibold">Funding settlements</h3>
           <p className="text-xs text-muted-foreground">
-            Every 8h boundary charged to an open position, newest first
+            Every exchange settlement charged to an open position, newest first
           </p>
         </div>
         {funding.recent.length === 0 ? (
           <div className="px-4 py-10 text-center text-xs text-muted-foreground">
-            No funding boundary has been crossed yet.
+            No funding settlement has been reached yet.
           </div>
         ) : (
           <ul className="max-h-72 divide-y divide-border overflow-y-auto">
@@ -120,8 +163,10 @@ export function FundingPanel({
                   </span>
                 </div>
                 <p className="mt-0.5 text-[11px] text-muted-foreground">
-                  {e.intervals}× interval at {pctRate(e.rate)} {e.liveRate ? "(live)" : "(default)"}{" "}
-                  on {usd(e.notional)} notional · cumulative {usd(e.cumulative)} · {time(e.at)}
+                  {interval(e.intervalMs)} settlement at {pctRate(e.rate)} (
+                  {RATE_SOURCE_LABEL[e.rateSource] ?? e.rateSource}) on {usd(e.notional)}{" "}
+                  notional — {e.quantity} @ mark {usd(e.markPrice)} · cumulative{" "}
+                  {usd(e.cumulative)} · {time(e.at)}
                 </p>
               </li>
             ))}

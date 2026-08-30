@@ -78,8 +78,41 @@ export interface CloseTradeInput {
   funding?: number;
 }
 
+/**
+ * One funding settlement, as durably stored. `at` is the EXCHANGE's settlement
+ * timestamp — Bybit's nextFundingTime, later confirmed as
+ * fundingRateTimestamp — never a locally computed 8h grid point.
+ */
+export interface FundingEventInput {
+  clientId: string;
+  symbol: string;
+  side: "BUY" | "SELL";
+  at: number;
+  /** Position quantity AT settlement, not averaged over the interval. */
+  quantity: number;
+  markPrice: number;
+  rate: number;
+  intervalMs: number;
+  notional: number;
+  /** Positive = the position PAID. */
+  amount: number;
+  /** "settled" is final; "live"/"default" are provisional. */
+  rateSource: string;
+}
+
+/** A settlement charged at a provisional rate, awaiting its confirmed rate. */
+export interface StoredFundingEvent extends FundingEventInput {
+  id: string;
+}
+
 export interface EngineBootState {
   account: { startingBalance: number; realizedPnl: number; halted: boolean };
   open: StoredTrade[];
   closed: StoredTrade[];
+  /**
+   * Settlements already charged, so a restart cannot charge them twice. Only
+   * recent history is loaded: anything older than the oldest open position
+   * can no longer be replayed anyway.
+   */
+  fundingEvents?: StoredFundingEvent[];
 }
