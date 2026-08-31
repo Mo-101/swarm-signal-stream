@@ -132,9 +132,34 @@ if (!rows.some((r) => String(r.user_id) === String(targetUser))) {
   process.exit(1);
 }
 
-await sql`
+// Compare-and-set against the value we read a moment ago. paper_accounts has
+// more than one writer — the runner, and the dashboard's own engine whenever
+// the runner heartbeat is >60s stale — so a blind UPDATE can race with a trade
+// close and lose. Guarding on the observed value means a concurrent change
+// fails LOUDLY here instead of silently winning and leaving a flag that reads
+// correct but is about to be overwritten.
+const observed = rows.find((r) => String(r.user_id) === String(targetUser))?.halted;
+const updated = await sql`
   UPDATE paper_accounts SET halted = ${target}, updated_at = now()
-   WHERE user_id = ${targetUser}`;
+   WHERE user_id = ${targetUser} AND halted = ${observed}
+   RETURNING user_id, halted`;
+
+if (updated.length === 0) {
+  // Either it already holds the target value, or something moved underneath us.
+  const now = await sql`SELECT halted FROM paper_accounts WHERE user_id = ${targetUser}`;
+  const current = now[0]?.halted;
+  if (current === target) {
+    console.log(`\nAlready ${mode === "halt" ? "halted" : "resumed"} — no change needed.\n`);
+    process.exit(0);
+  }
+  console.error(
+    `\nhalt-trading: CONCURRENT WRITE — the flag changed while this ran.\n` +
+      `  expected ${observed}, found ${current}. Nothing was written.\n` +
+      `  Stop the engine (and close any dashboard tab, which trades when the\n` +
+      `  runner heartbeat is stale) before retrying.\n`,
+  );
+  process.exit(1);
+}
 
 const after = await sql`SELECT user_id, halted FROM paper_accounts WHERE user_id = ${targetUser}`;
 const ok = after.length === 1 && after.every((r) => r.halted === target);

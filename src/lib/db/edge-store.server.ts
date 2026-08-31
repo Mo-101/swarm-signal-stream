@@ -197,11 +197,30 @@ export async function persistCloseTrade(
     );
   }
 
+  // A trade close may RAISE a halt but must never clear one.
+  //
+  // This upsert previously wrote `halted = EXCLUDED.halted`, stamping the
+  // engine's in-memory value over the stored one on every close. An operator
+  // halt set against a running engine was therefore reverted by the next close
+  // — silently, and before any restart could read it. Observed in production:
+  // --halt reported success, two trades closed, and the restart came up
+  // unhalted and kept trading.
+  //
+  // OR-ing makes the halt sticky by construction rather than by procedure: a
+  // drawdown breach can still escalate to halted, but no close can lower the
+  // flag. That matters because this is not the only writer — the dashboard
+  // runs its own engine whenever the runner heartbeat is >60s stale
+  // (readOnly: runnerActive), which is exactly the window a stop/start opens.
+  //
+  // Clearing stays explicit: scripts/halt-trading.mjs --resume, or
+  // resetPaperAccount, both of which set it deliberately.
   await sql`
     INSERT INTO paper_accounts (user_id, realized_pnl, halted, updated_at)
     VALUES (${userId}, ${data.realizedPnl}, ${data.halted}, now())
     ON CONFLICT (user_id) DO UPDATE SET
-      realized_pnl = EXCLUDED.realized_pnl, halted = EXCLUDED.halted, updated_at = now()`;
+      realized_pnl = EXCLUDED.realized_pnl,
+      halted = paper_accounts.halted OR EXCLUDED.halted,
+      updated_at = now()`;
 
   const reportRows = await sql`SELECT edge_report(${userId}, ${EDGE_EPOCH_FILTER}) AS report`;
   const report = (reportRows[0]?.report as EdgeReport | undefined) ?? EMPTY_EDGE_REPORT;
