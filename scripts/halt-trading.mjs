@@ -14,9 +14,28 @@
 //     time out normally. Halting is not the same as flattening.
 //   * Signals keep ingesting with executed = false, which stays accurate.
 //
-// IMPORTANT: the broker reads `halted` from paper_accounts at BOOT (hydrate).
-// Setting the flag does not stop a running process — the runner must be
-// restarted for it to take effect.
+// IMPORTANT — the engine must be STOPPED while the flag is set.
+//
+// The broker reads `halted` at BOOT (hydrate), and persistCloseTrade writes its
+// in-memory `halted` back on EVERY close:
+//
+//   INSERT INTO paper_accounts (..., halted, ...) ON CONFLICT DO UPDATE
+//     SET ... halted = EXCLUDED.halted
+//
+// So setting the flag against a RUNNING engine is silently reverted by the next
+// close — the value is overwritten with the in-memory `false` before any
+// restart can read it. A plain `docker compose restart` therefore does NOT
+// work: the flag is usually already gone by the time the process comes back.
+//
+// The correct sequence is stop, set, start:
+//
+//   docker compose -f docker-compose.prod.yml stop
+//   DATABASE_URL=... node scripts/halt-trading.mjs --halt "reason"
+//   docker compose -f docker-compose.prod.yml start
+//
+// Verified in production: with the engine stopped the flag holds, and on start
+// every entry logs "[risk] halted blocked ... Risk halt active". The same
+// applies in reverse for --resume.
 //
 // Credentials are never printed.
 import { neon } from "@neondatabase/serverless";
@@ -125,10 +144,13 @@ console.log(`  rows updated : ${after.length}`);
 console.log(`  verified     : ${ok ? "yes" : "NO — flag did not stick"}`);
 console.log(
   mode === "halt"
-    ? "\n  Open positions are NOT closed; they continue to manage to their exits.\n" +
-        "  The running process keeps its in-memory state — RESTART THE RUNNER for\n" +
-        "  this to take effect:\n" +
-        "    cd /docker/alpha-swarm && docker compose -f docker-compose.prod.yml restart\n"
-    : "\n  Restart the runner for this to take effect.\n",
+    ? "\n  Open positions are NOT closed; they continue to manage to their exits.\n\n" +
+        "  This flag only sticks if the engine was ALREADY STOPPED. A running\n" +
+        "  engine rewrites halted on every close, so a plain `restart` loses it.\n" +
+        "  If the engine is running right now, do:\n" +
+        "    docker compose stop  ->  re-run this --halt  ->  docker compose start\n\n" +
+        "  Confirm with: [risk] halted blocked ... Risk halt active   in the logs.\n"
+    : "\n  Same rule in reverse: set this with the engine STOPPED, then start it,\n" +
+        "  or the next close will revert the flag before boot can read it.\n",
 );
 process.exit(ok ? 0 : 1);
