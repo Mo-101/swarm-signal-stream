@@ -76,3 +76,25 @@
 }
 .flash-bull { animation: flash-bull 0.6s ease-out; }
 .flash-bear { animation: flash-bear 0.6s ease-out; }
+
+/* Progress fill: a highlight that sweeps across the bar continuously, so a bar
+   sitting at 100% (or one that has stalled) still reads as live rather than
+   frozen. Purely decorative — the width still carries the real value. */
+@keyframes progress-sweep {
+  from { background-position: 200% 0; }
+  to { background-position: 0 0; }
+}
+.progress-fill {
+  background-image: linear-gradient(
+    100deg,
+    transparent 20%,
+    color-mix(in oklch, white 38%, transparent) 50%,
+    transparent 80%
+  );
+  background-size: 200% 100%;
+  background-repeat: no-repeat;
+  animation: progress-sweep 1.8s linear infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .progress-fill { animation: none; }
+}

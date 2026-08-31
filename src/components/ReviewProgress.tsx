@@ -93,7 +93,7 @@ export function ReviewProgress({
       <div className="mt-2 flex items-center gap-3">
         <div className="h-2 flex-1 overflow-hidden rounded-full bg-border">
           <div
-            className={`h-full rounded-full transition-all ${done ? "bg-bull" : "bg-accent"}`}
+            className={`progress-fill h-full rounded-full transition-all ${done ? "bg-bull" : "bg-accent"}`}
             style={{ width: `${pct}%` }}
           />
         </div>
