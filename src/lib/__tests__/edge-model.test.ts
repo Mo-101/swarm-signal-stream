@@ -1,6 +1,11 @@
 import { describe, expect, it } from "vitest";
 import { deriveEdge, EMPTY_EDGE_REPORT, type EdgeReport } from "../edge-model";
-import { STRATEGY_EPOCH } from "../strategy-epoch";
+import {
+  STRATEGY_EPOCH,
+  LEARNING_EPOCHS,
+  RETIRED_EPOCHS,
+  EDGE_EPOCH_FILTER,
+} from "../strategy-epoch";
 
 function report(trades: number, confidence: EdgeReport["confidence"]): EdgeReport {
   return {
@@ -115,5 +120,46 @@ describe("confidence calibration is scoped to the current epoch", () => {
       0.62,
     );
     expect(legacy.minConfidence).toBe(0.7);
+  });
+});
+
+describe("retirement and evidence are separate axes", () => {
+  /**
+   * v3 is retired as a strategy but still teaches agent/symbol/regime weights.
+   * Collapsing the two once already cost 74 trades of agent evidence and locked
+   * three of four agents at their base weights permanently — v1 produces no new
+   * trades, so that pool could never recover on its own.
+   */
+  it("keeps a retired epoch in the learning pool", () => {
+    expect(RETIRED_EPOCHS).toContain("v3");
+    expect(LEARNING_EPOCHS).toContain("v3");
+    expect(EDGE_EPOCH_FILTER.split(",")).toContain("v3");
+  });
+
+  it("excludes proven-negative evidence entirely", () => {
+    // v2 is out on DATA grounds, not merely retirement: its expectancy CI sat
+    // wholly below zero, so its attribution reflects actively losing rules.
+    expect(RETIRED_EPOCHS).toContain("v2");
+    expect(LEARNING_EPOCHS).not.toContain("v2");
+  });
+
+  it("never calibrates confidence from the pooled set", () => {
+    // The pooled buckets mix incompatible confidence scales. Calibration must
+    // read confidence_by_epoch scoped to the running epoch, so a report whose
+    // pooled buckets look profitable but which has no current-epoch rows must
+    // hold the baseline rather than adopt the other epoch's floor.
+    const learned = deriveEdge(
+      {
+        ...EMPTY_EDGE_REPORT,
+        totals: { trades: 300, wins: 0, pnl: 0, expectancy: 0 },
+        confidence: [{ name: "0.9-1.0", trades: 200, wins: 120, pnl: 900, expectancy: 4.5 }],
+        confidence_by_epoch: [
+          { epoch: "v1", name: "0.9-1.0", trades: 200, wins: 120, pnl: 900, expectancy: 4.5 },
+        ],
+      },
+      0.62,
+    );
+    expect(learned.minConfidence).toBe(0.62);
+    expect(learned.currentEpochSample).toBe(0);
   });
 });

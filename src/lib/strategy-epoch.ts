@@ -21,18 +21,38 @@
 export const STRATEGY_EPOCH = "v3";
 
 /**
- * Epochs whose closed trades are allowed to teach the edge model.
+ * RETIREMENT AND EVIDENCE ARE TWO DIFFERENT AXES.
  *
- * v2 is retired: its expectancy CI sat entirely below zero (n=43, −$7.82/trade,
- * 25.6% win rate), so it is proven-negative evidence produced by rules we no
- * longer run. v1 and v3 both show positive (if not yet proven) expectancy and
- * comparable bracket geometry, so they are pooled for learning while new trades
- * continue to be stamped with STRATEGY_EPOCH.
+ * An epoch can be retired as a STRATEGY while its trades remain perfectly good
+ * EVIDENCE. Conflating the two throws away data for no reason, which is exactly
+ * what happened when v3 was retired: the agent pool collapsed from 119 trades
+ * to 45 and three of the four agents locked at their base weights, unable ever
+ * to unlock — v1 produces no new trades, so that pool could never grow again.
+ *
+ *   RETIRED_EPOCHS  — do not RUN these rules. A judgement about the strategy.
+ *   LEARNING_EPOCHS — trades that may teach agent / symbol / regime weights.
+ *                     A judgement about the data.
+ *
+ * The two overlap deliberately: v3 is retired but still teaches.
+ *
+ * What genuinely could NOT be pooled was confidence: the scale changed at v2
+ * (normalized to 0.5–1.0 by total agent weight, where v1 saturated on |net|),
+ * so v1 occupies 0.7–1.0 and v3 occupies 0.6–0.8 with almost no overlap.
+ * deriveEdge therefore calibrates minConfidence from confidence_by_epoch scoped
+ * to STRATEGY_EPOCH alone, and never from this pooled set. Agent attribution
+ * has no such problem — "did Trend point the same way as this trade, and did it
+ * win" is scale-free and epoch-free.
+ *
+ * v2 stays out on evidence grounds, not merely retirement: its expectancy CI
+ * sat entirely below zero (n=43, −$7.82/trade, 25.6% win), so it is
+ * proven-negative data whose agent attribution reflects rules that were
+ * actively losing.
  */
-export const LEARNING_EPOCHS = ["v1"] as const;
+export const LEARNING_EPOCHS = ["v1", "v3"] as const;
 
 /**
- * Epochs excluded from learning and from the live scoreboard.
+ * Epochs that must not be RUN. Note these may still appear in
+ * LEARNING_EPOCHS — see the note above; retirement is not a data judgement.
  *
  * v2 — expectancy CI sat entirely below zero (n=43, −$7.82/trade, 25.6% win).
  *
