@@ -69,6 +69,17 @@ CREATE TABLE IF NOT EXISTS paper_trades (
   UNIQUE (user_id, client_id)
 );
 ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS strategy_epoch text NOT NULL DEFAULT 'v1';
+
+-- Liquidity flags per leg. Without these the maker/taker split can only be
+-- INFERRED from the blended rate (fees / total notional), which is what forced
+-- an inference when v3's cost floor was being measured. A strategy is promoted
+-- or retired on whether its signal edge clears its fee floor, so the fee floor
+-- must be measured, not reconstructed.
+--   maker_entry: entry rested as a post-only limit and earned the maker rate.
+--   maker_exit:  exit rested as a reduce-only limit (TP); stops and
+--                liquidations must cross and are always taker.
+ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS maker_entry boolean;
+ALTER TABLE paper_trades ADD COLUMN IF NOT EXISTS maker_exit boolean;
 CREATE INDEX IF NOT EXISTS paper_trades_user_status_idx ON paper_trades (user_id, status, opened_at DESC);
 CREATE INDEX IF NOT EXISTS paper_trades_epoch_idx ON paper_trades (user_id, strategy_epoch, status);
 

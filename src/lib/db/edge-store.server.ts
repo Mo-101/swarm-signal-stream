@@ -145,7 +145,7 @@ export async function persistOpenTrade(
       user_id, client_id, symbol, side, entry_price, size, notional, stop_loss, take_profit,
       confidence, conf_bucket, regime, hour_utc, agents, status, opened_at,
       signal_price, entry_slip_bps, spread_entry_bps, latency_ms, leverage, liq_price, book_priced,
-      strategy_epoch
+      maker_entry, strategy_epoch
     ) VALUES (
       ${userId}, ${data.clientId}, ${data.symbol}, ${data.side}, ${data.entryPrice}, ${data.size},
       ${data.notional}, ${data.stopLoss}, ${data.takeProfit}, ${data.confidence}, ${data.confBucket},
@@ -153,7 +153,7 @@ export async function persistOpenTrade(
       to_timestamp(${data.openedAt / 1000}),
       ${data.signalPrice ?? data.entryPrice}, ${data.entrySlipBps ?? 0}, ${data.spreadEntryBps ?? 0},
       ${data.latencyMs ?? 0}, ${data.leverage ?? null}, ${data.liqPrice ?? null}, ${data.bookPriced ?? false},
-      ${STRATEGY_EPOCH}
+      ${data.makerEntry ?? null}, ${STRATEGY_EPOCH}
     )
     ON CONFLICT (user_id, client_id) DO UPDATE SET
       entry_price = EXCLUDED.entry_price, size = EXCLUDED.size, notional = EXCLUDED.notional,
@@ -180,7 +180,8 @@ export async function persistCloseTrade(
       reason = ${data.reason}, status = 'closed', closed_at = to_timestamp(${data.closedAt / 1000}),
       trigger_price = ${data.triggerPrice ?? data.exitPrice}, exit_slip_bps = ${data.exitSlipBps ?? 0},
       spread_exit_bps = ${data.spreadExitBps ?? 0}, slip_cost_usd = ${data.slipCostUsd ?? 0},
-      gross_pnl = ${data.grossPnl ?? data.pnl}, fees = ${data.fees ?? 0}, funding = ${data.funding ?? 0}
+      gross_pnl = ${data.grossPnl ?? data.pnl}, fees = ${data.fees ?? 0}, funding = ${data.funding ?? 0},
+      maker_exit = ${data.makerExit ?? null}
     WHERE user_id = ${userId} AND client_id = ${data.clientId}
     RETURNING client_id`;
 

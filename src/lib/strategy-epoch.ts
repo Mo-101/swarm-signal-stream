@@ -29,10 +29,33 @@ export const STRATEGY_EPOCH = "v3";
  * comparable bracket geometry, so they are pooled for learning while new trades
  * continue to be stamped with STRATEGY_EPOCH.
  */
-export const LEARNING_EPOCHS = ["v1", "v3"] as const;
+export const LEARNING_EPOCHS = ["v1"] as const;
 
-/** Epochs excluded from learning and from the live scoreboard. */
-export const RETIRED_EPOCHS = ["v2"] as const;
+/**
+ * Epochs excluded from learning and from the live scoreboard.
+ *
+ * v2 — expectancy CI sat entirely below zero (n=43, −$7.82/trade, 25.6% win).
+ *
+ * v3 — RETIRED: structural cost-floor failure, not a tuning problem.
+ *      Measured over 45 closed trades with the accounting identity closing to
+ *      $0.00 (signal gross + execution effect = fill gross − fees − funding =
+ *      net):
+ *
+ *        signal edge                            4.03 bps of entry notional
+ *        realistic round-trip fee floor         7.50 bps (maker entry + taker exit)
+ *        margin                                −3.47 bps
+ *        floor if BOTH legs posted as maker     4.00 bps → margin +0.03 bps
+ *
+ *      The signal does not clear its own transaction-cost floor even before
+ *      execution slippage, and the theoretical best case is exactly zero —
+ *      stops and liquidations must cross, so both-legs-maker is unattainable.
+ *      Maximum available fee saving (~2.5 bps, from driving entries to 100%
+ *      maker) is smaller than the 3.47 bps deficit. No parameter change can
+ *      close a gap of that shape, so further optimization is not justified.
+ *
+ *      For contrast, v1 cleared the same floor by 89.27 bps.
+ */
+export const RETIRED_EPOCHS = ["v2", "v3"] as const;
 
 /** Comma-separated filter understood by the edge_report SQL function. */
 export const EDGE_EPOCH_FILTER = LEARNING_EPOCHS.join(",");

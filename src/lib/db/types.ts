@@ -58,6 +58,8 @@ export interface OpenTradeInput {
   leverage?: number;
   liqPrice?: number;
   bookPriced?: boolean;
+  /** Entry filled as a resting post-only limit and earned the maker rate. */
+  makerEntry?: boolean;
 }
 
 export interface CloseTradeInput {
@@ -76,6 +78,12 @@ export interface CloseTradeInput {
   grossPnl?: number;
   fees?: number;
   funding?: number;
+  /**
+   * Exit rested as a reduce-only limit and earned the maker rate. Stops and
+   * liquidations must cross, so they are always taker. Persisted so a
+   * strategy's true fee floor is measured rather than inferred.
+   */
+  makerExit?: boolean;
 }
 
 /**

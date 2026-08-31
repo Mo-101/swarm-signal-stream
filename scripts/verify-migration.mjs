@@ -124,6 +124,23 @@ async function main() {
     );
   }
 
+  // 1b. Liquidity columns. The persistence path writes maker_entry on every
+  //     open and maker_exit on every close, so if the code ships before these
+  //     columns exist, EVERY trade write fails — positions would keep closing
+  //     while their records silently failed to persist. Strictly worse than
+  //     the halt not being live.
+  const makerCols = await sql`
+    SELECT column_name FROM information_schema.columns
+     WHERE table_name = 'paper_trades' AND column_name IN ('maker_entry', 'maker_exit')`;
+  const haveMaker = makerCols.map((c) => c.column_name).sort();
+  record(
+    "maker_entry / maker_exit columns",
+    haveMaker.length === 2,
+    haveMaker.length === 2
+      ? haveMaker.join(", ")
+      : `only [${haveMaker.join(", ") || "none"}] — DO NOT deploy the persistence change yet`,
+  );
+
   // 2. edge_report exists and now emits the epoch-split confidence table.
   const fn = await sql`
     SELECT p.oid::regprocedure AS sig

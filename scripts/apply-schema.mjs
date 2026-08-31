@@ -10,7 +10,39 @@ import { readFileSync } from "node:fs";
 import { neon } from "@neondatabase/serverless";
 
 const file = process.argv[2] ?? "src/lib/db/schema.sql";
-const url = process.env.DATABASE_URL;
+
+// Clean and validate BEFORE the driver sees it. neon() embeds the whole
+// connection string in its "not a valid URL" error, so handing it a quoted or
+// CR-terminated value — exactly what a .env written on Windows produces —
+// prints the password to the terminal and into any CI log or pasted traceback.
+// Same normalisation as src/lib/db/neon.ts getDatabaseUrl().
+function cleanDatabaseUrl(raw) {
+  if (!raw) return "";
+  let v = String(raw).trim().replace(/[​-‍﻿\r\n]/g, "");
+  if (v.startsWith("DATABASE_URL=")) v = v.slice("DATABASE_URL=".length).trim();
+  if (
+    (v.startsWith('"') && v.endsWith('"')) ||
+    (v.startsWith("'") && v.endsWith("'")) ||
+    (v.startsWith("`") && v.endsWith("`"))
+  ) {
+    v = v.slice(1, -1).trim();
+  }
+  return v;
+}
+
+const url = cleanDatabaseUrl(process.env.DATABASE_URL);
+if (url) {
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== "postgres:" && parsed.protocol !== "postgresql:") {
+      throw new Error("scheme must be postgres:// or postgresql://");
+    }
+  } catch (e) {
+    // Never interpolate the URL itself into this message.
+    console.error(`apply-schema: DATABASE_URL is not a usable connection string (${e.message}).`);
+    process.exit(1);
+  }
+}
 
 if (!url || !url.trim()) {
   console.log("apply-schema: skipped — DATABASE_URL not set (Neon not configured).");

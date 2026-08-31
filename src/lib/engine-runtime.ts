@@ -358,6 +358,7 @@ export function createEngineRuntime(opts: EngineRuntimeOptions): EngineRuntime {
           leverage: pos.leverage,
           liqPrice: pos.liquidationPrice,
           bookPriced: pos.bookPriced,
+          makerEntry: pos.makerEntry,
         })
         .catch((e: unknown) =>
           persistence.onPersistError?.(e instanceof Error ? e.message : "Trade save failed"),
@@ -382,6 +383,7 @@ export function createEngineRuntime(opts: EngineRuntimeOptions): EngineRuntime {
           grossPnl: trade.grossPnl,
           fees: trade.fees,
           funding: trade.funding,
+          makerExit: trade.makerExit,
         })
         .then((res) => hooks.onReportUpdate?.(res.report))
         .catch((e: unknown) =>

@@ -171,6 +171,15 @@ export interface ClosedTrade {
   /** Total USD lost to spread + market impact on both legs. */
   slipCostUsd: number;
   bookPriced: boolean;
+  /** Entry rested as a post-only limit and earned the maker rate. */
+  makerEntry?: boolean;
+  /**
+   * Exit rested as a reduce-only limit and earned the maker rate. Only a TP
+   * can; stops and liquidations must cross, so they are always taker. Carried
+   * on the trade so the fee floor can be measured per leg rather than inferred
+   * from a blended rate.
+   */
+  makerExit?: boolean;
 }
 
 export type RejectReason =
@@ -1824,6 +1833,8 @@ export class PaperBroker {
       latencyMs: p.latencyMs,
       slipCostUsd: entrySlipCost + (reason === "LIQ" ? 0 : exitSlipCost),
       bookPriced: p.bookPriced && exitBookPriced,
+      makerEntry: Boolean(p.makerEntry),
+      makerExit: Boolean(makerExit),
     };
     this.closed = [trade, ...this.closed].slice(0, 200);
     this.recordSymbolCost(trade);
