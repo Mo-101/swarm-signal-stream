@@ -18,7 +18,15 @@
  *      geometry reverted toward v1: wider ATR stop multiple (3.5x, 150-450bps)
  *      and the breakeven ratchet delayed to +1.5R with trailing from +2.5R.
  */
-export const STRATEGY_EPOCH = "v3";
+ * v1r — v3 stopped. v1's rules are what is RUNNING again: flat 2%/4%
+ *      brackets, market take-profits, taker entries, no breakeven/trailing
+ *      ratchet, no time/carry exit, no correlation cap or post-stop cooldown,
+ *      no symbol cost gate. It is labelled "v1r" rather than "v1" for one
+ *      reason only: confidence is on the post-v2 normalized 0.5–1.0 scale,
+ *      so v1's stored confidence buckets are not on the same axis and must
+ *      not silently calibrate the live threshold. Everything else is v1.
+ */
+export const STRATEGY_EPOCH = "v1r";
 
 /**
  * RETIREMENT AND EVIDENCE ARE TWO DIFFERENT AXES.
