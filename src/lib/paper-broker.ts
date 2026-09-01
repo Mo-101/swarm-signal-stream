@@ -57,6 +57,17 @@ function envNum(name: string, fallback: number, min: number, max: number): numbe
   return n;
 }
 
+function envBool(name: string, fallback: boolean): boolean {
+  const raw =
+    typeof process !== "undefined" && process.env ? process.env[name] : undefined;
+  if (raw === undefined || raw.trim() === "") return fallback;
+  const v = raw.trim().toLowerCase();
+  if (["true", "1", "yes", "on"].includes(v)) return true;
+  if (["false", "0", "no", "off"].includes(v)) return false;
+  return fallback;
+}
+
+
 export interface Position {
   id: string;
   symbol: string;
