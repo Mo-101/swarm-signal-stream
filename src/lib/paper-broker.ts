@@ -445,31 +445,39 @@ export const DEFAULT_PAPER_CONFIG: PaperConfig = {
   allowPartialFills: true,
 
   makerFeeRate: 0.0002,
-  takeProfitAsLimit: true,
-  volScaledBrackets: true,
-  // v3: v2's tight vol brackets stopped winners out as noise. Widened back
-  // toward v1's ~200bps geometry, with the breakeven ratchet delayed past 1R
-  // so a trade has to actually prove itself before its stop is pulled up.
+  // ── v1r: v3 is stopped; the running rules are v1's again ──
+  // v3 failed structurally, not by tuning: 4.03 bps of signal edge against a
+  // 7.50 bps round-trip fee floor. v1 cleared the same floor by 89 bps, so the
+  // whole v2/v3 management layer comes off rather than being re-tuned. Every
+  // knob below is v1 geometry: flat 2%/4% brackets, market take-profits, taker
+  // entries, and no breakeven / trailing / time / carry / correlation overlay.
+  takeProfitAsLimit: false,
+  volScaledBrackets: false,
   volStopMult: 3.5,
   minStopBps: 150,
   maxStopBps: 450,
   rewardRiskRatio: 2,
-  breakevenAtR: 1.5,
-  trailStartR: 2.5,
+  // Infinity disables the ratchet entirely — the stop stays where it was set.
+  breakevenAtR: Number.POSITIVE_INFINITY,
+  trailStartR: Number.POSITIVE_INFINITY,
   trailDistanceR: 1,
-  maxHoldMs: envNum("MAX_HOLD_HOURS", 8, 0.25, 240) * 3_600_000,
-  maxFundingShareOfReward: 0.35,
-  maxSameSide: envNum("MAX_SAME_SIDE", 3, 1, 50),
-  cooldownAfterStopMs: envNum("COOLDOWN_MINUTES", 45, 0, 1440) * 60_000,
+  // v1 had no time or carry exit: a trade resolves at its stop or its target.
+  maxHoldMs: envNum("MAX_HOLD_HOURS", 240, 0.25, 240) * 3_600_000,
+  maxFundingShareOfReward: 1,
+  // No correlation cap and no post-stop cooldown in v1; maxPositions is the
+  // only concurrency limit.
+  maxSameSide: envNum("MAX_SAME_SIDE", 5, 1, 50),
+  cooldownAfterStopMs: envNum("COOLDOWN_MINUTES", 0, 0, 1440) * 60_000,
 
-  // Measured round-trip slippage was ~59bps vs an 11bps fee hurdle, so the
-  // default posture is passive: only cross when the edge is time-sensitive.
-  passiveEntries: true,
+  // v1 crossed the spread on entry and ran no symbol cost gate. Both stay off
+  // so this run is comparable to the 72-trade v1 sample rather than a hybrid.
+  // Flip PASSIVE_ENTRIES / SYMBOL_COST_GATE via env to test them separately.
+  passiveEntries: envBool("PASSIVE_ENTRIES", false),
   passiveMinSpreadBps: envNum("PASSIVE_MIN_SPREAD_BPS", 3, 0, 100),
   passiveUrgentMoveBps: envNum("PASSIVE_URGENT_MOVE_BPS", 120, 0, 5000),
   passiveMaxWaitMs: envNum("PASSIVE_MAX_WAIT_MS", 4000, 250, 120_000),
   passiveChaseOnExpiry: false,
-  symbolCostGate: true,
+  symbolCostGate: envBool("SYMBOL_COST_GATE", false),
   costGateMult: envNum("COST_GATE_MULT", 1.5, 0.5, 20),
   costGateMinSamples: envNum("COST_GATE_MIN_SAMPLES", 4, 1, 200),
 };
