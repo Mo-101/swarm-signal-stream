@@ -16,6 +16,7 @@ import { Route as IndexRouteImport } from './routes/index'
 import { Route as AuthenticatedDashboardRouteImport } from './routes/_authenticated/dashboard'
 import { Route as Char91DotwellKnownChar93OauthProtectedResourceRouteImport } from './routes/[.well-known]/oauth-protected-resource'
 import { Route as Char91DotmcpChar93ListToolsRouteImport } from './routes/[.mcp]/list-tools'
+import { Route as ApiPublicStatsRouteImport } from './routes/api/public/stats'
 import { Route as ApiPublicHealthRouteImport } from './routes/api/public/health'
 import { Route as Char91DotmcpChar93InvokeToolToolRouteImport } from './routes/[.mcp]/invoke-tool/$tool'
 import { Route as DotlovableOauthConsentRouteImport } from './routes/[.]lovable.oauth.consent'
@@ -57,6 +58,11 @@ const Char91DotmcpChar93ListToolsRoute =
     path: '/.mcp/list-tools',
     getParentRoute: () => rootRouteImport,
   } as any)
+const ApiPublicStatsRoute = ApiPublicStatsRouteImport.update({
+  id: '/api/public/stats',
+  path: '/api/public/stats',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ApiPublicHealthRoute = ApiPublicHealthRouteImport.update({
   id: '/api/public/health',
   path: '/api/public/health',
@@ -89,6 +95,7 @@ export interface FileRoutesByFullPath {
   '/.lovable/oauth/consent': typeof DotlovableOauthConsentRoute
   '/.mcp/invoke-tool/$tool': typeof Char91DotmcpChar93InvokeToolToolRoute
   '/api/public/health': typeof ApiPublicHealthRoute
+  '/api/public/stats': typeof ApiPublicStatsRoute
   '/api/public/daemon/tick': typeof ApiPublicDaemonTickRoute
 }
 export interface FileRoutesByTo {
@@ -101,6 +108,7 @@ export interface FileRoutesByTo {
   '/.lovable/oauth/consent': typeof DotlovableOauthConsentRoute
   '/.mcp/invoke-tool/$tool': typeof Char91DotmcpChar93InvokeToolToolRoute
   '/api/public/health': typeof ApiPublicHealthRoute
+  '/api/public/stats': typeof ApiPublicStatsRoute
   '/api/public/daemon/tick': typeof ApiPublicDaemonTickRoute
 }
 export interface FileRoutesById {
@@ -115,6 +123,7 @@ export interface FileRoutesById {
   '/.lovable/oauth/consent': typeof DotlovableOauthConsentRoute
   '/.mcp/invoke-tool/$tool': typeof Char91DotmcpChar93InvokeToolToolRoute
   '/api/public/health': typeof ApiPublicHealthRoute
+  '/api/public/stats': typeof ApiPublicStatsRoute
   '/api/public/daemon/tick': typeof ApiPublicDaemonTickRoute
 }
 export interface FileRouteTypes {
@@ -129,6 +138,7 @@ export interface FileRouteTypes {
     | '/.lovable/oauth/consent'
     | '/.mcp/invoke-tool/$tool'
     | '/api/public/health'
+    | '/api/public/stats'
     | '/api/public/daemon/tick'
   fileRoutesByTo: FileRoutesByTo
   to:
@@ -141,6 +151,7 @@ export interface FileRouteTypes {
     | '/.lovable/oauth/consent'
     | '/.mcp/invoke-tool/$tool'
     | '/api/public/health'
+    | '/api/public/stats'
     | '/api/public/daemon/tick'
   id:
     | '__root__'
@@ -154,6 +165,7 @@ export interface FileRouteTypes {
     | '/.lovable/oauth/consent'
     | '/.mcp/invoke-tool/$tool'
     | '/api/public/health'
+    | '/api/public/stats'
     | '/api/public/daemon/tick'
   fileRoutesById: FileRoutesById
 }
@@ -167,6 +179,7 @@ export interface RootRouteChildren {
   DotlovableOauthConsentRoute: typeof DotlovableOauthConsentRoute
   Char91DotmcpChar93InvokeToolToolRoute: typeof Char91DotmcpChar93InvokeToolToolRoute
   ApiPublicHealthRoute: typeof ApiPublicHealthRoute
+  ApiPublicStatsRoute: typeof ApiPublicStatsRoute
   ApiPublicDaemonTickRoute: typeof ApiPublicDaemonTickRoute
 }
 
@@ -219,6 +232,13 @@ declare module '@tanstack/react-router' {
       path: '/.mcp/list-tools'
       fullPath: '/.mcp/list-tools'
       preLoaderRoute: typeof Char91DotmcpChar93ListToolsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/public/stats': {
+      id: '/api/public/stats'
+      path: '/api/public/stats'
+      fullPath: '/api/public/stats'
+      preLoaderRoute: typeof ApiPublicStatsRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/api/public/health': {
@@ -274,6 +294,7 @@ const rootRouteChildren: RootRouteChildren = {
   DotlovableOauthConsentRoute: DotlovableOauthConsentRoute,
   Char91DotmcpChar93InvokeToolToolRoute: Char91DotmcpChar93InvokeToolToolRoute,
   ApiPublicHealthRoute: ApiPublicHealthRoute,
+  ApiPublicStatsRoute: ApiPublicStatsRoute,
   ApiPublicDaemonTickRoute: ApiPublicDaemonTickRoute,
 }
 export const routeTree = rootRouteImport
