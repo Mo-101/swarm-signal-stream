@@ -55,7 +55,7 @@ export const STRATEGY_EPOCH = "v1r";
  * proven-negative data whose agent attribution reflects rules that were
  * actively losing.
  */
-export const LEARNING_EPOCHS = ["v1", "v3"] as const;
+export const LEARNING_EPOCHS = ["v1", "v3", "v1r"] as const;
 
 /**
  * Epochs that must not be RUN. Note these may still appear in
