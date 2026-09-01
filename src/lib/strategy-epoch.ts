@@ -17,7 +17,6 @@
  * v3 — passive entry and cost gating kept verbatim from v2, but bracket
  *      geometry reverted toward v1: wider ATR stop multiple (3.5x, 150-450bps)
  *      and the breakeven ratchet delayed to +1.5R with trailing from +2.5R.
- */
  * v1r — v3 stopped. v1's rules are what is RUNNING again: flat 2%/4%
  *      brackets, market take-profits, taker entries, no breakeven/trailing
  *      ratchet, no time/carry exit, no correlation cap or post-stop cooldown,
