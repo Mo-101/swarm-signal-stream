@@ -1222,6 +1222,11 @@ export class PaperBroker {
     this.submitted = Math.max(this.submitted, historicalFills);
   }
 
+  /** Patch the active config (epoch experiments, tests). */
+  configure(patch: Partial<PaperConfig>) {
+    this.cfg = { ...this.cfg, ...patch };
+  }
+
   /** Confidence calibration learned from realized outcomes. */
   setMinConfidence(v: number) {
     this.cfg = { ...this.cfg, minConfidence: v };
