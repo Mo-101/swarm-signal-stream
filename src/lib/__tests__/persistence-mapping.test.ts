@@ -67,6 +67,8 @@ function seedPosition(runtime: ReturnType<typeof createEngineRuntime>, makerEntr
 describe("liquidity flags survive the trip to persistence", () => {
   it("passes makerExit into the close payload on a maker take-profit", async () => {
     const { runtime, closes } = harness();
+    // v1r takes its targets; force the posted-target path this test is about.
+    runtime.getBroker().configure({ takeProfitAsLimit: true });
     seedPosition(runtime, true);
     runtime.getBroker().markPrice("TESTUSDT", 105, 2_000);
     await Promise.resolve();

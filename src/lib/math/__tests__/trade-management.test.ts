@@ -55,9 +55,18 @@ function seedLong(b: PaperBroker, over: Record<string, unknown> = {}) {
   });
 }
 
+// The active epoch (v1r) leaves stops static, so these tests must state the
+// managed geometry explicitly instead of inheriting whatever the live default
+// happens to be.
+const MANAGED: Partial<PaperConfig> = {
+  breakevenAtR: 1.5,
+  trailStartR: 2.5,
+  trailDistanceR: 1,
+};
+
 describe("breakeven + trailing stop", () => {
   it("leaves the stop alone below the breakeven trigger", () => {
-    const b = brokerWith();
+    const b = brokerWith(MANAGED);
     seedLong(b);
     b.markPrice("TESTUSDT", 101, 2_000); // +0.5R
     expect(b.getPositions()[0].stopLoss).toBe(98);
@@ -65,7 +74,7 @@ describe("breakeven + trailing stop", () => {
   });
 
   it("holds the stop at +1R — the ratchet waits for 1.5R", () => {
-    const b = brokerWith();
+    const b = brokerWith(MANAGED);
     seedLong(b);
     b.markPrice("TESTUSDT", 102, 2_000); // +1R
     expect(b.getPositions()[0].stopLoss).toBe(98);
@@ -73,7 +82,7 @@ describe("breakeven + trailing stop", () => {
   });
 
   it("pulls the stop above entry (fee cushion) at +1.5R", () => {
-    const b = brokerWith();
+    const b = brokerWith(MANAGED);
     seedLong(b);
     b.markPrice("TESTUSDT", 103, 2_000); // +1.5R
     const p = b.getPositions()[0];
@@ -84,7 +93,7 @@ describe("breakeven + trailing stop", () => {
   });
 
   it("trails 1R behind the best price past +2.5R and never retreats", () => {
-    const b = brokerWith();
+    const b = brokerWith(MANAGED);
     seedLong(b, { takeProfit: 120 }); // far target so the trail, not TP, exits
     b.markPrice("TESTUSDT", 105.4, 2_000); // +2.7R → trail to 105.4 - 2
     expect(b.getPositions()[0].stopLoss).toBeCloseTo(103.4, 6);
@@ -93,7 +102,7 @@ describe("breakeven + trailing stop", () => {
   });
 
   it("books a trailed exit as TRAIL, not SL", () => {
-    const b = brokerWith();
+    const b = brokerWith(MANAGED);
     seedLong(b, { takeProfit: 120 }); // far target so the trail, not TP, exits
     b.markPrice("TESTUSDT", 105.4, 2_000);
     b.markPrice("TESTUSDT", 103, 3_000); // through the trailed stop
