@@ -25,6 +25,7 @@ import { getGridExecutionMode, canPlaceGridOrders } from "./bybit-grid";
 import { GridRuntimeCoordinator } from "./grid-runtime";
 import { startHealthServer, type HealthStatus } from "./health";
 import { BinanceDemoCoordinator } from "./binance-runtime";
+import { SigmaLuiIngester } from "../src/lib/sigmalui-ingester";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -239,6 +240,7 @@ async function main() {
         health.equity = DEFAULT_PAPER_CONFIG.startingBalance + s.realizedPnl;
         health.openPositions = s.positions.length;
         health.closedTrades = s.closed.length;
+        health.sigmalui = { enabled: sigmaluiEnabled, ...sigmalui.stats };
         if (binanceDemo) {
           const b = binanceDemo.getStatus();
           health.binanceDemo = {
@@ -262,6 +264,30 @@ async function main() {
   runtime.getBroker().setMinConfidence(learned.minConfidence);
   runtime.start();
   console.log("[runner] engine started");
+
+  // SigmaLui premium signal feed → paper broker. Direction + conviction only;
+  // execution stays fully simulated by the v1r broker pipeline. Opt out with
+  // SIGMALUI_ENABLED=false; override the node with SIGMALUI_URL.
+  const sigmaluiEnabled = !/^(false|0|no|off)$/i.test(process.env.SIGMALUI_ENABLED ?? "true");
+  const trackedSymbols = new Set(symbols);
+  const sigmalui = new SigmaLuiIngester({
+    url: process.env.SIGMALUI_URL ?? "https://trading.mostarindustries.com",
+    minScore: Number(process.env.SIGMALUI_MIN_SCORE ?? 0.94),
+    isTracked: (s) => trackedSymbols.has(s),
+    onProposal: (p, meta) => runtime.getBroker().onProposal(p, meta),
+    onSignal: (s) => {
+      if (s.admitted) {
+        console.log(`[sigmalui] ADMIT ${s.direction} ${s.symbol} score=${s.score.toFixed(4)}`);
+      }
+    },
+    onError: (m) => console.warn(`[sigmalui] poll error: ${m}`),
+  });
+  if (sigmaluiEnabled) {
+    sigmalui.start();
+    console.log("[sigmalui] ingester started (paper-only, poll 30s, min score 0.94)");
+  } else {
+    console.log("[sigmalui] disabled via SIGMALUI_ENABLED");
+  }
 
   // The runner owns grid execution. The dashboard only writes intent.
   binanceDemo = new BinanceDemoCoordinator(runtime, supabase, userId);
@@ -320,6 +346,7 @@ async function main() {
     clearInterval(statusLog);
     clearInterval(stallWatch);
     gridCoordinator.stop();
+    sigmalui.stop();
     binanceDemo?.stop();
     runtime.stop();
     await upsertHeartbeat(supabase, userId, startedAt, {
