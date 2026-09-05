@@ -25,6 +25,7 @@ import { getGridExecutionMode, canPlaceGridOrders } from "./bybit-grid";
 import { GridRuntimeCoordinator } from "./grid-runtime";
 import { startHealthServer, type HealthStatus } from "./health";
 import { BinanceDemoCoordinator } from "./binance-runtime";
+import { SigmaLuiIngester } from "../src/lib/sigmalui-ingester";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
