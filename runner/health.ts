@@ -29,6 +29,16 @@ export interface HealthStatus {
     lastError: string | null;
     lastHint: string | null;
   };
+  /** SigmaLui premium signal feed ingestion. Paper-only; never affects the verdict. */
+  sigmalui?: {
+    enabled: boolean;
+    polls: number;
+    admitted: number;
+    rejected: number;
+    errors: number;
+    lastPollAt: number | null;
+    lastError: string | null;
+  };
 }
 
 export function startHealthServer(port: number, getStatus: () => HealthStatus): Server {
