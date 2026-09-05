@@ -264,6 +264,30 @@ async function main() {
   runtime.start();
   console.log("[runner] engine started");
 
+  // SigmaLui premium signal feed → paper broker. Direction + conviction only;
+  // execution stays fully simulated by the v1r broker pipeline. Opt out with
+  // SIGMALUI_ENABLED=false; override the node with SIGMALUI_URL.
+  const sigmaluiEnabled = !/^(false|0|no|off)$/i.test(process.env.SIGMALUI_ENABLED ?? "true");
+  const trackedSymbols = new Set(symbols);
+  const sigmalui = new SigmaLuiIngester({
+    url: process.env.SIGMALUI_URL ?? "https://trading.mostarindustries.com",
+    minScore: Number(process.env.SIGMALUI_MIN_SCORE ?? 0.94),
+    isTracked: (s) => trackedSymbols.has(s),
+    onProposal: (p, meta) => runtime.getBroker().onProposal(p, meta),
+    onSignal: (s) => {
+      if (s.admitted) {
+        console.log(`[sigmalui] ADMIT ${s.direction} ${s.symbol} score=${s.score.toFixed(4)}`);
+      }
+    },
+    onError: (m) => console.warn(`[sigmalui] poll error: ${m}`),
+  });
+  if (sigmaluiEnabled) {
+    sigmalui.start();
+    console.log("[sigmalui] ingester started (paper-only, poll 30s, min score 0.94)");
+  } else {
+    console.log("[sigmalui] disabled via SIGMALUI_ENABLED");
+  }
+
   // The runner owns grid execution. The dashboard only writes intent.
   binanceDemo = new BinanceDemoCoordinator(runtime, supabase, userId);
   await binanceDemo.start();
