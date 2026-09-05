@@ -240,6 +240,7 @@ async function main() {
         health.equity = DEFAULT_PAPER_CONFIG.startingBalance + s.realizedPnl;
         health.openPositions = s.positions.length;
         health.closedTrades = s.closed.length;
+        health.sigmalui = { enabled: sigmaluiEnabled, ...sigmalui.stats };
         if (binanceDemo) {
           const b = binanceDemo.getStatus();
           health.binanceDemo = {
