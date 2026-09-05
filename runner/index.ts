@@ -346,6 +346,7 @@ async function main() {
     clearInterval(statusLog);
     clearInterval(stallWatch);
     gridCoordinator.stop();
+    sigmalui.stop();
     binanceDemo?.stop();
     runtime.stop();
     await upsertHeartbeat(supabase, userId, startedAt, {
