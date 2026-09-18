@@ -26,6 +26,9 @@ export interface SigmaLuiRawSignal {
   conviction?: number;
   confidence?: number;
   topsis?: number;
+  /** Live feed fields: decisionScore / topsisScore carry the 0–1 conviction. */
+  decisionScore?: number;
+  topsisScore?: number;
   entryPrice?: number;
   entry?: number;
   price?: number;
@@ -33,6 +36,9 @@ export interface SigmaLuiRawSignal {
   sl?: number;
   takeProfit?: number;
   tp?: number;
+  /** Live feed sends takeProfit1/takeProfit2 instead of takeProfit. */
+  takeProfit1?: number;
+  takeProfit2?: number;
   timestamp?: string | number;
 }
 
@@ -75,9 +81,20 @@ export function toSide(s: SigmaLuiRawSignal): "BUY" | "SELL" | null {
 }
 
 export function signalScore(s: SigmaLuiRawSignal): number | null {
-  const raw = s.score ?? s.conviction ?? s.confidence ?? s.topsis;
-  const n = typeof raw === "string" ? parseFloat(raw) : raw;
-  return typeof n === "number" && Number.isFinite(n) ? n : null;
+  // NOTE: the live feed's `topsis` field is an OBJECT ({dPlus, dMinus, ...}),
+  // so it must not short-circuit the numeric candidates — only accept numbers.
+  for (const raw of [
+    s.score,
+    s.conviction,
+    s.confidence,
+    s.topsis,
+    s.decisionScore,
+    s.topsisScore,
+  ]) {
+    const n = typeof raw === "string" ? parseFloat(raw) : raw;
+    if (typeof n === "number" && Number.isFinite(n)) return n;
+  }
+  return null;
 }
 
 /**
@@ -99,7 +116,7 @@ export function validateSignal(
   const entry = num(s.entryPrice ?? s.entry ?? s.price);
   if (!entry) return { ok: false, why: "no entry price" };
   const sl = num(s.stopLoss ?? s.sl);
-  const tp = num(s.takeProfit ?? s.tp);
+  const tp = num(s.takeProfit ?? s.tp ?? s.takeProfit1 ?? s.takeProfit2);
   if (sl && tp) {
     const valid = side === "BUY" ? sl < entry && entry < tp : tp < entry && entry < sl;
     if (!valid) return { ok: false, why: "bracket geometry violated" };
