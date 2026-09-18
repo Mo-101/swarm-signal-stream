@@ -26,6 +26,9 @@ export interface SigmaLuiRawSignal {
   conviction?: number;
   confidence?: number;
   topsis?: number;
+  /** Live feed fields: decisionScore / topsisScore carry the 0–1 conviction. */
+  decisionScore?: number;
+  topsisScore?: number;
   entryPrice?: number;
   entry?: number;
   price?: number;
@@ -33,6 +36,9 @@ export interface SigmaLuiRawSignal {
   sl?: number;
   takeProfit?: number;
   tp?: number;
+  /** Live feed sends takeProfit1/takeProfit2 instead of takeProfit. */
+  takeProfit1?: number;
+  takeProfit2?: number;
   timestamp?: string | number;
 }
 
@@ -75,7 +81,8 @@ export function toSide(s: SigmaLuiRawSignal): "BUY" | "SELL" | null {
 }
 
 export function signalScore(s: SigmaLuiRawSignal): number | null {
-  const raw = s.score ?? s.conviction ?? s.confidence ?? s.topsis;
+  const raw =
+    s.score ?? s.conviction ?? s.confidence ?? s.topsis ?? s.decisionScore ?? s.topsisScore;
   const n = typeof raw === "string" ? parseFloat(raw) : raw;
   return typeof n === "number" && Number.isFinite(n) ? n : null;
 }
