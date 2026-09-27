@@ -440,3 +440,29 @@ SELECT jsonb_build_object(
     coalesce((SELECT jsonb_agg(to_jsonb(confs_epoch)) FROM confs_epoch), '[]'::jsonb)
 );
 $$;
+
+-- Signal Court (scripts/court.ts). Append-only: a hypothesis id is bound to the
+-- digest of its claim + court rules at first registration. Changing the rules
+-- later changes the digest, and the court refuses to write verdicts under the
+-- old id. Verdicts are history, never updated in place.
+CREATE TABLE IF NOT EXISTS court_registry (
+  id text PRIMARY KEY,
+  claim text NOT NULL,
+  digest text NOT NULL,
+  registered_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE TABLE IF NOT EXISTS court_verdicts (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  hypothesis_id text NOT NULL REFERENCES court_registry(id),
+  digest text NOT NULL,
+  verdict text NOT NULL,
+  diagnosis text NOT NULL,
+  n_trades integer NOT NULL,
+  net_bps numeric,
+  net_ci_low numeric,
+  net_ci_high numeric,
+  dsr numeric,
+  detail jsonb NOT NULL,
+  judged_at timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS court_verdicts_hyp_time_idx ON court_verdicts (hypothesis_id, judged_at DESC);
