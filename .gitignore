@@ -38,3 +38,4 @@ runner/.env
 # Claude Code local settings (may contain credentials in permission rules)
 .claude/
 court-reports/
+trades.json

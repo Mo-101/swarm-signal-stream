@@ -42,6 +42,23 @@ export interface SigmaLuiRawSignal {
   timestamp?: string | number;
 }
 
+export interface ObservedSigmaLuiSignal {
+  signalId: string;
+  symbol: string;
+  side: "BUY" | "SELL";
+  score: number | null;
+  entry: number | null;
+  stopLoss: number | null;
+  takeProfit: number | null;
+  /** Feed-reported emission time (ms), if the feed carried one. */
+  feedTime: number | null;
+  /** When this process first saw the signal (ms). Replays enter no earlier than this. */
+  firstSeenAt: number;
+  admitted: boolean;
+  rejectReason: string | null;
+  raw: SigmaLuiRawSignal;
+}
+
 export interface SigmaLuiIngesterOptions {
   /** Base URL of the SigmaLui node, e.g. https://trading.mostarindustries.com */
   url: string;
@@ -54,7 +71,20 @@ export interface SigmaLuiIngesterOptions {
   /** Symbols the engine actually tracks — signals for anything else are skipped. */
   isTracked?: (symbol: string) => boolean;
   onProposal: (p: TradeProposal, meta: { regime: string }) => void;
-  onSignal?: (s: { symbol: string; direction: string; score: number; admitted: boolean; why?: string }) => void;
+  onSignal?: (s: {
+    symbol: string;
+    direction: string;
+    score: number;
+    admitted: boolean;
+    why?: string;
+  }) => void;
+  /**
+   * Called ONCE per distinct feed signal (per process), admitted or not, with
+   * its full bracket geometry. This is the evidence stream the Signal Court
+   * replays: judging the feed needs every signal it emitted, not only the ones
+   * that passed our own filters, and must not depend on trading being enabled.
+   */
+  onObserved?: (s: ObservedSigmaLuiSignal) => void;
   onError?: (message: string) => void;
 }
 
@@ -105,12 +135,15 @@ export function signalScore(s: SigmaLuiRawSignal): number | null {
 export function validateSignal(
   s: SigmaLuiRawSignal,
   minScore: number,
-): { ok: true; symbol: string; side: "BUY" | "SELL"; score: number; entry: number; id: string } | { ok: false; why: string } {
+):
+  | { ok: true; symbol: string; side: "BUY" | "SELL"; score: number; entry: number; id: string }
+  | { ok: false; why: string } {
   const score = signalScore(s);
   if (score === null) return { ok: false, why: "no score" };
   if (score < minScore) return { ok: false, why: `score ${score.toFixed(4)} < ${minScore}` };
   const side = toSide(s);
-  if (!side) return { ok: false, why: `bad direction "${s.direction ?? s.action ?? s.side ?? ""}"` };
+  if (!side)
+    return { ok: false, why: `bad direction "${s.direction ?? s.action ?? s.side ?? ""}"` };
   const symbol = toPerpSymbol(s);
   if (!symbol) return { ok: false, why: "no symbol" };
   const entry = num(s.entryPrice ?? s.entry ?? s.price);
@@ -128,9 +161,17 @@ export function validateSignal(
 export class SigmaLuiIngester {
   private timer: ReturnType<typeof setInterval> | null = null;
   private seen = new Map<string, number>(); // signal id → admitted at
+  private observed = new Map<string, number>(); // signal id → first seen at
   private lastBySymbol = new Map<string, number>();
   private inFlight = false;
-  readonly stats = { polls: 0, admitted: 0, rejected: 0, errors: 0, lastError: null as string | null, lastPollAt: null as number | null };
+  readonly stats = {
+    polls: 0,
+    admitted: 0,
+    rejected: 0,
+    errors: 0,
+    lastError: null as string | null,
+    lastPollAt: null as number | null,
+  };
 
   constructor(private opts: SigmaLuiIngesterOptions) {}
 
@@ -164,26 +205,84 @@ export class SigmaLuiIngester {
       // Drop ids older than 24h so the dedupe map cannot grow unbounded.
       const cutoff = Date.now() - 24 * 3600_000;
       for (const [id, at] of this.seen) if (at < cutoff) this.seen.delete(id);
+      for (const [id, at] of this.observed) if (at < cutoff) this.observed.delete(id);
 
       for (const raw of list) {
         const v = validateSignal(raw, minScore);
+        const observe = (admitted: boolean, why: string | null) => {
+          if (!this.opts.onObserved) return;
+          const symbol = toPerpSymbol(raw);
+          const side = toSide(raw);
+          if (!symbol || !side) return;
+          const entry = num(raw.entryPrice ?? raw.entry ?? raw.price);
+          const id = raw.signalId ?? raw.id ?? `${symbol}-${side}-${entry ?? "?"}`;
+          if (this.observed.has(id)) return;
+          const now = Date.now();
+          this.observed.set(id, now);
+          const ts = raw.timestamp;
+          const feedTime =
+            typeof ts === "number"
+              ? ts < 1e12
+                ? ts * 1000
+                : ts
+              : ts
+                ? Date.parse(ts) || null
+                : null;
+          this.opts.onObserved({
+            signalId: id,
+            symbol,
+            side,
+            score: signalScore(raw),
+            entry,
+            stopLoss: num(raw.stopLoss ?? raw.sl),
+            takeProfit: num(raw.takeProfit ?? raw.tp ?? raw.takeProfit1 ?? raw.takeProfit2),
+            feedTime,
+            firstSeenAt: now,
+            admitted,
+            rejectReason: why,
+            raw,
+          });
+        };
         if (!v.ok) {
+          observe(false, v.why);
           this.stats.rejected += 1;
-          this.opts.onSignal?.({ symbol: raw.asset ?? raw.symbol ?? "?", direction: raw.direction ?? "?", score: signalScore(raw) ?? 0, admitted: false, why: v.why });
+          this.opts.onSignal?.({
+            symbol: raw.asset ?? raw.symbol ?? "?",
+            direction: raw.direction ?? "?",
+            score: signalScore(raw) ?? 0,
+            admitted: false,
+            why: v.why,
+          });
           continue;
         }
         if (this.seen.has(v.id)) continue;
         const lastAt = this.lastBySymbol.get(v.symbol) ?? 0;
-        if (Date.now() - lastAt < cooldown) continue;
-        if (this.opts.isTracked && !this.opts.isTracked(v.symbol)) {
-          this.stats.rejected += 1;
-          this.opts.onSignal?.({ symbol: v.symbol, direction: v.side, score: v.score, admitted: false, why: "not tracked" });
+        if (Date.now() - lastAt < cooldown) {
+          observe(false, "symbol cooldown");
           continue;
         }
+        if (this.opts.isTracked && !this.opts.isTracked(v.symbol)) {
+          observe(false, "not tracked");
+          this.stats.rejected += 1;
+          this.opts.onSignal?.({
+            symbol: v.symbol,
+            direction: v.side,
+            score: v.score,
+            admitted: false,
+            why: "not tracked",
+          });
+          continue;
+        }
+        observe(true, null);
         this.seen.set(v.id, Date.now());
         this.lastBySymbol.set(v.symbol, Date.now());
         this.stats.admitted += 1;
-        this.opts.onSignal?.({ symbol: v.symbol, direction: v.side, score: v.score, admitted: true });
+        this.opts.onSignal?.({
+          symbol: v.symbol,
+          direction: v.side,
+          score: v.score,
+          admitted: true,
+        });
         this.opts.onProposal(
           {
             id: `sigmalui-${v.id}`,

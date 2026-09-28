@@ -40,6 +40,10 @@ export interface CourtTrade {
   notional: number;
   grossUsd: number;
   netUsd: number;
+  /** Net USD of the SAME trade taken in the opposite direction with mirrored
+   *  brackets, when a candle replay can compute it exactly. When present, the
+   *  direction placebo uses it instead of the -gross approximation. */
+  flippedNetUsd?: number;
 }
 
 export interface Hypothesis {
@@ -194,6 +198,7 @@ export function normInv(p: number): number {
 interface Row {
   net: number;
   gross: number;
+  flippedNet?: number;
   episode: number;
   closedAt: number;
 }
@@ -205,6 +210,10 @@ function toRows(trades: CourtTrade[], rules: CourtRules): Row[] {
     .map((t) => ({
       net: (t.netUsd / t.notional) * 1e4,
       gross: (t.grossUsd / t.notional) * 1e4,
+      flippedNet:
+        t.flippedNetUsd !== undefined && Number.isFinite(t.flippedNetUsd)
+          ? (t.flippedNetUsd / t.notional) * 1e4
+          : undefined,
       episode: Math.floor(t.openedAt / block),
       closedAt: t.closedAt,
     }))
@@ -255,10 +264,12 @@ export function signFlipP(rows: Row[], draws: number, rng: () => number): number
   for (let d = 0; d < draws; d++) {
     let s = 0;
     for (const g of eps) {
-      const flip = rng() < 0.5 ? -1 : 1;
+      const flipped = rng() < 0.5;
       for (const r of g) {
-        const cost = r.gross - r.net; // fees + funding, as paid
-        s += flip * r.gross - cost;
+        if (!flipped) s += r.net;
+        else if (r.flippedNet !== undefined)
+          s += r.flippedNet; // exact, from replay
+        else s += -r.gross - (r.gross - r.net); // approximation: costs unchanged
       }
     }
     if (s / n >= obs) ge++;

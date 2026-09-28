@@ -466,3 +466,24 @@ CREATE TABLE IF NOT EXISTS court_verdicts (
   judged_at timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS court_verdicts_hyp_time_idx ON court_verdicts (hypothesis_id, judged_at DESC);
+
+-- SigmaLui evidence stream: every distinct signal the feed emitted, admitted by
+-- the ingester or not, with bracket geometry. Written by the runner regardless
+-- of paper_accounts.halted, so the feed can be judged by candle replay
+-- (scripts/sigmalui-replay.ts) without the broker taking a single trade.
+-- first_seen_at is when WE saw it: replays never enter before that moment.
+CREATE TABLE IF NOT EXISTS sigmalui_signals (
+  signal_id text PRIMARY KEY,
+  symbol text NOT NULL,
+  side text NOT NULL,
+  score numeric,
+  entry_price numeric,
+  stop_loss numeric,
+  take_profit numeric,
+  feed_time timestamptz,
+  first_seen_at timestamptz NOT NULL,
+  admitted boolean NOT NULL,
+  reject_reason text,
+  raw jsonb NOT NULL
+);
+CREATE INDEX IF NOT EXISTS sigmalui_signals_seen_idx ON sigmalui_signals (first_seen_at DESC);

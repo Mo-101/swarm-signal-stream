@@ -26,6 +26,7 @@ import { GridRuntimeCoordinator } from "./grid-runtime";
 import { startHealthServer, type HealthStatus } from "./health";
 import { BinanceDemoCoordinator } from "./binance-runtime";
 import { SigmaLuiIngester } from "../src/lib/sigmalui-ingester";
+import { persistSigmaLuiSignal } from "../src/lib/db/sigmalui-store.server";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -279,6 +280,13 @@ async function main() {
       if (s.admitted) {
         console.log(`[sigmalui] ADMIT ${s.direction} ${s.symbol} score=${s.score.toFixed(4)}`);
       }
+    },
+    // Evidence for the Signal Court: every distinct feed signal, admitted or
+    // not, recorded whether or not trading is halted.
+    onObserved: (s) => {
+      persistSigmaLuiSignal(s).catch((e) =>
+        console.warn(`[sigmalui] evidence write failed: ${e instanceof Error ? e.message : e}`),
+      );
     },
     onError: (m) => console.warn(`[sigmalui] poll error: ${m}`),
   });
