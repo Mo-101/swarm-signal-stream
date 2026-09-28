@@ -29,6 +29,7 @@ services:
       - LOG_DIR=/app/logs
     volumes:
       - ./logs:/app/logs
+      - ./.court-cache:/app/.court-cache
     logging:
       driver: json-file
       options:

@@ -28,6 +28,7 @@ services:
       - LOG_DIR=/app/logs
     volumes:
       - ./logs:/app/logs
+      - ./.court-cache:/app/.court-cache
     healthcheck:
       # node:22-alpine ships no curl — use node's fetch (same probe as the
       # Dockerfile HEALTHCHECK) so the container isn't permanently unhealthy.
