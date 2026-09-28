@@ -24,6 +24,8 @@ export interface SignalRow {
   createdAt: number;
   /** Agents whose own vote pointed the same way as the signal. */
   agrees?: string[];
+  /** Price at the signal (signals.price): the maker replay's limit price. */
+  price?: number | null;
 }
 
 /** Agents that voted in the signal's direction, from signals.agents jsonb. */
@@ -67,7 +69,9 @@ export function toReplaySignals(rows: SignalRow[]): ReplaySignal[] {
       symbol: r.symbol,
       side: r.side as "BUY" | "SELL",
       score: r.confidence,
-      entry: null, // no quoted brackets: the replay applies v1r's 2% / 4%
+      // No quoted brackets, so the taker replay applies v1r's 2% / 4% from its
+      // own fill; the maker replay uses this price as its resting limit.
+      entry: r.price ?? null,
       stopLoss: null,
       takeProfit: null,
       firstSeenAt: r.createdAt,

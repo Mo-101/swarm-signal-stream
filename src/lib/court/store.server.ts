@@ -143,18 +143,18 @@ export async function loadSignalEvents(
       userId
         ? await sql`
             SELECT DISTINCT ON (symbol, side, blk)
-                   id, symbol, side, confidence, executed, agents, created_at
+                   id, symbol, side, confidence, price, executed, agents, created_at
               FROM (SELECT id::text AS id, symbol, side, confidence::float8 AS confidence,
-                           executed, agents, created_at,
+                           price::float8 AS price, executed, agents, created_at,
                            floor(extract(epoch FROM created_at) / ${blockSec}) AS blk
                       FROM signals
                      WHERE user_id = ${userId} AND created_at >= ${from} AND created_at < ${to}) s
              ORDER BY symbol, side, blk, created_at ASC`
         : await sql`
             SELECT DISTINCT ON (symbol, side, blk)
-                   id, symbol, side, confidence, executed, agents, created_at
+                   id, symbol, side, confidence, price, executed, agents, created_at
               FROM (SELECT id::text AS id, symbol, side, confidence::float8 AS confidence,
-                           executed, agents, created_at,
+                           price::float8 AS price, executed, agents, created_at,
                            floor(extract(epoch FROM created_at) / ${blockSec}) AS blk
                       FROM signals
                      WHERE created_at >= ${from} AND created_at < ${to}) s
@@ -169,6 +169,7 @@ export async function loadSignalEvents(
         executed: Boolean(r.executed),
         createdAt: new Date(r.created_at as string).getTime(),
         agrees: agreeingAgents(r.agents, String(r.side)),
+        price: r.price == null ? null : Number(r.price),
       });
     }
     onDay?.(i + 1, windows.length, rows.length);
