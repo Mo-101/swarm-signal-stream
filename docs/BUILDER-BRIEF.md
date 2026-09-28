@@ -91,6 +91,15 @@ A small, fixed family. Register all of them before running any; the deflation ch
 | `geom:2-4-12h` | 2% | 4% | 12h |
 | `geom:3-6-48h` | 3% | 6% | 48h |
 | `geom:4-8-96h` | 4% | 8% | 96h |
+| `geom:atr10-48h` | 1.0 × ATR(14, 1h), clamped to [1%, 8%] | 2.0 × ATR(14, 1h), same scale and clamp | 48h |
+| `geom:atr15-48h` | 1.5 × ATR(14, 1h), clamped to [1%, 8%] | 3.0 × ATR(14, 1h), same scale and clamp | 48h |
+
+The ATR variants are registered with this exact spec, fixed before any result is seen:
+
+- **Estimator:** ATR(14) on 1h candles, computed from the trailing 14 hourly bars ending at the signal's minute. Candles at or after the signal timestamp are never consulted — no lookahead.
+- **Clamp:** the stop distance is clamped to [1%, 8%] of entry; the target keeps the variant's 2:1 ratio to the *clamped* stop. A clamped-out symbol is still replayed — the clamp is part of the hypothesis.
+- **Mirror:** the direction placebo uses identical per-signal bracket distances. Same numbers, opposite side.
+- **Why these exist:** flat percentages price BTC's ~2% daily range and a meme's ~15% identically. These two variants isolate symbol-relative sizing — the thing v3 bundled with other changes and never got tested alone. The 48h exit is kept fixed so width-scaling is the only new dimension.
 
 Run each under whichever entry mode step 1 found cheaper, on the conf bucket step 2 kept. No other variants. Costs are fixed per trade, so wider brackets shrink costs relative to the move; that is the hypothesis being tested, not a promise.
 
