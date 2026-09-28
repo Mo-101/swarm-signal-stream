@@ -10,6 +10,7 @@
 // Server/runner only (network + filesystem).
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { gunzipSync } from "node:zlib";
 import type { Candle } from "./replay";
 
 const M = 60_000;
@@ -35,9 +36,20 @@ export interface CandleSourceOptions {
   baseBackoffMs?: number;
   /** Test hook: replaces setTimeout-based sleeping. */
   sleep?: (ms: number) => Promise<void>;
+  /**
+   * "api" (default): v5 kline endpoint. "archive": build 1m candles from Bybit's
+   * public tick archive (public.bybit.com/trading), for hosts where the API is
+   * geo-blocked. Same venue, same trades; closed days only. Env:
+   * COURT_CANDLE_SOURCE=archive.
+   */
+  mode?: "api" | "archive";
+  /** Test hook for archive mode: returns the gzipped CSV, or null on 404. */
+  archiveFetch?: (url: string) => Promise<Uint8Array | null>;
 }
 
 class PermanentError extends Error {}
+
+type ApiOpts = Required<Omit<CandleSourceOptions, "cacheDir" | "mode" | "archiveFetch">>;
 
 const RETRY_CODES = new Set([10006, 10016, 10018]); // rate limit, server busy, IP limit
 
@@ -45,7 +57,7 @@ async function fetchPage(
   symbol: string,
   start: number,
   end: number,
-  o: Required<Omit<CandleSourceOptions, "cacheDir">>,
+  o: ApiOpts,
 ): Promise<Candle[]> {
   // COURT_KLINE_BASE: point at a mirror or a local test server; defaults to Bybit.
   const base = (process.env.COURT_KLINE_BASE ?? "https://api.bybit.com").replace(/\/$/, "");
@@ -87,12 +99,65 @@ async function fetchPage(
   throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
 }
 
-/** One UTC day of 1m candles: 1440 minutes, two requests. */
-async function fetchDay(
+/** Aggregate a Bybit trade-archive CSV (timestamp in seconds) into 1m candles. */
+export function candlesFromTrades(csv: string, dayStart: number): Candle[] {
+  const byMin = new Map<number, Candle>();
+  const lines = csv.split("\n");
+  for (let i = 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line) continue;
+    const c1 = line.indexOf(",");
+    const ts = Math.round(Number(line.slice(0, c1)) * 1000);
+    // columns: timestamp,symbol,side,size,price,...
+    let at = c1;
+    for (let k = 0; k < 3; k++) at = line.indexOf(",", at + 1);
+    const price = Number(line.slice(at + 1, line.indexOf(",", at + 1)));
+    if (!Number.isFinite(ts) || !(price > 0) || ts < dayStart || ts >= dayStart + DAY) continue;
+    const t = ts - (ts % M);
+    const k = byMin.get(t);
+    // The archive is time-ordered, so first seen = open and last seen = close.
+    if (!k) byMin.set(t, { t, o: price, h: price, l: price, c: price });
+    else {
+      if (price > k.h) k.h = price;
+      if (price < k.l) k.l = price;
+      k.c = price;
+    }
+  }
+  return [...byMin.values()].sort((a, b) => a.t - b.t);
+}
+
+async function fetchArchiveDay(
   symbol: string,
   dayStart: number,
-  o: Required<Omit<CandleSourceOptions, "cacheDir">>,
+  get: (url: string) => Promise<Uint8Array | null>,
 ): Promise<Candle[]> {
+  const d = new Date(dayStart).toISOString().slice(0, 10);
+  const gz = await get(`https://public.bybit.com/trading/${symbol}/${symbol}${d}.csv.gz`);
+  if (!gz) return []; // not listed that day (or not archived yet)
+  return candlesFromTrades(gunzipSync(gz).toString("utf8"), dayStart);
+}
+
+async function defaultArchiveFetch(url: string): Promise<Uint8Array | null> {
+  let lastErr: unknown;
+  for (let attempt = 0; attempt < 4; attempt++) {
+    if (attempt) await new Promise((r) => setTimeout(r, 1000 * 2 ** attempt));
+    try {
+      const res = await fetch(url, { signal: AbortSignal.timeout(120_000) });
+      if (res.status === 404) return null;
+      if (!res.ok) {
+        lastErr = new Error(`archive HTTP ${res.status}`);
+        continue;
+      }
+      return new Uint8Array(await res.arrayBuffer());
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+}
+
+/** One UTC day of 1m candles: 1440 minutes, two requests. */
+async function fetchDay(symbol: string, dayStart: number, o: ApiOpts): Promise<Candle[]> {
   const out = new Map<number, Candle>();
   for (let s = dayStart; s < dayStart + DAY; s += 1000 * M) {
     const e = Math.min(s + 1000 * M, dayStart + DAY) - 1;
@@ -116,6 +181,8 @@ export function candleSource(opts: CandleSourceOptions = {}) {
     opts.cacheDir === undefined
       ? (process.env.COURT_CANDLE_CACHE ?? ".court-cache/candles")
       : opts.cacheDir;
+  const mode = opts.mode ?? (process.env.COURT_CANDLE_SOURCE === "archive" ? "archive" : "api");
+  const archiveFetch = opts.archiveFetch ?? defaultArchiveFetch;
   const stats = { cachedDays: 0, fetchedDays: 0, requests: 0 };
 
   async function day(symbol: string, dayStart: number): Promise<Candle[]> {
@@ -131,7 +198,10 @@ export function candleSource(opts: CandleSourceOptions = {}) {
         // not cached yet
       }
     }
-    const ks = await fetchDay(symbol, dayStart, o);
+    const ks =
+      mode === "archive"
+        ? await fetchArchiveDay(symbol, dayStart, archiveFetch)
+        : await fetchDay(symbol, dayStart, o);
     stats.fetchedDays++;
     stats.requests += 2;
     // Only a fully closed day is immutable. A day with no candles at all is
@@ -151,6 +221,9 @@ export function candleSource(opts: CandleSourceOptions = {}) {
     for (let d = Math.floor(from / DAY) * DAY; d < to; d += DAY) {
       for (const k of await day(symbol, d)) if (k.t >= from && k.t < to) out.push(k);
     }
+    // In archive mode an unknown symbol is a run of 404s: report it as unavailable.
+    if (mode === "archive" && !out.length)
+      throw new PermanentError(`no archived trades for ${symbol}`);
     return out;
   }
 

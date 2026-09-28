@@ -4,6 +4,9 @@
 //   DATABASE_URL=... npx tsx scripts/maker-replay.ts                    # last 28 days
 //   DATABASE_URL=... npx tsx scripts/maker-replay.ts --write            # also store verdicts
 //   npx tsx scripts/maker-replay.ts --json ev.json                      # offline
+//   DATABASE_URL=... npx tsx scripts/maker-replay.ts --export-only ev.json.gz
+//       # just write the signal events (no credentials inside) and stop
+//   COURT_CANDLE_SOURCE=archive ...   # build candles from public.bybit.com ticks
 //
 // Same signal events, same candles, judged in ONE court session:
 //   taker: next-1m-open entry, 5.5 bps fee + 2 bps slip per leg (as before)
@@ -32,6 +35,7 @@
 // Read-only unless --write (appends to court_verdicts only). Credentials never printed. Reports land in court-reports/.
 import dns from "node:dns";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { gunzipSync, gzipSync } from "node:zlib";
 import net from "node:net";
 import { DEFAULT_RULES } from "../src/lib/court/court";
 import { candleStats, runMakerComparison } from "../src/lib/court/replay-run.server";
@@ -50,7 +54,7 @@ const arg = (n: string) => {
 };
 const DAYS = Number(arg("days") ?? 28);
 const HOLD_H = Number(arg("hold-hours") ?? 48);
-const MAX_EVENTS = Number(arg("max-events") ?? 20000);
+const MAX_EVENTS = Number(arg("max-events") ?? 1_000_000); // judge every event by default
 
 function cleanUrl(raw?: string): string {
   if (!raw) return "";
@@ -62,7 +66,11 @@ function cleanUrl(raw?: string): string {
 
 async function load(): Promise<SignalRow[]> {
   const file = arg("json");
-  if (file) return signalEvents(JSON.parse(readFileSync(file, "utf8")) as SignalRow[]);
+  if (file) {
+    const raw = readFileSync(file);
+    const text = file.endsWith(".gz") ? gunzipSync(raw).toString("utf8") : raw.toString("utf8");
+    return signalEvents(JSON.parse(text) as SignalRow[]);
+  }
   const url = cleanUrl(process.env.DATABASE_URL);
   if (!url) {
     console.error("maker-replay: DATABASE_URL is not set (or pass --json <file>).");
@@ -85,6 +93,15 @@ async function load(): Promise<SignalRow[]> {
 }
 
 let events = await load();
+const exportTo = arg("export-only");
+if (exportTo) {
+  const body = JSON.stringify(events);
+  writeFileSync(exportTo, exportTo.endsWith(".gz") ? gzipSync(body) : body);
+  console.log(
+    `maker-replay: wrote ${events.length} signal events to ${exportTo}. Nothing else run.`,
+  );
+  process.exit(0);
+}
 if (!events.length) {
   console.log(`maker-replay: no signals in the last ${DAYS} days.`);
   process.exit(0);

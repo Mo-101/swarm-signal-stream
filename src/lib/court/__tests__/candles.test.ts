@@ -2,7 +2,8 @@ import { mkdtemp, readdir } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
-import { candleSource, type FetchLike } from "../candles.server";
+import { gzipSync } from "node:zlib";
+import { candleSource, candlesFromTrades, type FetchLike } from "../candles.server";
 
 const M = 60_000;
 const DAY = 86_400_000;
@@ -101,5 +102,44 @@ describe("candleSource", () => {
     expect(ks.length).toBe(1440);
     expect(f2.calls()).toBe(0);
     expect(b.stats.cachedDays).toBe(1);
+  });
+});
+
+describe("archive mode", () => {
+  const day0 = Date.UTC(2026, 8, 20);
+  const csv = [
+    "timestamp,symbol,side,size,price,tickDirection,trdMatchID,grossValue,homeNotional,foreignNotional,RPI",
+    `${day0 / 1000 + 1.5},SOLUSDT,Buy,1,100.0,x,a,0,1,100,0`,
+    `${day0 / 1000 + 20},SOLUSDT,Sell,1,99.5,x,b,0,1,99.5,0`,
+    `${day0 / 1000 + 40},SOLUSDT,Buy,1,101.0,x,c,0,1,101,0`,
+    `${day0 / 1000 + 59.9},SOLUSDT,Buy,1,100.5,x,d,0,1,100.5,0`,
+    `${day0 / 1000 + 61},SOLUSDT,Buy,1,100.7,x,e,0,1,100.7,0`,
+  ].join("\n");
+
+  it("aggregates ticks into 1m OHLC", () => {
+    expect(candlesFromTrades(csv, day0)).toEqual([
+      { t: day0, o: 100, h: 101, l: 99.5, c: 100.5 },
+      { t: day0 + 60_000, o: 100.7, h: 100.7, l: 100.7, c: 100.7 },
+    ]);
+  });
+
+  it("reads gzipped archive days and treats an all-404 symbol as unavailable", async () => {
+    const gz = gzipSync(csv);
+    const urls: string[] = [];
+    const src = candleSource({
+      cacheDir: null,
+      mode: "archive",
+      now: () => day0 + 3 * 86_400_000,
+      archiveFetch: async (u) => {
+        urls.push(u);
+        return u.includes("SOLUSDT2026-09-20") ? new Uint8Array(gz) : null;
+      },
+    });
+    const ks = await src.get("SOLUSDT", day0, day0 + 86_400_000);
+    expect(ks).toHaveLength(2);
+    expect(urls[0]).toBe("https://public.bybit.com/trading/SOLUSDT/SOLUSDT2026-09-20.csv.gz");
+    await expect(src.get("NOPEUSDT", day0, day0 + 86_400_000)).rejects.toThrow(
+      /no archived trades/,
+    );
   });
 });
