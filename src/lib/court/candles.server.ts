@@ -10,7 +10,8 @@
 // Server/runner only (network + filesystem).
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
-import { gunzipSync } from "node:zlib";
+import { Readable } from "node:stream";
+import { createGunzip } from "node:zlib";
 import type { Candle } from "./replay";
 
 const M = 60_000;
@@ -44,7 +45,7 @@ export interface CandleSourceOptions {
    */
   mode?: "api" | "archive";
   /** Test hook for archive mode: returns the gzipped CSV, or null on 404. */
-  archiveFetch?: (url: string) => Promise<Uint8Array | null>;
+  archiveFetch?: (url: string) => Promise<AsyncIterable<Uint8Array> | Uint8Array | null>;
 }
 
 class PermanentError extends Error {}
@@ -99,61 +100,92 @@ async function fetchPage(
   throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
 }
 
-/** Aggregate a Bybit trade-archive CSV (timestamp in seconds) into 1m candles. */
-export function candlesFromTrades(csv: string, dayStart: number): Candle[] {
+/** Incremental 1m aggregator over trade-archive CSV lines (timestamp in seconds, price in column 5). */
+function tradeAggregator(dayStart: number) {
   const byMin = new Map<number, Candle>();
-  const lines = csv.split("\n");
-  for (let i = 1; i < lines.length; i++) {
-    const line = lines[i];
-    if (!line) continue;
-    const c1 = line.indexOf(",");
-    const ts = Math.round(Number(line.slice(0, c1)) * 1000);
-    // columns: timestamp,symbol,side,size,price,...
-    let at = c1;
-    for (let k = 0; k < 3; k++) at = line.indexOf(",", at + 1);
-    const price = Number(line.slice(at + 1, line.indexOf(",", at + 1)));
-    if (!Number.isFinite(ts) || !(price > 0) || ts < dayStart || ts >= dayStart + DAY) continue;
-    const t = ts - (ts % M);
-    const k = byMin.get(t);
-    // The archive is time-ordered, so first seen = open and last seen = close.
-    if (!k) byMin.set(t, { t, o: price, h: price, l: price, c: price });
-    else {
-      if (price > k.h) k.h = price;
-      if (price < k.l) k.l = price;
-      k.c = price;
-    }
+  let header = true;
+  return {
+    line(line: string) {
+      if (header) {
+        header = false;
+        return;
+      }
+      if (!line) return;
+      const c1 = line.indexOf(",");
+      const ts = Math.round(Number(line.slice(0, c1)) * 1000);
+      let at = c1;
+      for (let k = 0; k < 3; k++) at = line.indexOf(",", at + 1);
+      const price = Number(line.slice(at + 1, line.indexOf(",", at + 1)));
+      if (!Number.isFinite(ts) || !(price > 0) || ts < dayStart || ts >= dayStart + DAY) return;
+      const t = ts - (ts % M);
+      const k = byMin.get(t);
+      // The archive is time-ordered, so first seen = open and last seen = close.
+      if (!k) byMin.set(t, { t, o: price, h: price, l: price, c: price });
+      else {
+        if (price > k.h) k.h = price;
+        if (price < k.l) k.l = price;
+        k.c = price;
+      }
+    },
+    result: () => [...byMin.values()].sort((a, b) => a.t - b.t),
+  };
+}
+
+/** Aggregate a Bybit trade-archive CSV into 1m candles. */
+export function candlesFromTrades(csv: string, dayStart: number): Candle[] {
+  const agg = tradeAggregator(dayStart);
+  for (const line of csv.split("\n")) agg.line(line);
+  return agg.result();
+}
+
+type ArchiveBody = AsyncIterable<Uint8Array> | Uint8Array;
+
+/**
+ * Stream a gzipped trade-archive body into 1m candles without ever holding the
+ * file: some wash-traded coins have single days of 700+ MB compressed.
+ */
+async function candlesFromGzip(body: ArchiveBody, dayStart: number): Promise<Candle[]> {
+  const agg = tradeAggregator(dayStart);
+  const source =
+    body instanceof Uint8Array ? Readable.from([Buffer.from(body)]) : Readable.from(body);
+  let rest = "";
+  for await (const chunk of source.pipe(createGunzip())) {
+    const text = rest + (chunk as Buffer).toString("utf8");
+    const lines = text.split("\n");
+    rest = lines.pop() ?? "";
+    for (const line of lines) agg.line(line);
   }
-  return [...byMin.values()].sort((a, b) => a.t - b.t);
+  if (rest) agg.line(rest);
+  return agg.result();
 }
 
 async function fetchArchiveDay(
   symbol: string,
   dayStart: number,
-  get: (url: string) => Promise<Uint8Array | null>,
+  get: (url: string) => Promise<ArchiveBody | null>,
 ): Promise<Candle[]> {
   const d = new Date(dayStart).toISOString().slice(0, 10);
-  const gz = await get(`https://public.bybit.com/trading/${symbol}/${symbol}${d}.csv.gz`);
-  if (!gz) return []; // not listed that day (or not archived yet)
-  return candlesFromTrades(gunzipSync(gz).toString("utf8"), dayStart);
-}
-
-async function defaultArchiveFetch(url: string): Promise<Uint8Array | null> {
+  const url = `https://public.bybit.com/trading/${symbol}/${symbol}${d}.csv.gz`;
   let lastErr: unknown;
   for (let attempt = 0; attempt < 4; attempt++) {
     if (attempt) await new Promise((r) => setTimeout(r, 1000 * 2 ** attempt));
     try {
-      const res = await fetch(url, { signal: AbortSignal.timeout(120_000) });
-      if (res.status === 404) return null;
-      if (!res.ok) {
-        lastErr = new Error(`archive HTTP ${res.status}`);
-        continue;
-      }
-      return new Uint8Array(await res.arrayBuffer());
+      const body = await get(url);
+      if (!body) return []; // not listed that day (or not archived yet)
+      return await candlesFromGzip(body, dayStart); // a broken stream retries the whole day
     } catch (e) {
+      if (e instanceof PermanentError) throw e;
       lastErr = e;
     }
   }
   throw lastErr instanceof Error ? lastErr : new Error(String(lastErr));
+}
+
+async function defaultArchiveFetch(url: string): Promise<ArchiveBody | null> {
+  const res = await fetch(url, { signal: AbortSignal.timeout(20 * 60_000) });
+  if (res.status === 404) return null;
+  if (!res.ok || !res.body) throw new Error(`archive HTTP ${res.status}`);
+  return res.body as unknown as AsyncIterable<Uint8Array>;
 }
 
 /** One UTC day of 1m candles: 1440 minutes, two requests. */
