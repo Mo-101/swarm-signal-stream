@@ -73,6 +73,7 @@ import { HealthCard, useHealthMonitor } from "@/components/HealthCard";
 import { EdgePanel } from "@/components/EdgePanel";
 import { ExecutionPanel } from "@/components/ExecutionPanel";
 import { BinanceDemoPanel } from "@/components/BinanceDemoPanel";
+import { CourtPanel } from "@/components/CourtPanel";
 import { FundingPanel } from "@/components/FundingPanel";
 import { ReviewProgress } from "@/components/ReviewProgress";
 import { ShadowPanel } from "@/components/ShadowPanel";
@@ -220,6 +221,7 @@ type Tab =
   | "grid"
   | "live"
   | "demo"
+  | "court"
   | "system";
 
 const EMPTY_EXEC_STATS: ExecutionStats = {
@@ -1170,6 +1172,7 @@ function SwarmDashboard() {
                 "grid",
                 "live",
                 "demo",
+                "court",
                 "system",
               ] as Tab[]
             ).map((t) => (
@@ -1234,6 +1237,7 @@ function SwarmDashboard() {
           )}
 
           {tab === "demo" && <BinanceDemoPanel />}
+          {tab === "court" && <CourtPanel />}
 
           {tab === "funding" && <FundingPanel funding={funding} regimeMix={regimeMix} />}
 
