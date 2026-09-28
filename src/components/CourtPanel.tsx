@@ -40,6 +40,17 @@ const ago = (iso: string) => {
   return `${Math.round(s / 86400)}d ago`;
 };
 
+/** Display order for stored verdicts: headline first, then the split, then
+ *  confidence buckets low to high, then agents. */
+const CONF_ORDER = ["<0.60", "0.60-0.70", "0.70-0.80", ">=0.80"];
+const rank = (id: string) => {
+  if (id.endsWith(":all")) return 0;
+  if (id.includes("not-") || id.includes("admitted")) return 1;
+  const c = CONF_ORDER.findIndex((b) => id.endsWith(`:conf:${b}`));
+  if (c >= 0) return 2 + c / 10;
+  return 3;
+};
+
 /** Net edge with its 95% interval against zero. The shaded band is the
  *  smallest edge this sample could detect: anything inside it is invisible. */
 function CiBar({ v }: { v: Verdict }) {
@@ -256,6 +267,7 @@ export function CourtPanel() {
             recent: [],
           },
           history: {},
+          latest: {},
         }),
         error: e instanceof Error ? e.message : String(e),
       }));
@@ -312,6 +324,12 @@ export function CourtView({
   const ev = data.evidence;
   const paper = data.trades.verdicts.filter((v) => !v.id.startsWith("shadow:"));
   const shadow = data.trades.verdicts.filter((v) => v.id.startsWith("shadow:"));
+  const stored = (prefix: string) =>
+    Object.values(data.latest)
+      .filter((v) => v.id.startsWith(prefix))
+      .sort((a, b) => rank(a.id) - rank(b.id) || a.id.localeCompare(b.id));
+  const swarm = stored("signals:");
+  const sigmaStored = stored("sigmalui:");
   const anyConvicted = data.trades.verdicts.some((v) => v.verdict === "CONVICTED");
 
   return (
@@ -386,6 +404,32 @@ export function CourtView({
 
       <section className="space-y-2">
         <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+          Swarm signals · replayed under v1r rules
+          {swarm.length > 0 && ` · last session ${ago(swarm[0].judgedAt)}`}
+        </h3>
+        <p className="text-[11px] text-muted-foreground">
+          The first signal per symbol and side in each 2-hour block from the signals table, replayed
+          against Bybit candles: taker entry at the next 1m open, 2% stop, 4% target, 48h time exit,
+          fees and slippage on both legs, and the exact mirrored trade as the direction test. Split
+          by confidence bucket and by which agent voted for the direction.
+        </p>
+        {swarm.length ? (
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+            {swarm.map((v) => (
+              <VerdictCard key={v.id} v={v} history={data.history[v.id]} />
+            ))}
+          </div>
+        ) : (
+          <p className="rounded-md border border-border p-3 text-xs text-muted-foreground">
+            No session has judged the swarm's signals yet. The runner does it every{" "}
+            <code className="font-mono">COURT_SNAPSHOT_HOURS</code> (first session 2 minutes after
+            start), or run <code className="font-mono">scripts/signals-replay.ts --write</code>.
+          </p>
+        )}
+      </section>
+
+      <section className="space-y-2">
+        <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
           SigmaLui evidence stream
         </h3>
         {!ev.tableReady ? (
@@ -431,6 +475,19 @@ export function CourtView({
               </p>
             </div>
             {replayError && <p className="text-xs text-bear">{replayError}</p>}
+
+            {!run && sigmaStored.length > 0 && (
+              <div className="space-y-2">
+                <p className="text-[11px] text-muted-foreground">
+                  Last court session {ago(sigmaStored[0].judgedAt)}. Replay now for a fresh verdict.
+                </p>
+                <div className="grid gap-3 md:grid-cols-3">
+                  {sigmaStored.map((v) => (
+                    <VerdictCard key={v.id} v={v} history={data.history[v.id]} />
+                  ))}
+                </div>
+              </div>
+            )}
 
             {run && (
               <div className="space-y-2">

@@ -5,6 +5,7 @@
 //   DATABASE_URL=... npx tsx scripts/signals-replay.ts --days 35 --hold-hours 48
 //   DATABASE_URL=... npx tsx scripts/signals-replay.ts --max-events 5000 --export ev.json
 //   npx tsx scripts/signals-replay.ts --json ev.json                    # offline
+//   DATABASE_URL=... npx tsx scripts/signals-replay.ts --write          # also store verdicts
 //
 // 1. Reads the signals table, keeping the FIRST signal per (symbol, side) in
 //    each 2-hour block (a proposal repeats every tick; repeats are one bet).
@@ -13,23 +14,19 @@
 //    ambiguous candle, time exit after --hold-hours, taker fee + slippage on
 //    both legs. The mirrored trade is replayed too (exact direction placebo).
 // 3. Puts the results before the Signal Court: all signals, never-traded
-//    signals, and each fixed confidence bucket.
+//    signals, each fixed confidence bucket, and each agent's votes.
 //
-// Read-only. Credentials never printed. Reports land in court-reports/.
+// Candles are cached per closed UTC day (COURT_CANDLE_CACHE, default
+// .court-cache/candles), so a re-run only downloads what is new.
+//
+// Read-only unless --write (appends to court_verdicts only). Credentials never printed. Reports land in court-reports/.
 import dns from "node:dns";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import net from "node:net";
-import { neon } from "@neondatabase/serverless";
 import { DEFAULT_RULES } from "../src/lib/court/court";
-import { DEFAULT_REPLAY, type ReplayOptions } from "../src/lib/court/replay";
-import { runReplay, fetchCandles } from "../src/lib/court/replay-run.server";
-import {
-  buildSignalDocket,
-  signalEvents,
-  type SignalRow,
-  SIGNAL_BLOCK_MS,
-  toReplaySignals,
-} from "../src/lib/court/signals";
+import { candleStats, runSignalReplay } from "../src/lib/court/replay-run.server";
+import { loadSignalEvents, recordVerdicts } from "../src/lib/court/store.server";
+import { signalEvents, type SignalRow } from "../src/lib/court/signals";
 
 if (process.env.COURT_FORCE_IPV4 !== "0") {
   dns.setDefaultResultOrder("ipv4first");
@@ -61,30 +58,12 @@ async function load(): Promise<SignalRow[]> {
     console.error("signals-replay: DATABASE_URL is not set (or pass --json <file>).");
     process.exit(1);
   }
-  const sql = neon(url);
-  const since = new Date(Date.now() - DAYS * 864e5).toISOString();
-  const blockSec = SIGNAL_BLOCK_MS / 1000;
+  process.env.DATABASE_URL = url;
   try {
-    // One row per (symbol, side, 2h block): the first signal in it.
-    const rows = (await sql`
-      SELECT DISTINCT ON (symbol, side, floor(extract(epoch FROM created_at) / ${blockSec}))
-             id::text, symbol, side, confidence::float8 AS confidence, executed, created_at
-        FROM signals
-       WHERE created_at >= ${since}
-       ORDER BY symbol, side, floor(extract(epoch FROM created_at) / ${blockSec}), created_at ASC`) as Record<
-      string,
-      unknown
-    >[];
-    return rows
-      .map((r) => ({
-        id: String(r.id),
-        symbol: String(r.symbol),
-        side: String(r.side),
-        confidence: Number(r.confidence),
-        executed: Boolean(r.executed),
-        createdAt: new Date(r.created_at as string).getTime(),
-      }))
-      .sort((a, b) => a.createdAt - b.createdAt);
+    return await loadSignalEvents(null, DAYS, Date.now(), (i, total, n) => {
+      if (i % 7 === 0 || i === total)
+        process.stdout.write(`  signals day ${i}/${total}: ${n} events\n`);
+    });
   } catch (e) {
     console.error(
       `signals-replay: query failed (${String((e as Error).message)
@@ -114,38 +93,19 @@ console.log(
     `Fetching candles (≈${Math.ceil(((DAYS * 1440) / 1000) * symbols)} requests)…`,
 );
 
-const opt: ReplayOptions = { ...DEFAULT_REPLAY, maxHoldMs: HOLD_H * 3600_000 };
-const signals = toReplaySignals(events);
-const run = await runReplay(
-  signals,
-  fetchCandles,
-  Date.now(),
-  opt,
-  // docket depends only on which buckets exist in the input, not outcomes
-  buildSignalDocket(
-    signals.map((s) => ({
-      id: s.signalId,
-      symbol: s.symbol,
-      side: s.side,
-      epoch: "signals",
-      sources: s.sources ?? [],
-      openedAt: 0,
-      closedAt: 0,
-      notional: 1,
-      grossUsd: 0,
-      netUsd: 0,
-    })),
-  ),
-  (done, total, sym) => {
-    if (done % 10 === 0) process.stdout.write(`  candles ${done}/${total} (${sym})\n`);
-  },
+const run = await runSignalReplay(events, HOLD_H, (done, total, sym) => {
+  if (done % 10 === 0) process.stdout.write(`  candles ${done}/${total} (${sym})\n`);
+});
+const opt = run.opt;
+console.log(
+  `  candle days: ${candleStats.fetchedDays} fetched, ${candleStats.cachedDays} from cache (${process.env.COURT_CANDLE_CACHE ?? ".court-cache/candles"})`,
 );
 
 const f = (x: number, d = 1) => (Number.isFinite(x) ? x.toFixed(d) : "n/a");
 const L: string[] = [
   "# Signal Court: swarm signals, candle replay",
   "",
-  `${run.recorded} signal events (first per symbol/side per 2h, last ${DAYS} days); ${run.replayed} replayed to a result. Exits: ${JSON.stringify(run.exits)}. Not judged: ${JSON.stringify(run.skipped)}.`,
+  `${run.recorded} signal events (first per symbol/side per 2h, last ${DAYS} days); ${run.replayed} replayed to a result. Exits: ${JSON.stringify(run.exits)}. Not judged: ${JSON.stringify(run.skipped)}${run.unavailableSymbols.length ? ` (no candles: ${run.unavailableSymbols.join(", ")})` : ""}.`,
   `Rules: v1r 2% stop / 4% target, taker entry at the next 1m open after the signal, stop-first on ambiguous candles, ${HOLD_H}h time exit, ${(opt.feePerSide * 1e4).toFixed(1)} bps fee + ${(opt.slipPerSide * 1e4).toFixed(1)} bps slippage per leg, funding not modelled. Direction placebo: exact mirrored replay.`,
   "",
   "| hypothesis | verdict | events (episodes) | gross | net | net 95% CI | placebo p disc/hold | PF | win % | detectable edge |",
@@ -172,3 +132,20 @@ writeFileSync(
 );
 console.log(md);
 console.log(`\nreport: court-reports/signals-replay-${stamp}.md`);
+
+if (argv.includes("--write")) {
+  const url = cleanUrl(process.env.DATABASE_URL);
+  if (!url) {
+    console.error("signals-replay: --write needs DATABASE_URL.");
+    process.exit(1);
+  }
+  process.env.DATABASE_URL = url;
+  const r = await recordVerdicts(run.verdicts, run.docket);
+  console.log(`signals-replay: wrote ${r.written} verdicts to Neon.`);
+  if (r.refused.length) {
+    console.error(
+      `signals-replay: REFUSED ${r.refused.join(", ")} (registered under different rules).`,
+    );
+    process.exit(2);
+  }
+}

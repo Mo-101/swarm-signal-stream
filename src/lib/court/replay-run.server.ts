@@ -1,9 +1,11 @@
-// Shared SigmaLui replay runner: public Bybit candles + the fixed replay rules
-// in ./replay, judged by the Signal Court. Used by scripts/sigmalui-replay.ts
-// and by the dashboard's Court tab, so both always run the same code.
+// Shared replay runner: public Bybit candles + the fixed replay rules in
+// ./replay, judged by the Signal Court. Used by the replay scripts, the
+// runner's court sessions and the dashboard, so all run the same code.
 //
 // Server/runner only (network I/O). Never writes to the database.
 import { type CourtTrade, DEFAULT_RULES, type Hypothesis, judgeAll, type Verdict } from "./court";
+import { candleSource } from "./candles.server";
+import { docketForSignals, type SignalRow, toReplaySignals } from "./signals";
 import {
   type Candle,
   DEFAULT_REPLAY,
@@ -19,6 +21,8 @@ export interface ReplayRun {
   replayed: number;
   exits: Record<string, number>;
   skipped: Record<string, number>;
+  /** Symbols whose candles could not be fetched (delisted, renamed, not on Bybit). */
+  unavailableSymbols: string[];
   defaultBrackets: number;
   verdicts: Verdict[];
   trades: CourtTrade[];
@@ -44,28 +48,12 @@ export const REPLAY_DOCKET: Hypothesis[] = [
   },
 ];
 
-/** Public Bybit linear 1m candles over [from, to), paged 1000 at a time. */
-export async function fetchCandles(symbol: string, from: number, to: number): Promise<Candle[]> {
-  const out = new Map<number, Candle>();
-  for (let start = Math.floor(from / M) * M; start < to; start += 1000 * M) {
-    const end = Math.min(start + 1000 * M - 1, to);
-    const u = `https://api.bybit.com/v5/market/kline?category=linear&symbol=${symbol}&interval=1&start=${start}&end=${end}&limit=1000`;
-    const res = await fetch(u, { signal: AbortSignal.timeout(15_000) });
-    if (!res.ok) throw new Error(`kline HTTP ${res.status} for ${symbol}`);
-    const body = (await res.json()) as {
-      retCode: number;
-      retMsg: string;
-      result?: { list?: string[][] };
-    };
-    if (body.retCode !== 0) throw new Error(`kline ${symbol}: ${body.retMsg}`);
-    for (const k of body.result?.list ?? []) {
-      const t = Number(k[0]);
-      out.set(t, { t, o: +k[1], h: +k[2], l: +k[3], c: +k[4] });
-    }
-    await new Promise((r) => setTimeout(r, 120)); // stay well under public rate limits
-  }
-  return [...out.values()].sort((a, b) => a.t - b.t);
-}
+/** Default candle source: retries transient failures and caches closed days
+ *  on disk (COURT_CANDLE_CACHE, default .court-cache/candles). */
+const defaultSource = candleSource();
+export const fetchCandles = (symbol: string, from: number, to: number): Promise<Candle[]> =>
+  defaultSource.get(symbol, from, to);
+export const candleStats = defaultSource.stats;
 
 export async function runReplay(
   signals: ReplaySignal[],
@@ -85,6 +73,7 @@ export async function runReplay(
   const trades: CourtTrade[] = [];
   const skipped: Record<string, number> = {};
   const exits: Record<string, number> = {};
+  const unavailableSymbols: string[] = [];
   let defaultBrackets = 0;
   let done = 0;
   for (const [symbol, list] of bySymbol) {
@@ -96,6 +85,7 @@ export async function runReplay(
       ks = await getCandles(symbol, from, to);
     } catch {
       skipped["candles unavailable"] = (skipped["candles unavailable"] ?? 0) + list.length;
+      unavailableSymbols.push(symbol);
       continue;
     }
     for (const s of list) {
@@ -115,9 +105,29 @@ export async function runReplay(
     replayed: trades.length,
     exits,
     skipped,
+    unavailableSymbols: unavailableSymbols.sort(),
     defaultBrackets,
     verdicts: judgeAll(trades, docket, DEFAULT_RULES),
     trades,
     ranAt: new Date(now).toISOString(),
   };
+}
+
+/**
+ * Replay swarm signal events under v1r rules (2% stop, 4% target, taker entry
+ * at the next 1m open, `holdHours` time exit) and judge them with the signal
+ * docket: all, never-executed, per confidence bucket, per agent.
+ */
+export async function runSignalReplay(
+  events: SignalRow[],
+  holdHours = 48,
+  onProgress?: (done: number, total: number, symbol: string) => void,
+  getCandles: (symbol: string, from: number, to: number) => Promise<Candle[]> = fetchCandles,
+  now = Date.now(),
+): Promise<ReplayRun & { docket: Hypothesis[]; opt: ReplayOptions }> {
+  const opt: ReplayOptions = { ...DEFAULT_REPLAY, maxHoldMs: holdHours * 3600_000 };
+  const signals = toReplaySignals(events);
+  const docket = docketForSignals(signals);
+  const run = await runReplay(signals, getCandles, now, opt, docket, onProgress);
+  return { ...run, docket, opt };
 }

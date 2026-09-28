@@ -39,3 +39,4 @@ runner/.env
 .claude/
 court-reports/
 trades.json
+.court-cache/

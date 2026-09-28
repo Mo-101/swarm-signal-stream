@@ -16,6 +16,7 @@ import {
   type Verdict,
 } from "./court";
 import type { ReplaySignal } from "./replay";
+import { agreeingAgents, dayWindows, SIGNAL_BLOCK_MS, type SignalRow } from "./signals";
 
 /** Closed paper trades as court evidence. userId null = every account. */
 export async function loadClosedTrades(
@@ -102,6 +103,64 @@ export async function loadShadowTrades(userId: string | null): Promise<CourtTrad
       netUsd: r.net_usd == null ? (netBps / 1e4) * notional : Number(r.net_usd),
     } satisfies CourtTrade;
   });
+}
+
+/**
+ * Swarm signal events for the last `days` days: the first signal per
+ * (symbol, side) in each 2h block. Queried one UTC day at a time so a table
+ * with millions of rows never has to come back in one response.
+ */
+export async function loadSignalEvents(
+  userId: string | null,
+  days: number,
+  now = Date.now(),
+  onDay?: (i: number, total: number, rows: number) => void,
+): Promise<SignalRow[]> {
+  const sql = getNeonSql();
+  const blockSec = SIGNAL_BLOCK_MS / 1000;
+  const out: SignalRow[] = [];
+  const windows = dayWindows(days, now);
+  for (let i = 0; i < windows.length; i++) {
+    const from = new Date(windows[i][0]).toISOString();
+    const to = new Date(windows[i][1]).toISOString();
+    // The block is computed once in the subquery: Postgres requires DISTINCT ON
+    // and ORDER BY to use the identical expression, and two bound parameters
+    // with the same value do not count as identical.
+    const rows = (
+      userId
+        ? await sql`
+            SELECT DISTINCT ON (symbol, side, blk)
+                   id, symbol, side, confidence, executed, agents, created_at
+              FROM (SELECT id::text AS id, symbol, side, confidence::float8 AS confidence,
+                           executed, agents, created_at,
+                           floor(extract(epoch FROM created_at) / ${blockSec}) AS blk
+                      FROM signals
+                     WHERE user_id = ${userId} AND created_at >= ${from} AND created_at < ${to}) s
+             ORDER BY symbol, side, blk, created_at ASC`
+        : await sql`
+            SELECT DISTINCT ON (symbol, side, blk)
+                   id, symbol, side, confidence, executed, agents, created_at
+              FROM (SELECT id::text AS id, symbol, side, confidence::float8 AS confidence,
+                           executed, agents, created_at,
+                           floor(extract(epoch FROM created_at) / ${blockSec}) AS blk
+                      FROM signals
+                     WHERE created_at >= ${from} AND created_at < ${to}) s
+             ORDER BY symbol, side, blk, created_at ASC`
+    ) as Record<string, unknown>[];
+    for (const r of rows) {
+      out.push({
+        id: String(r.id),
+        symbol: String(r.symbol),
+        side: String(r.side),
+        confidence: Number(r.confidence),
+        executed: Boolean(r.executed),
+        createdAt: new Date(r.created_at as string).getTime(),
+        agrees: agreeingAgents(r.agents, String(r.side)),
+      });
+    }
+    onDay?.(i + 1, windows.length, rows.length);
+  }
+  return out.sort((a, b) => a.createdAt - b.createdAt);
 }
 
 /** Every recorded SigmaLui signal, oldest first. */
@@ -204,6 +263,24 @@ export async function loadVerdictHistory(days = 60): Promise<Record<string, Hist
       hi: r.hi == null ? null : Number(r.hi),
       mde: r.mde == null ? null : Number(r.mde),
     });
+  }
+  return out;
+}
+
+/** The most recent stored verdict for every hypothesis (from court sessions). */
+export async function loadLatestVerdicts(): Promise<
+  Record<string, Verdict & { judgedAt: string }>
+> {
+  const rows = (await getNeonSql()`
+    SELECT DISTINCT ON (hypothesis_id) hypothesis_id, detail, judged_at
+      FROM court_verdicts
+     ORDER BY hypothesis_id, judged_at DESC`) as Record<string, unknown>[];
+  const out: Record<string, Verdict & { judgedAt: string }> = {};
+  for (const r of rows) {
+    out[String(r.hypothesis_id)] = {
+      ...(r.detail as Verdict),
+      judgedAt: new Date(r.judged_at as string).toISOString(),
+    };
   }
   return out;
 }

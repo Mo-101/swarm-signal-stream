@@ -5,7 +5,8 @@
 // bets, each (symbol, side) keeps only its FIRST signal in each 2-hour block.
 // Each such signal event is then replayed against candles under v1r's own
 // rules (2% stop, 4% target, taker entry at the next 1m open), and the court
-// asks whether the swarm's direction call has an edge after costs.
+// asks whether the swarm's direction call has an edge after costs, overall,
+// by confidence bucket, and per agent (signals that agent voted for).
 //
 // Pure: no I/O.
 import { confBucket, CONF_BUCKETS, type CourtTrade, type Hypothesis } from "./court";
@@ -21,6 +22,27 @@ export interface SignalRow {
   confidence: number;
   executed: boolean;
   createdAt: number;
+  /** Agents whose own vote pointed the same way as the signal. */
+  agrees?: string[];
+}
+
+/** Agents that voted in the signal's direction, from signals.agents jsonb. */
+export function agreeingAgents(agents: unknown, side: string): string[] {
+  if (!agents || typeof agents !== "object") return [];
+  return Object.entries(agents as Record<string, { direction?: string }>)
+    .filter(([, v]) => v && typeof v === "object" && v.direction === side)
+    .map(([k]) => k)
+    .sort();
+}
+
+/** UTC day windows covering the last `days` days, oldest first. Each is a
+ *  multiple of the 2h block, so per-day DISTINCT ON equals the global one. */
+export function dayWindows(days: number, now: number): Array<[number, number]> {
+  const DAY = 86_400_000;
+  const end = Math.ceil(now / DAY) * DAY;
+  const out: Array<[number, number]> = [];
+  for (let d = end - days * DAY; d < end; d += DAY) out.push([d, d + DAY]);
+  return out;
 }
 
 /** First signal per (symbol, side, 2h block), oldest first. The SQL loader
@@ -51,7 +73,11 @@ export function toReplaySignals(rows: SignalRow[]): ReplaySignal[] {
       firstSeenAt: r.createdAt,
       admitted: r.executed,
       epoch: SIGNAL_EPOCH,
-      sources: [`conf:${confBucket(r.confidence)}`, r.executed ? "executed" : "not-executed"],
+      sources: [
+        `conf:${confBucket(r.confidence)}`,
+        r.executed ? "executed" : "not-executed",
+        ...(r.agrees ?? []).map((a) => `agent:${a}`),
+      ],
     }));
 }
 
@@ -78,5 +104,33 @@ export function buildSignalDocket(trades: CourtTrade[]): Hypothesis[] {
       select: (t) => t.sources.includes(`conf:${b.id}`),
     });
   }
+  const agents = [
+    ...new Set(trades.flatMap((t) => t.sources.filter((x) => x.startsWith("agent:")))),
+  ].sort();
+  for (const a of agents) {
+    d.push({
+      id: `signals:${a}`,
+      claim: `Swarm signals the ${a.slice("agent:".length)} agent voted for have a net edge`,
+      select: (t) => t.sources.includes(a),
+    });
+  }
   return d;
+}
+
+/** The signal docket for a set of replay inputs, before any outcome exists. */
+export function docketForSignals(signals: ReplaySignal[]): Hypothesis[] {
+  return buildSignalDocket(
+    signals.map((s) => ({
+      id: s.signalId,
+      symbol: s.symbol,
+      side: s.side,
+      epoch: SIGNAL_EPOCH,
+      sources: s.sources ?? [],
+      openedAt: 0,
+      closedAt: 0,
+      notional: 1,
+      grossUsd: 0,
+      netUsd: 0,
+    })),
+  );
 }

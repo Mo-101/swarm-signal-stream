@@ -302,19 +302,28 @@ async function main() {
   // append the verdicts, so the dashboard can show evidence accumulating.
   // Writes only to court_registry / court_verdicts. COURT_SNAPSHOT_HOURS=0 disables.
   const courtHours = Number(process.env.COURT_SNAPSHOT_HOURS ?? 6);
+  const courtSignalDays = Number(process.env.COURT_SIGNALS_DAYS ?? 14);
   let courtTimer: ReturnType<typeof setInterval> | null = null;
   let courtFirst: ReturnType<typeof setTimeout> | null = null;
   if (courtHours > 0) {
     const session = () =>
-      runCourtSnapshot(userId)
+      runCourtSnapshot(userId, { signalDays: courtSignalDays })
         .then((r) =>
           console.log(
             `[court] session: ${r.trades.judged} trades judged, ${r.trades.written} verdicts written` +
               (r.replay
                 ? `; replay ${r.replay.replayed}/${r.replay.signals} signals, ${r.replay.written} written`
                 : "") +
-              ([...r.trades.refused, ...(r.replay?.refused ?? [])].length
-                ? `; REFUSED (rules changed since registration): ${[...r.trades.refused, ...(r.replay?.refused ?? [])].join(", ")}`
+              (r.swarmSignals
+                ? `; swarm signals ${r.swarmSignals.replayed}/${r.swarmSignals.events} replayed, ${r.swarmSignals.written} written`
+                : "") +
+              (r.swarmSignalsError ? `; swarm signals FAILED: ${r.swarmSignalsError}` : "") +
+              ([
+                ...r.trades.refused,
+                ...(r.replay?.refused ?? []),
+                ...(r.swarmSignals?.refused ?? []),
+              ].length
+                ? `; REFUSED (rules changed since registration): ${[...r.trades.refused, ...(r.replay?.refused ?? []), ...(r.swarmSignals?.refused ?? [])].join(", ")}`
                 : ""),
           ),
         )

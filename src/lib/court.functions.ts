@@ -40,6 +40,9 @@ export interface CourtOverview {
   };
   /** Verdict snapshots per hypothesis (written by the runner's court sessions). */
   history: Record<string, HistoryPoint[]>;
+  /** Latest stored verdict per hypothesis: how the Court tab shows the heavy
+   *  replays (swarm signals, SigmaLui) without recomputing them per request. */
+  latest: Record<string, Verdict & { judgedAt: string }>;
   error: string | null;
 }
 
@@ -64,11 +67,13 @@ export const getCourtOverview = createServerFn({ method: "GET" })
       trades: { count: 0, shadowCount: 0, costUnrecorded: 0, epochs: [], verdicts: [] },
       evidence: { tableReady: false, total: 0, admitted: 0, last24h: 0, firstAt: null, recent: [] },
       history: {},
+      latest: {},
       error: null,
     };
     try {
       const { getNeonSql } = await import("@/lib/db/neon");
-      const { judgeTrades, loadVerdictHistory } = await import("@/lib/court/store.server");
+      const { judgeTrades, loadLatestVerdicts, loadVerdictHistory } =
+        await import("@/lib/court/store.server");
       const sql = getNeonSql();
 
       const t = await judgeTrades(context.userId);
@@ -81,6 +86,7 @@ export const getCourtOverview = createServerFn({ method: "GET" })
       };
       try {
         out.history = await loadVerdictHistory(60);
+        out.latest = await loadLatestVerdicts();
       } catch {
         // court_verdicts not created yet: history stays empty until schema.sql is applied.
       }

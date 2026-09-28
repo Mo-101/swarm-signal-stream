@@ -145,3 +145,71 @@ describe("shadow docket", () => {
     expect(v.find((x) => x.id === "shadow:all")!.n).toBe(6);
   });
 });
+
+describe("signal evidence helpers", () => {
+  it("extracts the agents that voted in the signal's direction", async () => {
+    const { agreeingAgents } = await import("../signals");
+    expect(
+      agreeingAgents(
+        {
+          Trend: { direction: "BUY", confidence: 0.8 },
+          MeanRev: { direction: "SELL", confidence: 0.6 },
+          Breakout: { direction: "BUY" },
+          junk: null,
+        },
+        "BUY",
+      ),
+    ).toEqual(["Breakout", "Trend"]);
+    expect(agreeingAgents(null, "BUY")).toEqual([]);
+  });
+
+  it("splits the window into whole UTC days aligned to 2h blocks", async () => {
+    const { dayWindows, SIGNAL_BLOCK_MS } = await import("../signals");
+    const now = Date.UTC(2026, 8, 28, 9, 30);
+    const w = dayWindows(3, now);
+    expect(w).toHaveLength(3);
+    expect(w[2][1]).toBe(Date.UTC(2026, 8, 29));
+    for (const [a, b] of w) {
+      expect(b - a).toBe(86_400_000);
+      expect(a % SIGNAL_BLOCK_MS).toBe(0);
+    }
+  });
+
+  it("adds one hypothesis per agent that voted, and replays end to end", async () => {
+    const { runSignalReplay } = await import("../replay-run.server");
+    const candles: Candle[] = Array.from({ length: 5000 }, (_, i) => {
+      const p = 100 + Math.sin(i / 90) * 3;
+      return { t: i * M, o: p, h: p + 0.05, l: p - 0.05, c: p };
+    });
+    const rows: SignalRow[] = Array.from({ length: 30 }, (_, i) => ({
+      id: `s${i}`,
+      symbol: i % 10 === 9 ? "GONEUSDT" : "SOLUSDT",
+      side: i % 2 ? "BUY" : "SELL",
+      confidence: 0.6 + (i % 4) * 0.1,
+      executed: false,
+      createdAt: i * 2 * H + 1,
+      agrees: i % 3 ? ["Trend"] : ["MeanRev", "Trend"],
+    }));
+    const run = await runSignalReplay(
+      rows,
+      24,
+      undefined,
+      async (sym) => {
+        if (sym === "GONEUSDT")
+          throw new Error("kline GONEUSDT: Not supported symbols (code 10001)");
+        return candles;
+      },
+      5000 * M,
+    );
+    const ids = run.docket.map((h) => h.id);
+    expect(ids).toEqual(
+      expect.arrayContaining(["signals:all", "signals:agent:Trend", "signals:agent:MeanRev"]),
+    );
+    expect(run.unavailableSymbols).toEqual(["GONEUSDT"]);
+    expect(run.skipped["candles unavailable"]).toBe(3);
+    expect(run.replayed).toBeGreaterThan(0);
+    expect(run.opt.maxHoldMs).toBe(24 * H);
+    const trend = run.verdicts.find((v) => v.id === "signals:agent:Trend")!;
+    expect(trend.n).toBe(run.replayed); // every replayed signal had Trend's vote
+  });
+});
