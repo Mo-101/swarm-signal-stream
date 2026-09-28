@@ -21,6 +21,8 @@ export default defineConfig({
       allowedHosts: [
         "alphatrade.mostarindustries.com",
         "alphaswarm.mostarindustries.com",
+        "alpha-swarm.mostarindustries.com",
+        ".mostarindustries.com",
       ],
     },
   },
