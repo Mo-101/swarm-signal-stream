@@ -4,7 +4,13 @@
 //
 // Server/runner only (network I/O). Never writes to the database.
 import { type CourtTrade, DEFAULT_RULES, type Hypothesis, judgeAll, type Verdict } from "./court";
-import { type Candle, DEFAULT_REPLAY, replaySignal, type ReplaySignal } from "./replay";
+import {
+  type Candle,
+  DEFAULT_REPLAY,
+  type ReplayOptions,
+  replaySignal,
+  type ReplaySignal,
+} from "./replay";
 
 const M = 60_000;
 
@@ -65,6 +71,9 @@ export async function runReplay(
   signals: ReplaySignal[],
   getCandles: (symbol: string, from: number, to: number) => Promise<Candle[]> = fetchCandles,
   now = Date.now(),
+  opt: ReplayOptions = DEFAULT_REPLAY,
+  docket: Hypothesis[] = REPLAY_DOCKET,
+  onProgress?: (done: number, total: number, symbol: string) => void,
 ): Promise<ReplayRun> {
   const bySymbol = new Map<string, ReplaySignal[]>();
   for (const s of signals) {
@@ -77,12 +86,11 @@ export async function runReplay(
   const skipped: Record<string, number> = {};
   const exits: Record<string, number> = {};
   let defaultBrackets = 0;
+  let done = 0;
   for (const [symbol, list] of bySymbol) {
+    onProgress?.(done++, bySymbol.size, symbol);
     const from = Math.min(...list.map((s) => s.firstSeenAt));
-    const to = Math.min(
-      now,
-      Math.max(...list.map((s) => s.firstSeenAt)) + DEFAULT_REPLAY.maxHoldMs + 2 * M,
-    );
+    const to = Math.min(now, Math.max(...list.map((s) => s.firstSeenAt)) + opt.maxHoldMs + 2 * M);
     let ks: Candle[];
     try {
       ks = await getCandles(symbol, from, to);
@@ -91,7 +99,7 @@ export async function runReplay(
       continue;
     }
     for (const s of list) {
-      const r = replaySignal(s, ks);
+      const r = replaySignal(s, ks, opt);
       if (!r.ok) {
         skipped[r.why] = (skipped[r.why] ?? 0) + 1;
         continue;
@@ -108,7 +116,7 @@ export async function runReplay(
     exits,
     skipped,
     defaultBrackets,
-    verdicts: judgeAll(trades, REPLAY_DOCKET, DEFAULT_RULES),
+    verdicts: judgeAll(trades, docket, DEFAULT_RULES),
     trades,
     ranAt: new Date(now).toISOString(),
   };

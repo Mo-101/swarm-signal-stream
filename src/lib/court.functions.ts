@@ -7,6 +7,9 @@
 import { createServerFn } from "@tanstack/react-start";
 import { requireAuth } from "@/lib/auth/auth-middleware";
 import type { CourtTrade, Verdict } from "@/lib/court/court";
+import type { HistoryPoint } from "@/lib/court/store.server";
+
+export type { HistoryPoint };
 
 export interface EvidenceRow {
   signalId: string;
@@ -22,6 +25,7 @@ export interface CourtOverview {
   judgedAt: string;
   trades: {
     count: number;
+    shadowCount: number;
     costUnrecorded: number;
     epochs: string[];
     verdicts: Verdict[];
@@ -34,6 +38,8 @@ export interface CourtOverview {
     firstAt: string | null;
     recent: EvidenceRow[];
   };
+  /** Verdict snapshots per hypothesis (written by the runner's court sessions). */
+  history: Record<string, HistoryPoint[]>;
   error: string | null;
 }
 
@@ -55,41 +61,29 @@ export const getCourtOverview = createServerFn({ method: "GET" })
   .handler(async ({ context }): Promise<CourtOverview> => {
     const out: CourtOverview = {
       judgedAt: new Date().toISOString(),
-      trades: { count: 0, costUnrecorded: 0, epochs: [], verdicts: [] },
+      trades: { count: 0, shadowCount: 0, costUnrecorded: 0, epochs: [], verdicts: [] },
       evidence: { tableReady: false, total: 0, admitted: 0, last24h: 0, firstAt: null, recent: [] },
+      history: {},
       error: null,
     };
     try {
       const { getNeonSql } = await import("@/lib/db/neon");
-      const { buildDocket, judgeAll } = await import("@/lib/court/court");
+      const { judgeTrades, loadVerdictHistory } = await import("@/lib/court/store.server");
       const sql = getNeonSql();
 
-      const rows = (await sql`
-        SELECT id::text, symbol, side, strategy_epoch, agents, opened_at, closed_at,
-               notional::float8 AS notional, gross_pnl::float8 AS gross, pnl::float8 AS net,
-               coalesce(fees, 0)::float8 AS fees, coalesce(funding, 0)::float8 AS funding
-          FROM paper_trades
-         WHERE user_id = ${context.userId} AND status = 'closed'
-           AND pnl IS NOT NULL AND closed_at IS NOT NULL
-         ORDER BY closed_at ASC`) as Record<string, unknown>[];
-      const trades: CourtTrade[] = rows.map((r) => {
-        if (Number(r.fees) === 0 && Number(r.funding) === 0) out.trades.costUnrecorded++;
-        return {
-          id: String(r.id),
-          symbol: String(r.symbol),
-          side: String(r.side),
-          epoch: String(r.strategy_epoch ?? "v1"),
-          sources: Object.keys((r.agents as Record<string, unknown>) ?? {}),
-          openedAt: new Date(r.opened_at as string).getTime(),
-          closedAt: new Date(r.closed_at as string).getTime(),
-          notional: Number(r.notional),
-          grossUsd: r.gross == null ? Number(r.net) : Number(r.gross),
-          netUsd: Number(r.net),
-        };
-      });
-      out.trades.count = trades.length;
-      out.trades.epochs = [...new Set(trades.map((t) => t.epoch))].sort();
-      out.trades.verdicts = trades.length ? judgeAll(trades, buildDocket(trades)) : [];
+      const t = await judgeTrades(context.userId);
+      out.trades = {
+        count: t.paperCount,
+        shadowCount: t.shadowCount,
+        costUnrecorded: t.costUnrecorded,
+        epochs: [...new Set(t.trades.map((x) => x.epoch))].filter((e) => e !== "shadow").sort(),
+        verdicts: t.verdicts,
+      };
+      try {
+        out.history = await loadVerdictHistory(60);
+      } catch {
+        // court_verdicts not created yet: history stays empty until schema.sql is applied.
+      }
 
       try {
         const [agg] = (await sql`
@@ -138,30 +132,14 @@ const REPLAY_TTL_MS = 10 * 60_000;
 export const runSigmaLuiReplay = createServerFn({ method: "POST" })
   .middleware([requireAuth])
   .handler(async (): Promise<ReplaySummary> => {
-    const { getNeonSql } = await import("@/lib/db/neon");
     const { runReplay } = await import("@/lib/court/replay-run.server");
-    const sql = getNeonSql();
-    const rows = (await sql`
-      SELECT signal_id, symbol, side, score::float8 AS score, entry_price::float8 AS entry,
-             stop_loss::float8 AS sl, take_profit::float8 AS tp, first_seen_at, admitted
-        FROM sigmalui_signals ORDER BY first_seen_at ASC`) as Record<string, unknown>[];
-    const key = `${rows.length}:${rows.length ? String(rows[rows.length - 1].signal_id) : ""}`;
+    const { loadSigmaLuiSignals } = await import("@/lib/court/store.server");
+    const signals = await loadSigmaLuiSignals();
+    const key = `${signals.length}:${signals.length ? signals[signals.length - 1].signalId : ""}`;
     if (replayCache && replayCache.key === key && Date.now() - replayCache.at < REPLAY_TTL_MS) {
       return { ...replayCache.value, cached: true };
     }
-    const run = await runReplay(
-      rows.map((r) => ({
-        signalId: String(r.signal_id),
-        symbol: String(r.symbol),
-        side: r.side === "SELL" ? "SELL" : "BUY",
-        score: r.score == null ? null : Number(r.score),
-        entry: r.entry == null ? null : Number(r.entry),
-        stopLoss: r.sl == null ? null : Number(r.sl),
-        takeProfit: r.tp == null ? null : Number(r.tp),
-        firstSeenAt: new Date(r.first_seen_at as string).getTime(),
-        admitted: Boolean(r.admitted),
-      })),
-    );
+    const run = await runReplay(signals);
     const value: ReplaySummary = {
       ranAt: run.ranAt,
       recorded: run.recorded,

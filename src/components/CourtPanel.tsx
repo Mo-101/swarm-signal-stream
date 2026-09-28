@@ -6,6 +6,7 @@ import {
   getCourtOverview,
   runSigmaLuiReplay,
   type CourtOverview,
+  type HistoryPoint,
   type ReplaySummary,
 } from "@/lib/court.functions";
 import type { Verdict } from "@/lib/court/court";
@@ -103,7 +104,64 @@ function CiBar({ v }: { v: Verdict }) {
   );
 }
 
-export function VerdictCard({ v }: { v: Verdict }) {
+/** How this hypothesis's evidence has moved across court sessions: the 95%
+ *  band against zero, and the detectable-edge line shrinking as trades accrue. */
+function HistoryLine({ points }: { points: HistoryPoint[] }) {
+  const pts = points.filter((p) => p.lo !== null && p.hi !== null && p.net !== null);
+  if (pts.length < 2) return null;
+  const W = 560;
+  const Ht = 56;
+  const vals = pts.flatMap((p) => [p.lo!, p.hi!, p.mde ?? 0, 0]);
+  const top = Math.max(...vals);
+  const bot = Math.min(...vals);
+  const pad = (top - bot) * 0.08 || 1;
+  const y = (b: number) => 4 + ((top + pad - b) / (top - bot + 2 * pad)) * (Ht - 8);
+  const x = (i: number) => (i / (pts.length - 1)) * W;
+  const band =
+    pts.map((p, i) => `${x(i)},${y(p.hi!)}`).join(" ") +
+    " " +
+    [...pts]
+      .reverse()
+      .map((p, i) => `${x(pts.length - 1 - i)},${y(p.lo!)}`)
+      .join(" ");
+  const line = (f: (p: HistoryPoint) => number | null) =>
+    pts.map((p, i) => (f(p) === null ? "" : `${i ? "L" : "M"}${x(i)},${y(f(p)!)}`)).join(" ");
+  return (
+    <div>
+      <svg
+        viewBox={`0 0 ${W} ${Ht}`}
+        className="h-14 w-full"
+        role="img"
+        aria-label="Evidence over time"
+      >
+        <polygon points={band} className="fill-muted-foreground/15" />
+        <line
+          x1={0}
+          x2={W}
+          y1={y(0)}
+          y2={y(0)}
+          className="stroke-muted-foreground"
+          strokeDasharray="2 2"
+        />
+        <path d={line((p) => p.net)} className="stroke-foreground" fill="none" strokeWidth={1.5} />
+        <path
+          d={line((p) => p.mde)}
+          className="stroke-amber-400"
+          fill="none"
+          strokeWidth={1}
+          strokeDasharray="4 3"
+        />
+      </svg>
+      <p className="text-[10px] text-muted-foreground">
+        {pts.length} sessions since {new Date(pts[0].t).toLocaleDateString()} · band = 95% interval
+        · dashed = detectable edge ({n1(pts[0].mde ?? NaN)} → {n1(pts[pts.length - 1].mde ?? NaN)}{" "}
+        bps) · trades {pts[0].n} → {pts[pts.length - 1].n}
+      </p>
+    </div>
+  );
+}
+
+export function VerdictCard({ v, history }: { v: Verdict; history?: HistoryPoint[] }) {
   const convicted = v.verdict === "CONVICTED";
   const failedBy = (key: string) => v.failed.find((f) => f.startsWith(`${key}:`));
   return (
@@ -123,6 +181,7 @@ export function VerdictCard({ v }: { v: Verdict }) {
       </div>
 
       <CiBar v={v} />
+      {history && <HistoryLine points={history} />}
 
       <div className="grid grid-cols-5 gap-2 text-[10px]">
         {[
@@ -187,7 +246,7 @@ export function CourtPanel() {
       setData((d) => ({
         ...(d ?? {
           judgedAt: new Date().toISOString(),
-          trades: { count: 0, costUnrecorded: 0, epochs: [], verdicts: [] },
+          trades: { count: 0, shadowCount: 0, costUnrecorded: 0, epochs: [], verdicts: [] },
           evidence: {
             tableReady: false,
             total: 0,
@@ -196,6 +255,7 @@ export function CourtPanel() {
             firstAt: null,
             recent: [],
           },
+          history: {},
         }),
         error: e instanceof Error ? e.message : String(e),
       }));
@@ -250,6 +310,8 @@ export function CourtView({
   onReplay: () => void;
 }) {
   const ev = data.evidence;
+  const paper = data.trades.verdicts.filter((v) => !v.id.startsWith("shadow:"));
+  const shadow = data.trades.verdicts.filter((v) => v.id.startsWith("shadow:"));
   const anyConvicted = data.trades.verdicts.some((v) => v.verdict === "CONVICTED");
 
   return (
@@ -293,10 +355,33 @@ export function CourtView({
           </p>
         )}
         <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
-          {data.trades.verdicts.map((v) => (
-            <VerdictCard key={v.id} v={v} />
+          {paper.map((v) => (
+            <VerdictCard key={v.id} v={v} history={data.history[v.id]} />
           ))}
         </div>
+      </section>
+
+      <section className="space-y-2">
+        <h3 className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">
+          Shadow book · {data.trades.shadowCount} untraded proposals, traded virtually
+        </h3>
+        <p className="text-[11px] text-muted-foreground">
+          Every proposal the broker refused (below the confidence gate, suppressed, blocked, or
+          halted) is traded on a fixed $1,000 notional against live marks with v1r brackets, fees
+          and funding. While trading is halted this is where the running strategy's evidence
+          accumulates. Direction test here is approximate (reversed gross, costs unchanged).
+        </p>
+        {shadow.length ? (
+          <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+            {shadow.map((v) => (
+              <VerdictCard key={v.id} v={v} history={data.history[v.id]} />
+            ))}
+          </div>
+        ) : (
+          <p className="rounded-md border border-border p-3 text-xs text-muted-foreground">
+            No closed shadow trades found for this account.
+          </p>
+        )}
       </section>
 
       <section className="space-y-2">
@@ -364,7 +449,7 @@ export function CourtView({
                 </p>
                 <div className="grid gap-3 md:grid-cols-3">
                   {run.verdicts.map((v) => (
-                    <VerdictCard key={v.id} v={v} />
+                    <VerdictCard key={v.id} v={v} history={data.history[v.id]} />
                   ))}
                 </div>
               </div>

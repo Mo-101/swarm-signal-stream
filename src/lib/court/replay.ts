@@ -36,6 +36,10 @@ export interface ReplaySignal {
   takeProfit: number | null;
   firstSeenAt: number;
   admitted: boolean;
+  /** Docket tags for the replayed trade. Default: SigmaLui admitted/not-admitted. */
+  sources?: string[];
+  /** Epoch tag for the replayed trade. Default "replay". */
+  epoch?: string;
 }
 
 export interface ReplayOptions {
@@ -135,8 +139,8 @@ export function replaySignal(
       id: sig.signalId,
       symbol: sig.symbol,
       side: sig.side,
-      epoch: "replay",
-      sources: ["sigmalui", sig.admitted ? "admitted" : "not-admitted"],
+      epoch: sig.epoch ?? "replay",
+      sources: sig.sources ?? ["sigmalui", sig.admitted ? "admitted" : "not-admitted"],
       openedAt: candles[entryIdx].t,
       closedAt: real.exitTime,
       notional: opt.notional,

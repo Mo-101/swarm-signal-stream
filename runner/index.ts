@@ -27,6 +27,7 @@ import { startHealthServer, type HealthStatus } from "./health";
 import { BinanceDemoCoordinator } from "./binance-runtime";
 import { SigmaLuiIngester } from "../src/lib/sigmalui-ingester";
 import { persistSigmaLuiSignal } from "../src/lib/db/sigmalui-store.server";
+import { runCourtSnapshot } from "../src/lib/court/snapshot.server";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
@@ -297,6 +298,34 @@ async function main() {
     console.log("[sigmalui] disabled via SIGMALUI_ENABLED");
   }
 
+  // Signal Court session: re-judge closed trades and the SigmaLui replay and
+  // append the verdicts, so the dashboard can show evidence accumulating.
+  // Writes only to court_registry / court_verdicts. COURT_SNAPSHOT_HOURS=0 disables.
+  const courtHours = Number(process.env.COURT_SNAPSHOT_HOURS ?? 6);
+  let courtTimer: ReturnType<typeof setInterval> | null = null;
+  let courtFirst: ReturnType<typeof setTimeout> | null = null;
+  if (courtHours > 0) {
+    const session = () =>
+      runCourtSnapshot(userId)
+        .then((r) =>
+          console.log(
+            `[court] session: ${r.trades.judged} trades judged, ${r.trades.written} verdicts written` +
+              (r.replay
+                ? `; replay ${r.replay.replayed}/${r.replay.signals} signals, ${r.replay.written} written`
+                : "") +
+              ([...r.trades.refused, ...(r.replay?.refused ?? [])].length
+                ? `; REFUSED (rules changed since registration): ${[...r.trades.refused, ...(r.replay?.refused ?? [])].join(", ")}`
+                : ""),
+          ),
+        )
+        .catch((e) =>
+          console.warn(`[court] session failed: ${e instanceof Error ? e.message : e}`),
+        );
+    courtFirst = setTimeout(session, 2 * 60_000);
+    courtTimer = setInterval(session, courtHours * 3600_000);
+    console.log(`[court] sessions every ${courtHours}h (first in 2 min)`);
+  }
+
   // The runner owns grid execution. The dashboard only writes intent.
   binanceDemo = new BinanceDemoCoordinator(runtime, supabase, userId);
   await binanceDemo.start();
@@ -355,6 +384,8 @@ async function main() {
     clearInterval(stallWatch);
     gridCoordinator.stop();
     sigmalui.stop();
+    if (courtFirst) clearTimeout(courtFirst);
+    if (courtTimer) clearInterval(courtTimer);
     binanceDemo?.stop();
     runtime.stop();
     await upsertHeartbeat(supabase, userId, startedAt, {

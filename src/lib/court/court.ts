@@ -231,12 +231,35 @@ function groupEpisodes(rows: Row[]): Row[][] {
 }
 
 /** Episode-clustered bootstrap of the trade-weighted mean net bps. */
+/** Per-episode totals: resampling cost scales with episodes, not trades. */
+interface EpisodeAgg {
+  n: number;
+  net: number;
+  flipped: number;
+}
+function aggregate(
+  rows: Array<{ net: number; episode: number; gross?: number; flippedNet?: number }>,
+): EpisodeAgg[] {
+  const m = new Map<number, EpisodeAgg>();
+  for (const r of rows) {
+    let g = m.get(r.episode);
+    if (!g) m.set(r.episode, (g = { n: 0, net: 0, flipped: 0 }));
+    g.n += 1;
+    g.net += r.net;
+    // exact mirrored outcome when a replay provides it; otherwise the
+    // approximation: direction reversed, costs unchanged
+    const gross = r.gross ?? r.net;
+    g.flipped += r.flippedNet !== undefined ? r.flippedNet : -gross - (gross - r.net);
+  }
+  return [...m.values()];
+}
+
 export function clusteredBootstrap(
   rows: { net: number; episode: number }[],
   draws: number,
   rng: () => number,
 ): number[] {
-  const eps = groupEpisodes(rows as Row[]);
+  const eps = aggregate(rows);
   const k = eps.length;
   const out: number[] = [];
   if (!k) return out;
@@ -245,34 +268,24 @@ export function clusteredBootstrap(
     let n = 0;
     for (let i = 0; i < k; i++) {
       const g = eps[Math.floor(rng() * k)];
-      for (const r of g) s += r.net;
-      n += g.length;
+      s += g.net;
+      n += g.n;
     }
     out.push(s / n);
   }
   return out.sort((a, b) => a - b);
 }
 
-/** Sign-flip placebo: direction randomised per episode, costs unchanged.
- *  Returns P(placebo mean net >= observed mean net). */
 export function signFlipP(rows: Row[], draws: number, rng: () => number): number {
   if (!rows.length) return 1;
-  const eps = groupEpisodes(rows);
+  const eps = aggregate(rows);
   const n = rows.length;
   const obs = mean(rows.map((r) => r.net));
   let ge = 0;
   for (let d = 0; d < draws; d++) {
     let s = 0;
-    for (const g of eps) {
-      const flipped = rng() < 0.5;
-      for (const r of g) {
-        if (!flipped) s += r.net;
-        else if (r.flippedNet !== undefined)
-          s += r.flippedNet; // exact, from replay
-        else s += -r.gross - (r.gross - r.net); // approximation: costs unchanged
-      }
-    }
-    if (s / n >= obs) ge++;
+    for (const g of eps) s += rng() < 0.5 ? g.flipped : g.net;
+    if (s / n >= obs - 1e-12) ge++;
   }
   return (1 + ge) / (1 + draws);
 }
@@ -450,30 +463,90 @@ function judgeOne(
   };
 }
 
-/** The docket: declared from which epochs and sources exist, never from outcomes. */
+/** Epoch tag for counterfactual shadow-book trades (see loadShadowTrades). */
+export const SHADOW_EPOCH = "shadow";
+
+/** Fixed confidence buckets for shadow trades, on the post-v2 0.5–1.0 scale.
+ *  Declared up front; never derived from outcomes. */
+export const CONF_BUCKETS: Array<{ id: string; lo: number; hi: number }> = [
+  { id: "<0.60", lo: -Infinity, hi: 0.6 },
+  { id: "0.60-0.70", lo: 0.6, hi: 0.7 },
+  { id: "0.70-0.80", lo: 0.7, hi: 0.8 },
+  { id: ">=0.80", lo: 0.8, hi: Infinity },
+];
+export const confBucket = (c: number) =>
+  CONF_BUCKETS.find((b) => c >= b.lo && c < b.hi)?.id ?? "unknown";
+
+const SHADOW_REASON_CLAIM: Record<string, string> = {
+  confidence: "below the confidence gate",
+  suppressed: "on a suppressed symbol",
+  blocked: "blocked by the broker (risk halt, no free slot, thin book)",
+  observer: "made in observer mode",
+};
+
+/**
+ * The docket: declared from which epochs, sources, shadow reasons and fixed
+ * confidence buckets exist, never from outcomes. Paper trades and shadow
+ * trades share one docket, so the deflation counts every hypothesis tested.
+ */
 export function buildDocket(trades: CourtTrade[]): Hypothesis[] {
-  const epochs = [...new Set(trades.map((t) => t.epoch))].sort();
-  const docket: Hypothesis[] = epochs.map((e) => ({
-    id: `epoch:${e}`,
-    claim: `Trades under strategy epoch ${e} have a net edge`,
-    select: (t) => t.epoch === e,
-  }));
-  if (trades.some((t) => t.sources.includes("sigmalui"))) {
+  const paper = trades.filter((t) => t.epoch !== SHADOW_EPOCH);
+  const shadow = trades.filter((t) => t.epoch === SHADOW_EPOCH);
+  const isPaper = (t: CourtTrade) => t.epoch !== SHADOW_EPOCH;
+  const docket: Hypothesis[] = [];
+
+  if (paper.length) {
+    for (const e of [...new Set(paper.map((t) => t.epoch))].sort()) {
+      docket.push({
+        id: `epoch:${e}`,
+        claim: `Trades under strategy epoch ${e} have a net edge`,
+        select: (t) => t.epoch === e,
+      });
+    }
+    if (paper.some((t) => t.sources.includes("sigmalui"))) {
+      docket.push({
+        id: "source:sigmalui",
+        claim: "SigmaLui-sourced trades have a net edge",
+        select: (t) => isPaper(t) && t.sources.includes("sigmalui"),
+      });
+      docket.push({
+        id: "source:internal",
+        claim: "Internal-swarm trades (no SigmaLui vote) have a net edge",
+        select: (t) => isPaper(t) && !t.sources.includes("sigmalui"),
+      });
+    }
     docket.push({
-      id: "source:sigmalui",
-      claim: "SigmaLui-sourced trades have a net edge",
-      select: (t) => t.sources.includes("sigmalui"),
-    });
-    docket.push({
-      id: "source:internal",
-      claim: "Internal-swarm trades (no SigmaLui vote) have a net edge",
-      select: (t) => !t.sources.includes("sigmalui"),
+      id: "all",
+      claim: "All closed trades together have a net edge",
+      select: isPaper,
     });
   }
-  docket.push({
-    id: "all",
-    claim: "All closed trades together have a net edge",
-    select: () => true,
-  });
+
+  if (shadow.length) {
+    docket.push({
+      id: "shadow:all",
+      claim: "Every swarm proposal the broker did not trade, traded virtually, has a net edge",
+      select: (t) => t.epoch === SHADOW_EPOCH,
+    });
+    const reasons = [
+      ...new Set(shadow.flatMap((t) => t.sources.filter((x) => x.startsWith("reason:")))),
+    ].sort();
+    for (const r of reasons) {
+      const name = r.slice("reason:".length);
+      docket.push({
+        id: `shadow:${r}`,
+        claim: `Untraded proposals ${SHADOW_REASON_CLAIM[name] ?? `with reason "${name}"`} have a net edge`,
+        select: (t) => t.epoch === SHADOW_EPOCH && t.sources.includes(r),
+      });
+    }
+    for (const b of CONF_BUCKETS) {
+      if (!shadow.some((t) => t.sources.includes(`conf:${b.id}`))) continue;
+      docket.push({
+        id: `shadow:conf:${b.id}`,
+        claim: `Untraded proposals with swarm confidence ${b.id} have a net edge`,
+        select: (t) => t.epoch === SHADOW_EPOCH && t.sources.includes(`conf:${b.id}`),
+      });
+    }
+  }
   return docket;
 }

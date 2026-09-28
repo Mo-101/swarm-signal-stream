@@ -4,6 +4,7 @@
 //   DATABASE_URL=... node scripts/halt-trading.mjs --status
 //   DATABASE_URL=... node scripts/halt-trading.mjs --halt   "v3 retired: edge below cost floor"
 //   DATABASE_URL=... node scripts/halt-trading.mjs --resume "v4 promoted"
+//        (refused unless the Signal Court has CONVICTED the strategy; see the gate below)
 //
 // What a halt does, precisely:
 //   * BLOCKS new entries — PaperBroker.submit rejects with the dedicated,
@@ -112,6 +113,70 @@ if (mode === "status") {
 }
 
 const target = mode === "halt";
+
+// ── Signal Court gate ─────────────────────────────────────────────────────
+//
+// Resuming means running the current STRATEGY_EPOCH's rules with paper money.
+// That is only allowed once the court has CONVICTED the hypothesis that the
+// strategy has an edge: the latest verdict for it (written by the runner's
+// court sessions or `scripts/court.ts --write`) must read CONVICTED.
+//
+//   --hypothesis=<id>          which verdict must be CONVICTED
+//                              (default: epoch:<STRATEGY_EPOCH>)
+//   --override-court "reason"  resume anyway. Printed loudly; use only with
+//                              a reason you would defend later.
+//
+// Halting is never gated: stopping is always allowed.
+if (mode === "resume") {
+  const epochSrc = await import("node:fs").then((fs) =>
+    fs.readFileSync(new URL("../src/lib/strategy-epoch.ts", import.meta.url), "utf8"),
+  );
+  const epoch = /export const STRATEGY_EPOCH = "([^"]+)"/.exec(epochSrc)?.[1] ?? "unknown";
+  const hypothesis =
+    argv.find((a) => a.startsWith("--hypothesis="))?.slice("--hypothesis=".length) ??
+    `epoch:${epoch}`;
+  const oi = argv.indexOf("--override-court");
+  const override = oi !== -1 ? (argv[oi + 1] ?? "").trim() : null;
+
+  let latest = null;
+  try {
+    const rows = await sql`
+      SELECT verdict, diagnosis, n_trades, judged_at
+        FROM court_verdicts WHERE hypothesis_id = ${hypothesis}
+       ORDER BY judged_at DESC LIMIT 1`;
+    latest = rows[0] ?? null;
+  } catch {
+    latest = null; // court tables not created yet
+  }
+
+  const convicted = latest?.verdict === "CONVICTED";
+  console.log(
+    `\n  Signal Court: ${hypothesis} -> ` +
+      (latest
+        ? `${latest.verdict} (${latest.n_trades} trades, ${latest.diagnosis}; judged ${new Date(latest.judged_at).toISOString()})`
+        : "no verdict on record"),
+  );
+  if (!convicted) {
+    if (override === null) {
+      console.error(
+        `\nhalt-trading: REFUSED. The court has not convicted ${hypothesis}, so resuming would\n` +
+          `  trade a strategy with no proven edge. Options:\n` +
+          `    - let the evidence accumulate and re-check the Court tab\n` +
+          `    - name a convicted hypothesis: --hypothesis=<id>\n` +
+          `    - resume anyway: --override-court "why this is acceptable"\n`,
+      );
+      process.exit(3);
+    }
+    if (!override) {
+      console.error(`\nhalt-trading: --override-court needs a reason.\n`);
+      process.exit(3);
+    }
+    console.warn(
+      `\n  !!! COURT OVERRIDDEN: resuming ${epoch} without a conviction.\n` +
+        `  !!! Reason given: ${override}\n`,
+    );
+  }
+}
 
 // An unscoped UPDATE would halt or resume EVERY account. That is harmless
 // while exactly one exists and a silent disaster the moment a second does:

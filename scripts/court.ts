@@ -10,11 +10,11 @@
 //
 // Every hypothesis on the docket is presumed to have NO edge until it answers
 // every charge in src/lib/court/court.ts. Reports land in court-reports/.
-import { createHash } from "node:crypto";
 import dns from "node:dns";
 import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import net from "node:net";
 import { neon } from "@neondatabase/serverless";
+import { hypothesisDigest, loadShadowTrades, recordVerdicts } from "../src/lib/court/store.server";
 import {
   buildDocket,
   type CourtTrade,
@@ -87,7 +87,18 @@ async function load(): Promise<Loaded> {
         netUsd: Number(r.net),
       } satisfies CourtTrade;
     });
-    return { trades, costUnrecorded, source: "neon:paper_trades" };
+    process.env.DATABASE_URL = url;
+    let shadow: CourtTrade[] = [];
+    try {
+      shadow = await loadShadowTrades(null);
+    } catch {
+      // no shadow_trades table on this database
+    }
+    return {
+      trades: [...trades, ...shadow],
+      costUnrecorded,
+      source: `neon:paper_trades (${trades.length}) + shadow_trades (${shadow.length})`,
+    };
   } catch (e) {
     console.error(`court: query failed (${scrub(String((e as Error).message))}).`);
     process.exit(1);
@@ -138,15 +149,7 @@ const { trades, costUnrecorded, source } = await load();
 if (arg("export")) writeFileSync(arg("export")!, JSON.stringify(trades));
 
 const docket = buildDocket(trades);
-const digests = Object.fromEntries(
-  docket.map((h) => [
-    h.id,
-    createHash("sha256")
-      .update(JSON.stringify({ id: h.id, claim: h.claim, rules: DEFAULT_RULES }))
-      .digest("hex")
-      .slice(0, 16),
-  ]),
-);
+const digests = Object.fromEntries(docket.map((h) => [h.id, hypothesisDigest(h, DEFAULT_RULES)]));
 const verdicts = judgeAll(trades, docket, DEFAULT_RULES);
 const md = report(verdicts, { n: trades.length, source, costUnrecorded, digests });
 
@@ -166,23 +169,13 @@ if (flag("write")) {
     console.error("court: --write needs DATABASE_URL.");
     process.exit(1);
   }
-  const sql = neon(url);
-  for (const h of docket) {
-    await sql`INSERT INTO court_registry (id, claim, digest) VALUES (${h.id}, ${h.claim}, ${digests[h.id]})
-              ON CONFLICT (id) DO NOTHING`;
-    const [row] = (await sql`SELECT digest FROM court_registry WHERE id = ${h.id}`) as {
-      digest: string;
-    }[];
-    if (row.digest !== digests[h.id]) {
-      console.error(
-        `court: '${h.id}' is registered as ${row.digest}, now ${digests[h.id]}. The rules changed after registration; refusing to write.`,
-      );
-      process.exit(2);
-    }
+  process.env.DATABASE_URL = url;
+  const r = await recordVerdicts(verdicts, docket, DEFAULT_RULES);
+  console.log(`court: wrote ${r.written} verdicts to Neon.`);
+  if (r.refused.length) {
+    console.error(
+      `court: REFUSED ${r.refused.join(", ")}: registered under different rules or claims. Register a new id instead.`,
+    );
+    process.exit(2);
   }
-  for (const x of verdicts) {
-    await sql`INSERT INTO court_verdicts (hypothesis_id, digest, verdict, diagnosis, n_trades, net_bps, net_ci_low, net_ci_high, dsr, detail)
-              VALUES (${x.id}, ${digests[x.id]}, ${x.verdict}, ${x.diagnosis}, ${x.n}, ${x.netBps}, ${x.netCi95[0]}, ${x.netCi95[1]}, ${x.dsr}, ${JSON.stringify(x)}::jsonb)`;
-  }
-  console.log(`court: wrote ${verdicts.length} verdicts to Neon.`);
 }
