@@ -318,6 +318,12 @@ async function main() {
                 ? `; swarm signals ${r.swarmSignals.replayed}/${r.swarmSignals.events} replayed, ${r.swarmSignals.written} written`
                 : "") +
               (r.swarmSignalsError ? `; swarm signals FAILED: ${r.swarmSignalsError}` : "") +
+              (r.shadowMirror ? `; shadow mirrors +${r.shadowMirror.mirrored}` : "") +
+              (r.shadowMirrorError ? `; shadow mirror FAILED: ${r.shadowMirrorError}` : "") +
+              (r.parole.length
+                ? `; on parole: ${r.parole.map((p) => `${p.id}=${p.status}`).join(", ")}`
+                : "") +
+              (r.retired.length ? `; RETIRED this session: ${r.retired.join(", ")}` : "") +
               ([
                 ...r.trades.refused,
                 ...(r.replay?.refused ?? []),

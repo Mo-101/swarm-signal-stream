@@ -174,4 +174,64 @@ describe.skipIf(!db)("court SQL against the real schema", () => {
     expect(s[0].firstSeenAt).toBe(now - H);
     expect(s[1].admitted).toBe(false);
   });
+
+  it("loads live signals for the board: latest per symbol/side with agents", async () => {
+    const { loadLiveSignals } = await import("../store.server");
+    // fixture swarm signals run from now-72h to now-22h
+    const live = await loadLiveSignals(U, 6, 40, now - 22 * H);
+    const swarm = live.filter((l) => l.source === "swarm");
+    expect(swarm.length).toBeGreaterThan(0);
+    const keys = new Set(swarm.map((l) => `${l.symbol}|${l.side}`));
+    expect(keys.size).toBe(swarm.length); // latest one per symbol/side
+    expect(swarm[0].price).toBe(100);
+    expect(swarm[0].agrees).toContain("Trend");
+    // SigmaLui evidence recorded earlier in this suite sits at now-1h and now
+    const recent = await loadLiveSignals(U, 6, 40, now + 60_000);
+    expect(
+      recent
+        .filter((l) => l.source === "sigmalui")
+        .map((l) => l.id)
+        .sort(),
+    ).toEqual(["x1", "x2"]);
+  });
+
+  it("mirrors shadow trades once and joins them into the loader", async () => {
+    const { loadShadowNeedingMirror, saveShadowMirrors, loadShadowTrades } =
+      await import("../store.server");
+    const todo = await loadShadowNeedingMirror(U);
+    expect(todo).toHaveLength(40);
+    await saveShadowMirrors(
+      U,
+      todo
+        .slice(0, 10)
+        .map((t, i) => ({ shadowId: t.shadowId, flippedGrossBps: i % 2 ? -150 : 300, note: null })),
+    );
+    await saveShadowMirrors(U, [
+      { shadowId: todo[10].shadowId, flippedGrossBps: null, note: "candles unavailable" },
+    ]);
+    expect(await loadShadowNeedingMirror(U)).toHaveLength(29);
+    const trades = await loadShadowTrades(U);
+    expect(trades.filter((t) => t.flippedNetUsd !== undefined)).toHaveLength(10);
+  });
+
+  it("derives conviction and retirement state from the verdict history", async () => {
+    const { loadCourtState } = await import("../store.server");
+    await db!.query(
+      `INSERT INTO court_registry (id, claim, digest) VALUES ('x:test','c','d') ON CONFLICT DO NOTHING`,
+    );
+    for (const [v, t] of [
+      ["NOT PROVEN", 1],
+      ["CONVICTED", 2],
+      ["CONVICTED", 3],
+      ["RETIRED", 4],
+    ] as const) {
+      await db!.query(
+        `INSERT INTO court_verdicts (hypothesis_id, digest, verdict, diagnosis, n_trades, detail, judged_at)
+         VALUES ('x:test','d',$1,'',1,'{}'::jsonb,$2)`,
+        [v, new Date(now + t * H).toISOString()],
+      );
+    }
+    const st = await loadCourtState();
+    expect(st["x:test"]).toEqual({ retiredAt: now + 4 * H });
+  });
 });

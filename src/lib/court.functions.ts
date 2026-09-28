@@ -7,6 +7,7 @@
 import { createServerFn } from "@tanstack/react-start";
 import { requireAuth } from "@/lib/auth/auth-middleware";
 import type { CourtTrade, Verdict } from "@/lib/court/court";
+import type { BoardRow, StoredVerdict } from "@/lib/court/board";
 import type { HistoryPoint } from "@/lib/court/store.server";
 
 export type { HistoryPoint };
@@ -26,6 +27,8 @@ export interface CourtOverview {
   trades: {
     count: number;
     shadowCount: number;
+    /** Shadow trades whose direction test is exact (mirror replayed). */
+    shadowExact: number;
     costUnrecorded: number;
     epochs: string[];
     verdicts: Verdict[];
@@ -64,7 +67,14 @@ export const getCourtOverview = createServerFn({ method: "GET" })
   .handler(async ({ context }): Promise<CourtOverview> => {
     const out: CourtOverview = {
       judgedAt: new Date().toISOString(),
-      trades: { count: 0, shadowCount: 0, costUnrecorded: 0, epochs: [], verdicts: [] },
+      trades: {
+        count: 0,
+        shadowCount: 0,
+        shadowExact: 0,
+        costUnrecorded: 0,
+        epochs: [],
+        verdicts: [],
+      },
       evidence: { tableReady: false, total: 0, admitted: 0, last24h: 0, firstAt: null, recent: [] },
       history: {},
       latest: {},
@@ -80,6 +90,7 @@ export const getCourtOverview = createServerFn({ method: "GET" })
       out.trades = {
         count: t.paperCount,
         shadowCount: t.shadowCount,
+        shadowExact: t.shadowExact,
         costUnrecorded: t.costUnrecorded,
         epochs: [...new Set(t.trades.map((x) => x.epoch))].filter((e) => e !== "shadow").sort(),
         verdicts: t.verdicts,
@@ -159,4 +170,44 @@ export const runSigmaLuiReplay = createServerFn({ method: "POST" })
     };
     replayCache = { key, at: Date.now(), value };
     return value;
+  });
+
+export interface SignalBoard {
+  at: string;
+  rows: BoardRow[];
+  surfaced: number;
+  leaderboard: StoredVerdict[];
+  judgedAny: boolean;
+  error: string | null;
+}
+
+/** Live signals with the court's standing attached, plus the closest-to-conviction ranking. */
+export const getSignalBoard = createServerFn({ method: "GET" })
+  .middleware([requireAuth])
+  .handler(async ({ context }): Promise<SignalBoard> => {
+    const out: SignalBoard = {
+      at: new Date().toISOString(),
+      rows: [],
+      surfaced: 0,
+      leaderboard: [],
+      judgedAny: false,
+      error: null,
+    };
+    try {
+      const { loadLiveSignals, loadLatestVerdicts } = await import("@/lib/court/store.server");
+      const { buildBoard, leaderboard } = await import("@/lib/court/board");
+      let latest: Record<string, StoredVerdict> = {};
+      try {
+        latest = await loadLatestVerdicts();
+      } catch {
+        // court tables not created yet
+      }
+      out.judgedAny = Object.keys(latest).length > 0;
+      out.rows = buildBoard(await loadLiveSignals(context.userId), latest);
+      out.surfaced = out.rows.filter((r) => r.standing === "SURFACED").length;
+      out.leaderboard = leaderboard(latest);
+    } catch (e) {
+      out.error = e instanceof Error ? e.message : String(e);
+    }
+    return out;
   });

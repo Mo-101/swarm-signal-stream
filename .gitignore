@@ -40,3 +40,4 @@ runner/.env
 court-reports/
 trades.json
 .court-cache/
+court-cache/

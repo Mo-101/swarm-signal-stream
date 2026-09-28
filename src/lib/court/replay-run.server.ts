@@ -124,10 +124,11 @@ export async function runSignalReplay(
   onProgress?: (done: number, total: number, symbol: string) => void,
   getCandles: (symbol: string, from: number, to: number) => Promise<Candle[]> = fetchCandles,
   now = Date.now(),
+  adjustDocket: (d: Hypothesis[]) => Hypothesis[] = (d) => d,
 ): Promise<ReplayRun & { docket: Hypothesis[]; opt: ReplayOptions }> {
   const opt: ReplayOptions = { ...DEFAULT_REPLAY, maxHoldMs: holdHours * 3600_000 };
   const signals = toReplaySignals(events);
-  const docket = docketForSignals(signals);
+  const docket = adjustDocket(docketForSignals(signals));
   const run = await runReplay(signals, getCandles, now, opt, docket, onProgress);
   return { ...run, docket, opt };
 }

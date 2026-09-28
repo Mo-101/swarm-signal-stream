@@ -487,3 +487,18 @@ CREATE TABLE IF NOT EXISTS sigmalui_signals (
   raw jsonb NOT NULL
 );
 CREATE INDEX IF NOT EXISTS sigmalui_signals_seen_idx ON sigmalui_signals (first_seen_at DESC);
+
+-- Exact direction test for shadow-book trades (Signal Court). One row per
+-- closed shadow trade: the gross bps its MIRROR (same entry and moment,
+-- opposite direction, same bracket distances and time limit) earned when
+-- replayed against candles. flipped_gross_bps NULL means the candles could not
+-- cover it (delisted symbol, gap); it is not retried. Written incrementally by
+-- the runner's court sessions; never touches shadow_trades itself.
+CREATE TABLE IF NOT EXISTS court_shadow_mirror (
+  user_id uuid NOT NULL,
+  shadow_id text NOT NULL,
+  flipped_gross_bps numeric,
+  note text,
+  computed_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (user_id, shadow_id)
+);

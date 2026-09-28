@@ -16,6 +16,9 @@ import {
   type Verdict,
 } from "./court";
 import type { ReplaySignal } from "./replay";
+import type { LiveSignal } from "./board";
+import { type CourtState, courtState, restartAfterRetirement } from "./parole";
+import type { ShadowForMirror } from "./shadow-mirror";
 import { agreeingAgents, dayWindows, SIGNAL_BLOCK_MS, type SignalRow } from "./signals";
 
 /** Closed paper trades as court evidence. userId null = every account. */
@@ -71,20 +74,24 @@ export async function loadShadowTrades(userId: string | null): Promise<CourtTrad
   const rows = (
     userId
       ? await sql`
-          SELECT shadow_id, symbol, side, reason, confidence::float8 AS confidence,
-                 notional::float8 AS notional, gross_bps::float8 AS gross_bps,
-                 net_bps::float8 AS net_bps, net_usd::float8 AS net_usd, opened_at, closed_at
-            FROM shadow_trades
-           WHERE user_id = ${userId} AND status = 'closed'
-             AND closed_at IS NOT NULL AND net_bps IS NOT NULL
-           ORDER BY closed_at ASC`
+          SELECT s.shadow_id, s.symbol, s.side, s.reason, s.confidence::float8 AS confidence,
+                 s.notional::float8 AS notional, s.gross_bps::float8 AS gross_bps,
+                 s.net_bps::float8 AS net_bps, s.net_usd::float8 AS net_usd, s.opened_at, s.closed_at,
+                 m.flipped_gross_bps::float8 AS flipped_gross_bps
+            FROM shadow_trades s
+            LEFT JOIN court_shadow_mirror m ON m.user_id = s.user_id AND m.shadow_id = s.shadow_id
+           WHERE s.user_id = ${userId} AND s.status = 'closed'
+             AND s.closed_at IS NOT NULL AND s.net_bps IS NOT NULL
+           ORDER BY s.closed_at ASC`
       : await sql`
-          SELECT shadow_id, symbol, side, reason, confidence::float8 AS confidence,
-                 notional::float8 AS notional, gross_bps::float8 AS gross_bps,
-                 net_bps::float8 AS net_bps, net_usd::float8 AS net_usd, opened_at, closed_at
-            FROM shadow_trades
-           WHERE status = 'closed' AND closed_at IS NOT NULL AND net_bps IS NOT NULL
-           ORDER BY closed_at ASC`
+          SELECT s.shadow_id, s.symbol, s.side, s.reason, s.confidence::float8 AS confidence,
+                 s.notional::float8 AS notional, s.gross_bps::float8 AS gross_bps,
+                 s.net_bps::float8 AS net_bps, s.net_usd::float8 AS net_usd, s.opened_at, s.closed_at,
+                 m.flipped_gross_bps::float8 AS flipped_gross_bps
+            FROM shadow_trades s
+            LEFT JOIN court_shadow_mirror m ON m.user_id = s.user_id AND m.shadow_id = s.shadow_id
+           WHERE s.status = 'closed' AND s.closed_at IS NOT NULL AND s.net_bps IS NOT NULL
+           ORDER BY s.closed_at ASC`
   ) as Record<string, unknown>[];
   return rows.map((r) => {
     const notional = Number(r.notional);
@@ -101,6 +108,12 @@ export async function loadShadowTrades(userId: string | null): Promise<CourtTrad
       notional,
       grossUsd: (grossBps / 1e4) * notional,
       netUsd: r.net_usd == null ? (netBps / 1e4) * notional : Number(r.net_usd),
+      // Exact mirror when a court session has replayed it: the mirrored gross,
+      // charged the same costs the real trade paid (gross - net).
+      flippedNetUsd:
+        r.flipped_gross_bps == null
+          ? undefined
+          : ((Number(r.flipped_gross_bps) - (grossBps - netBps)) / 1e4) * notional,
     } satisfies CourtTrade;
   });
 }
@@ -161,6 +174,53 @@ export async function loadSignalEvents(
     onDay?.(i + 1, windows.length, rows.length);
   }
   return out.sort((a, b) => a.createdAt - b.createdAt);
+}
+
+/** Closed shadow trades that no court session has mirrored yet, oldest first. */
+export async function loadShadowNeedingMirror(
+  userId: string | null,
+  limit = 5000,
+): Promise<ShadowForMirror[]> {
+  const sql = getNeonSql();
+  const rows = (
+    userId
+      ? await sql`
+          SELECT s.shadow_id, s.symbol, s.side, s.entry_price::float8 AS entry,
+                 s.stop_loss::float8 AS sl, s.take_profit::float8 AS tp, s.opened_at
+            FROM shadow_trades s
+            LEFT JOIN court_shadow_mirror m ON m.user_id = s.user_id AND m.shadow_id = s.shadow_id
+           WHERE s.user_id = ${userId} AND s.status = 'closed' AND m.shadow_id IS NULL
+           ORDER BY s.opened_at ASC LIMIT ${limit}`
+      : await sql`
+          SELECT s.shadow_id, s.symbol, s.side, s.entry_price::float8 AS entry,
+                 s.stop_loss::float8 AS sl, s.take_profit::float8 AS tp, s.opened_at, s.user_id::text AS uid
+            FROM shadow_trades s
+            LEFT JOIN court_shadow_mirror m ON m.user_id = s.user_id AND m.shadow_id = s.shadow_id
+           WHERE s.status = 'closed' AND m.shadow_id IS NULL
+           ORDER BY s.opened_at ASC LIMIT ${limit}`
+  ) as Record<string, unknown>[];
+  return rows.map((r) => ({
+    shadowId: String(r.shadow_id),
+    symbol: String(r.symbol),
+    side: String(r.side),
+    entry: Number(r.entry),
+    stop: Number(r.sl),
+    target: Number(r.tp),
+    openedAt: new Date(r.opened_at as string).getTime(),
+  }));
+}
+
+export async function saveShadowMirrors(
+  userId: string,
+  rows: Array<{ shadowId: string; flippedGrossBps: number | null; note: string | null }>,
+): Promise<void> {
+  const sql = getNeonSql();
+  for (const r of rows) {
+    await sql`
+      INSERT INTO court_shadow_mirror (user_id, shadow_id, flipped_gross_bps, note)
+      VALUES (${userId}, ${r.shadowId}, ${r.flippedGrossBps}, ${r.note})
+      ON CONFLICT (user_id, shadow_id) DO NOTHING`;
+  }
 }
 
 /** Every recorded SigmaLui signal, oldest first. */
@@ -267,6 +327,96 @@ export async function loadVerdictHistory(days = 60): Promise<Record<string, Hist
   return out;
 }
 
+/**
+ * Live signals for the Signal board: the latest swarm signal per (symbol,
+ * side) over the last `hours`, plus the latest SigmaLui feed signals.
+ */
+export async function loadLiveSignals(
+  userId: string | null,
+  hours = 6,
+  limit = 40,
+  nowMs = Date.now(),
+): Promise<LiveSignal[]> {
+  const sql = getNeonSql();
+  const since = new Date(nowMs - hours * 3600_000).toISOString();
+  const swarm = (
+    userId
+      ? await sql`
+          SELECT * FROM (
+            SELECT DISTINCT ON (symbol, side) id::text AS id, symbol, side,
+                   confidence::float8 AS confidence, price::float8 AS price, agents, created_at
+              FROM signals
+             WHERE user_id = ${userId} AND created_at >= ${since}
+             ORDER BY symbol, side, created_at DESC) s
+           ORDER BY created_at DESC LIMIT ${limit}`
+      : await sql`
+          SELECT * FROM (
+            SELECT DISTINCT ON (symbol, side) id::text AS id, symbol, side,
+                   confidence::float8 AS confidence, price::float8 AS price, agents, created_at
+              FROM signals
+             WHERE created_at >= ${since}
+             ORDER BY symbol, side, created_at DESC) s
+           ORDER BY created_at DESC LIMIT ${limit}`
+  ) as Record<string, unknown>[];
+  const out: LiveSignal[] = swarm.map((r) => ({
+    source: "swarm",
+    id: String(r.id),
+    symbol: String(r.symbol),
+    side: String(r.side),
+    confidence: Number(r.confidence),
+    price: r.price == null ? null : Number(r.price),
+    stopLoss: null,
+    takeProfit: null,
+    at: new Date(r.created_at as string).getTime(),
+    agrees: agreeingAgents(r.agents, String(r.side)),
+  }));
+  try {
+    const sig = (await sql`
+      SELECT signal_id, symbol, side, score::float8 AS score, entry_price::float8 AS entry,
+             stop_loss::float8 AS sl, take_profit::float8 AS tp, admitted, first_seen_at
+        FROM sigmalui_signals
+       WHERE first_seen_at >= ${since}
+       ORDER BY first_seen_at DESC LIMIT ${limit}`) as Record<string, unknown>[];
+    for (const r of sig) {
+      out.push({
+        source: "sigmalui",
+        id: String(r.signal_id),
+        symbol: String(r.symbol),
+        side: String(r.side),
+        confidence: r.score == null ? null : Number(r.score),
+        price: r.entry == null ? null : Number(r.entry),
+        stopLoss: r.sl == null ? null : Number(r.sl),
+        takeProfit: r.tp == null ? null : Number(r.tp),
+        at: new Date(r.first_seen_at as string).getTime(),
+        admitted: Boolean(r.admitted),
+      });
+    }
+  } catch {
+    // sigmalui_signals not created yet
+  }
+  return out;
+}
+
+/** Conviction and retirement state per hypothesis, from the whole verdict history. */
+export async function loadCourtState(): Promise<Record<string, CourtState>> {
+  try {
+    const rows = (await getNeonSql()`
+      SELECT hypothesis_id, verdict, judged_at FROM court_verdicts ORDER BY judged_at ASC`) as Record<
+      string,
+      unknown
+    >[];
+    return courtState(
+      rows.map((r) => ({
+        id: String(r.hypothesis_id),
+        verdict: String(r.verdict),
+        at: new Date(r.judged_at as string).getTime(),
+      })),
+    );
+  } catch {
+    return {}; // court tables not created yet
+  }
+}
+
 /** The most recent stored verdict for every hypothesis (from court sessions). */
 export async function loadLatestVerdicts(): Promise<
   Record<string, Verdict & { judgedAt: string }>
@@ -289,7 +439,7 @@ export async function loadLatestVerdicts(): Promise<
  * Judge closed paper trades AND closed shadow-book trades for one account, in
  * one session so the deflation counts every hypothesis on the docket.
  */
-export async function judgeTrades(userId: string | null) {
+export async function judgeTrades(userId: string | null, state?: Record<string, CourtState>) {
   const { trades: paper, costUnrecorded } = await loadClosedTrades(userId);
   let shadow: CourtTrade[] = [];
   try {
@@ -298,11 +448,13 @@ export async function judgeTrades(userId: string | null) {
     // shadow_trades not present on this database: judge paper trades alone.
   }
   const trades = [...paper, ...shadow];
-  const docket = buildDocket(trades);
+  // A retired hypothesis only counts evidence from after its retirement.
+  const docket = restartAfterRetirement(buildDocket(trades), state ?? (await loadCourtState()));
   return {
     trades,
     paperCount: paper.length,
     shadowCount: shadow.length,
+    shadowExact: shadow.filter((x) => x.flippedNetUsd !== undefined).length,
     costUnrecorded,
     docket,
     verdicts: trades.length ? judgeAll(trades, docket) : [],

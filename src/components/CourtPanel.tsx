@@ -1,6 +1,6 @@
 // Signal Court tab: every strategy epoch and signal source is on trial, and is
 // NOT PROVEN until it clears all eight charges. Read-only.
-import { useCallback, useEffect, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useState } from "react";
 import { useServerFn } from "@tanstack/react-start";
 import {
   getCourtOverview,
@@ -10,6 +10,7 @@ import {
   type ReplaySummary,
 } from "@/lib/court.functions";
 import type { Verdict } from "@/lib/court/court";
+import { SignalBoard } from "@/components/SignalBoard";
 
 const CHARGES: Array<{ key: string; label: string; what: string }> = [
   { key: "evidence", label: "Evidence", what: "enough trades to judge" },
@@ -184,7 +185,11 @@ export function VerdictCard({ v, history }: { v: Verdict; history?: HistoryPoint
         </div>
         <span
           className={`shrink-0 rounded px-2 py-0.5 text-[10px] font-semibold tracking-wide ${
-            convicted ? "bg-bull/15 text-bull" : "bg-muted text-muted-foreground"
+            convicted
+              ? "bg-bull/15 text-bull"
+              : v.verdict === "RETIRED"
+                ? "bg-bear/15 text-bear"
+                : "bg-muted text-muted-foreground"
           }`}
         >
           {v.verdict}
@@ -257,7 +262,14 @@ export function CourtPanel() {
       setData((d) => ({
         ...(d ?? {
           judgedAt: new Date().toISOString(),
-          trades: { count: 0, shadowCount: 0, costUnrecorded: 0, epochs: [], verdicts: [] },
+          trades: {
+            count: 0,
+            shadowCount: 0,
+            shadowExact: 0,
+            costUnrecorded: 0,
+            epochs: [],
+            verdicts: [],
+          },
           evidence: {
             tableReady: false,
             total: 0,
@@ -301,6 +313,7 @@ export function CourtPanel() {
       replayError={replayError}
       onRefresh={() => void refresh()}
       onReplay={() => void doReplay()}
+      board={<SignalBoard />}
     />
   );
 }
@@ -313,7 +326,9 @@ export function CourtView({
   replayError,
   onRefresh,
   onReplay,
+  board,
 }: {
+  board?: ReactNode;
   data: CourtOverview;
   run: ReplaySummary | null;
   busy: boolean;
@@ -349,6 +364,8 @@ export function CourtView({
           Re-judge
         </button>
       </div>
+
+      {board}
 
       {data.error && (
         <p className="rounded-md border border-bear/40 bg-bear/10 p-2 text-xs text-bear">
@@ -387,7 +404,9 @@ export function CourtView({
           Every proposal the broker refused (below the confidence gate, suppressed, blocked, or
           halted) is traded on a fixed $1,000 notional against live marks with v1r brackets, fees
           and funding. While trading is halted this is where the running strategy's evidence
-          accumulates. Direction test here is approximate (reversed gross, costs unchanged).
+          accumulates. Direction test: exact (mirrored trade replayed on candles) for{" "}
+          {data.trades.shadowExact} of {data.trades.shadowCount}; the rest use the approximation
+          (reversed gross, costs unchanged) until a court session mirrors them.
         </p>
         {shadow.length ? (
           <div className="grid gap-3 md:grid-cols-2 xl:grid-cols-3">

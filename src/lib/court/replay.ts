@@ -76,14 +76,19 @@ export function walk(
   stopPct: number,
   targetPct: number,
   maxHoldMs: number,
+  /** Fill price when the entry was not at the candle open (e.g. a live fill). */
+  entryPrice?: number,
+  /** When the position opened, if earlier than the entry candle; sets the deadline. */
+  openedAt?: number,
 ): Outcome | null {
-  const e = candles[entryIdx].o;
+  const e = entryPrice ?? candles[entryIdx].o;
   const stop = e * (1 - dir * stopPct);
   const target = e * (1 + dir * targetPct);
-  const deadline = candles[entryIdx].t + maxHoldMs;
+  const deadline = (openedAt ?? candles[entryIdx].t) + maxHoldMs;
   for (let i = entryIdx; i < candles.length; i++) {
     const k = candles[i];
     if (k.t >= deadline) {
+      if (i === entryIdx) return null; // no candle inside the holding window
       const prev = candles[i - 1];
       return {
         exitTime: prev.t + 60_000,

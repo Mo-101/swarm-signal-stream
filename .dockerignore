@@ -10,3 +10,6 @@ runner/.env
 *.log
 .DS_Store
 *.Zone.Identifier
+court-cache
+.court-cache
+court-reports

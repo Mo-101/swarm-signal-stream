@@ -89,7 +89,8 @@ export const DEFAULT_RULES: CourtRules = {
 export interface Verdict {
   id: string;
   claim: string;
-  verdict: "CONVICTED" | "NOT PROVEN";
+  /** RETIRED: was convicted, then the decay watch saw the edge fade (parole). */
+  verdict: "CONVICTED" | "NOT PROVEN" | "RETIRED";
   diagnosis: string;
   failed: string[];
   n: number;
